@@ -1,0 +1,34 @@
+[package]
+name = "gilamonster-agent"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "Apache-2.0"
+description = "The Gilamonster agent matrix — inherits newt-agent's chat + agentic-coding airframe and extends it into a Hermes/Thoon-style multi-agent matrix."
+repository = "https://github.com/Gilamonster-Foundation/gilamonster-agent"
+keywords = ["gilamonster", "agent", "matrix", "ocap", "coding-agent"]
+
+[[bin]]
+name = "gila"
+path = "src/main.rs"
+
+[dependencies]
+# --- Inherited from newt-agent (the "airframe") -------------------------------
+# newt-tui pulls the lean chat + agentic-coding TUI (and, transitively,
+# newt-core / newt-coder / newt-inference / newt-tools). gilamonster reuses it
+# directly and will extend it; "inherits and extends" is a published-crate dep,
+# not a fork.
+newt-tui = "0.6.5"
+# The object-capability identity layer — signed, attenuation-only AgentKey
+# caveats. Shared with newt so the whole matrix runs under one capability model.
+newt-identity = "0.6.5"
+
+# --- Local ---------------------------------------------------------------------
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
