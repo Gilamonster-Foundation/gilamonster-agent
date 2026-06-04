@@ -18,10 +18,10 @@ path = "src/main.rs"
 # newt-core / newt-coder / newt-inference / newt-tools). gilamonster reuses it
 # directly and will extend it; "inherits and extends" is a published-crate dep,
 # not a fork.
-newt-tui = "0.6.5"
+newt-tui = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev = "eb8c1bcd46352ad15a452d9c7b53e73325445705" }
 # The object-capability identity layer — signed, attenuation-only AgentKey
 # caveats. Shared with newt so the whole matrix runs under one capability model.
-newt-identity = "0.6.5"
+newt-identity = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev = "eb8c1bcd46352ad15a452d9c7b53e73325445705" }
 
 # --- Local ---------------------------------------------------------------------
 anyhow = "1"
