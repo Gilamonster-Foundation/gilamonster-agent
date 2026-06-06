@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/logos/gilly-256.png" alt="Gilly, the Gilamonster mascot" width="256" height="256">
+</p>
+
 # gilamonster-agent
 
 **The Gilamonster agent matrix.** It *inherits* [newt-agent](https://github.com/Gilamonster-Foundation/newt-agent)'s
@@ -46,6 +50,23 @@ multi-agent layer lands.
 
 newt-agent is deliberately scoped to chat + agentic coding (Codex/Claude-Code
 spirit, lean). **Additional features go here.** See `newt-agent#89`.
+
+## Contributing
+
+This project follows the Gilamonster
+[Centaur Developer](https://github.com/Gilamonster-Foundation/agents) style:
+human/agent teams contributing as a single unit, with a human always in the
+loop and agent contributions credited in the git record.
+
+- Rules template: [`rules/AGENTS.md`](https://github.com/Gilamonster-Foundation/agents/blob/main/rules/AGENTS.md)
+- Skills: [`rust-tdd`](https://github.com/Gilamonster-Foundation/agents/blob/main/skills/rust-tdd/SKILL.md),
+  [`pyo3-wrapping`](https://github.com/Gilamonster-Foundation/agents/blob/main/skills/pyo3-wrapping/SKILL.md)
+
+## Logos
+
+Meet **Gilly**, the Gilamonster mascot — mirrored here from the
+[agents](https://github.com/Gilamonster-Foundation/agents) repository at
+standard sizes under `docs/logos/` (`gilly-16.png` … `gilly-512.png`).
 
 ## License
 
