@@ -1,0 +1,94 @@
+#!/bin/bash
+#
+# Pre-push hook for gilamonster-agent
+#
+# Runs the same lint + test + coverage gates that CI runs, locally, before any
+# push reaches origin. If this passes, CI should pass too.
+#
+# Install: `just install-hooks` (or `git config core.hooksPath .githooks`)
+#
+# PIPELINE PARITY: this hook mirrors .github/workflows/ci.yml.
+#   - the agent-bridle stub guard below matches the lint job's guard step
+#   - `just check` matches the lint + test jobs (fmt + clippy + cargo test)
+#   - `just cov-ci` matches the coverage job (cargo llvm-cov with the 80% floor)
+# When editing this hook, update the workflow to match, and vice-versa.
+#
+# Do NOT skip this hook with `--no-verify`. If a check fails, fix the issue.
+#
+# TRANSPORT (newt-agent#276): this gate can outlive GitHub's SSH idle timeout.
+# For SSH remotes git opens the connection and reads the advertised refs BEFORE
+# running this hook, then sends the pack over that SAME connection afterwards —
+# by which time GitHub may have dropped the idle session, and git exits 141
+# (SIGPIPE) after the gate passed. `just install-hooks` therefore sets a
+# repo-local url."https://github.com/".pushInsteadOf "git@github.com:" so
+# pushes transport over HTTPS (a fresh request after the hook) while fetches
+# keep their configured URL. HTTPS push auth comes from a git credential
+# helper; if pushes prompt for a password, run `gh auth setup-git` once.
+
+set -e
+
+# Drain the ref list git writes to the hook's stdin so the gate commands below
+# don't inherit it, and git never takes SIGPIPE writing to a hook that exited
+# without reading.
+cat >/dev/null
+
+cd "$(git rev-parse --show-toplevel)"
+
+# Git exports its hook-time repo environment (GIT_DIR is absolute when pushing
+# from a linked worktree) into this process; it leaks into cargo test. Drop the
+# leak so the gates see the same world CI does.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+
+# Ensure ~/.cargo/bin is on PATH so cargo sub-commands resolve even when the
+# hook is invoked from an editor/GUI that doesn't source the shell profile.
+export PATH="$HOME/.cargo/bin:$PATH"
+
+if ! command -v just >/dev/null 2>&1; then
+    echo "pre-push: 'just' not found in PATH"
+    echo "          install via: cargo install just"
+    exit 1
+fi
+
+if ! command -v cargo-llvm-cov >/dev/null 2>&1; then
+    echo "pre-push: 'cargo-llvm-cov' not found in PATH"
+    echo "          install via: cargo install cargo-llvm-cov"
+    exit 1
+fi
+
+# Coverage gate: only runs when rustup llvm-tools-preview is available.
+# Homebrew Rust ships a different LLVM that reports lower line coverage,
+# causing spurious floor failures on macOS Homebrew installs; in that case CI
+# (GitHub Actions, rustup) remains the authoritative gate.
+SKIP_COV=0
+if command -v rustup >/dev/null 2>&1; then
+    if ! cargo llvm-cov --version >/dev/null 2>&1; then
+        echo "pre-push: rustup is present but llvm-tools-preview is not installed."
+        echo "          install via: rustup component add llvm-tools-preview"
+        exit 1
+    fi
+else
+    echo "[pre-push] WARNING: rustup not found (Homebrew Rust detected)."
+    echo "           Coverage gate skipped locally — CI is the authoritative gate."
+    SKIP_COV=1
+fi
+
+# Guard: never push a build patched onto the real brush shell (agent-bridle
+# `main`) — it reintroduces the brush git dep. gila replicates newt's
+# [patch.crates-io] block, so the same guard applies here.
+echo "[pre-push] checking agent-bridle patch is on the publishable stub branch..."
+if grep -Eq 'agent-bridle[a-z-]*[[:space:]]*= [{] git = "[^"]*agent-bridle", branch = "main"' Cargo.toml; then
+    echo "ERROR: [patch.crates-io] points agent-bridle at 'main' (real brush shell)." >&2
+    echo "       Switch it back to feat/stub-shell before pushing." >&2
+    exit 1
+fi
+echo "shell guard OK: agent-bridle patch is on the publishable stub branch."
+
+echo "[pre-push] running just check..."
+just check
+
+if [ "$SKIP_COV" -eq 0 ]; then
+    echo "[pre-push] running just cov-ci..."
+    just cov-ci
+fi
+
+echo "[pre-push] OK"
