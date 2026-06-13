@@ -60,6 +60,18 @@ toml = "0.8"
 # the two halves agree on the crossterm backend types.
 ratatui = "0.29"
 crossterm = "0.28"
+# --- PTY-hosted shell pane (#10, Tier B part 2) -------------------------------
+# There is no pseudo-terminal in std and crossterm/ratatui only own the *host*
+# terminal, not a spawned child's. `portable-pty` is the maintained, cross-
+# platform PTY crate (the same one wezterm uses): it spawns the human's real
+# `$SHELL` on a pty slave and hands back a master reader/writer + a resize
+# handle. `vt100` is the companion terminal-state parser: it interprets the
+# shell's raw output byte-stream (cursor moves, colours, scroll) into a screen
+# grid we map onto ratatui cells. Both are the standard, well-worn choice for
+# exactly this "host a real shell in a TUI pane" job; neither has a std
+# equivalent.
+portable-pty = "0.9"
+vt100 = "0.15"
 
 [dev-dependencies]
 # CLI integration tests: run the real `gila` binary and assert on its output.

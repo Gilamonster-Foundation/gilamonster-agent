@@ -27,6 +27,7 @@ use clap::{Parser, Subcommand};
 pub mod cowork;
 pub mod follow;
 pub mod hotseat;
+pub mod pty;
 
 /// The `gila` command-line surface. Parsed in `main`, re-exported here so the
 /// argv contract is unit-testable without launching the inherited TUI.

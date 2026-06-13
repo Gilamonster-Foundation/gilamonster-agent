@@ -140,13 +140,27 @@ async fn run_follow(
 /// and polls crossterm for input with a short timeout so the chat updates as the
 /// turn progresses while the UI stays responsive.
 ///
+/// The bottom pane hosts the human's **real** `$SHELL` on a pseudo-terminal
+/// ([`PtyShell`]): `ssh`, `vim`, `less` — the full command suite — run natively.
+/// Each frame this loop (1) refreshes the shell grid from the PTY's vt100 screen
+/// into the app, (2) feeds the shell's new output into the SAME #8
+/// [`ObservationChannel`] as `gila follow` (so the agent observes the human and
+/// assists, redaction-gated by construction), and (3) routes keystrokes by focus
+/// — to the chat input when the chat pane has focus, or, when `Ctrl-O` swaps
+/// focus to the shell pane, encoded straight to the PTY. The PTY resizes with the
+/// pane.
+///
 /// All decision logic (focus swap, input edit/submit, status transitions, the
-/// line mapping, the layout math, the guard's restore-on-drop) is unit-tested in
-/// `cowork.rs`; this function only wires those tested units to a real terminal,
-/// which is the carve-out the coverage gate excludes — the same shape `gila
-/// follow` uses for its live tail loop.
+/// vt100-grid → ratatui mapping, the key→PTY encoding, the resize math, the
+/// channel feed, the layout, both RAII guards' teardown-on-drop) is unit-tested
+/// in `cowork.rs` / `pty.rs`; this function only wires those tested units to a
+/// real terminal + a real shell, which is the carve-out the coverage gate
+/// excludes — the same shape `gila follow` uses for its live tail loop.
 fn run_cowork(path: Option<std::path::PathBuf>) -> anyhow::Result<()> {
     use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+    use gilamonster_agent::pty::{
+        encode_key, pty_shell_program, pty_size_for, screen_to_lines, PtyShell,
+    };
     use ratatui::backend::CrosstermBackend;
     use ratatui::Terminal;
 
@@ -183,27 +197,73 @@ fn run_cowork(path: Option<std::path::PathBuf>) -> anyhow::Result<()> {
 
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
 
+    // --- spawn the human's real shell on a PTY, sized to the shell pane -------
+    // Compute the shell pane's size from the current terminal area, then spawn
+    // the human's $SHELL (fallback /bin/bash) on a fresh pty. The PtyShell owns
+    // an RAII guard that kills the child + joins the reader thread on drop, so a
+    // clean quit, an error, or a panic never orphans the shell.
+    let initial_area = terminal.size()?;
+    let initial_rect = ratatui::layout::Rect::new(0, 0, initial_area.width, initial_area.height);
+    let shell_area = gilamonster_agent::cowork::split_panes(initial_rect).shell;
+    let mut shell = PtyShell::spawn(
+        &pty_shell_program(),
+        pty_size_for(shell_area),
+        path.as_deref(),
+    )?;
+    // The PTY's output also feeds the SAME #8 observation channel the chat side
+    // uses, so the agent observes the human's shell. We drain it via the source.
+    let mut pty_source = shell.observation_source();
+    let shared_screen = shell.shared();
+    // Track the last shell-pane size so we only resize the pty on a real change.
+    let mut last_shell_area = shell_area;
+
     let loop_result: anyhow::Result<()> = (|| {
         while !app.should_quit() {
             // 1. Pump the driver without blocking — the chat updates as the turn
             //    progresses.
             app.pump();
 
-            // 2. Draw the split. The whole render path lives in the tested
+            // 2. Drain the shell's new output into the #8 channel (redaction-gated
+            //    by construction) so the agent observes the human's activity.
+            gilamonster_agent::follow::follow_tick(app.channel(), &mut pty_source);
+
+            // 3. Refresh the shell pane from the PTY's current vt100 grid.
+            if let Ok(s) = shared_screen.lock() {
+                app.set_shell_lines(screen_to_lines(s.screen()));
+            }
+
+            // 4. Draw the split. The whole render path lives in the tested
             //    `render_frame`; this loop owns only the terminal + input.
             terminal.draw(|f| render_frame(&mut app, f))?;
 
-            // 3. Poll input non-blocking (short timeout keeps the pump cadence).
+            // 5. Resize the pty if the shell pane changed size (terminal resize).
+            let area = terminal.size()?;
+            let rect = ratatui::layout::Rect::new(0, 0, area.width, area.height);
+            let new_shell_area = gilamonster_agent::cowork::split_panes(rect).shell;
+            if new_shell_area != last_shell_area {
+                shell.resize(new_shell_area);
+                last_shell_area = new_shell_area;
+            }
+
+            // 6. Poll input non-blocking (short timeout keeps the pump cadence).
             if event::poll(Duration::from_millis(50))? {
                 if let Event::Key(key) = event::read()? {
                     if key.kind != KeyEventKind::Release {
                         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                        // Ctrl-Q always quits and Ctrl-O always swaps focus, from
+                        // EITHER pane — they are the cockpit's global keys.
                         match key.code {
-                            // Ctrl-Q quits.
                             KeyCode::Char('q') if ctrl => app.request_quit(),
-                            // Ctrl-O swaps focus between the panes.
                             KeyCode::Char('o') if ctrl => app.swap_focus(),
-                            // Enter submits the chat input (chat pane only).
+                            // When the SHELL pane has focus, every other key is the
+                            // human's input to their own shell: encode it and write
+                            // it to the pty master.
+                            _ if app.focus() == gilamonster_agent::cowork::Focus::Shell => {
+                                if let Some(bytes) = encode_key(key.code, key.modifiers) {
+                                    let _ = shell.write_input(&bytes);
+                                }
+                            }
+                            // Otherwise the chat pane owns the key.
                             KeyCode::Enter => {
                                 app.submit_input();
                             }
@@ -213,6 +273,11 @@ fn run_cowork(path: Option<std::path::PathBuf>) -> anyhow::Result<()> {
                         }
                     }
                 }
+            }
+
+            // 7. If the human exited their shell, leave cowork too.
+            if shell.has_exited() {
+                app.request_quit();
             }
         }
         Ok(())
