@@ -14,15 +14,16 @@ multi-agent matrix.
 > **separate binary**, not a plugin slot — which is why newt stays *opinionated,
 > not extensible*.
 
-## Status: v0.1 scaffold (build gated on newt-agent v0.6.5)
+## Status: v0.1 scaffold — builds against newt over a git dependency
 
-This is the v0.1 structure. It **builds once newt-agent v0.6.5 publishes its
-crates to crates.io** — currently **deferred** (the release is waiting on the
-local + enterprise/NVIDIA inference rework; the publish also has two open bugs:
-newt-agent#120, newt-agent#121). Until then `cargo build` will report
-`no matching package newt-tui 0.6.5`.
-
-The shape, once buildable:
+This is the v0.1 structure, and **it builds today.** gila is a **private
+binary**, not a published library, so it consumes newt over a **git
+dependency** pinned to a `newt-agent` `main` rev — *not* a crates.io version
+dep. (newt 0.6.x cannot publish `newt-core`/`newt-tui`/`newt-mcp-server` to
+crates.io while its agent-bridle stub-shell `[patch.crates-io]` git patch
+stands — see reubeno/brush#1184 and newt-agent's
+`docs/decisions/agent_bridle_publishing.md`. A binary never needs crates.io, so
+the git-dep is the correct *permanent* shape, not a stopgap.)
 
 ```bash
 gila code            # the inherited newt chat + agentic-coding TUI (the airframe)
@@ -32,10 +33,37 @@ gila matrix          # the extension layer — surfaces the inherited ocap ident
 `gila code` hands off to `newt_tui::run_code`; `gila matrix` is where the
 multi-agent layer lands.
 
-## What's inherited (published `newt-*` crates, v0.6.5)
+## Build
+
+```bash
+cargo build          # resolves the pinned newt git rev + the agent-bridle patch
+just check           # the gate: fmt + clippy -D warnings + test
+just cov-ci          # coverage gate (>= 80% line floor, inherited from newt)
+just install-hooks   # wire .githooks/pre-push (runs the gate before every push)
+```
+
+### Local dev against an in-flight newt checkout (the overlay)
+
+CI builds against the pinned `rev` in `Cargo.toml`. To iterate against a local
+`newt-agent` working tree instead, use the **git-ignored** `.cargo/config.toml`
+overlay — it `[patch]`-overrides the `newt-*` crates onto local paths:
+
+```bash
+just overlay-on      # cp .cargo/config.toml.template -> .cargo/config.toml
+# edit the paths in .cargo/config.toml if your newt-agent lives elsewhere
+cargo build          # now builds against the local newt tree
+just overlay-off     # drop the overlay; back to the pinned git rev (CI-equivalent)
+```
+
+`.cargo/config.toml` is in `.gitignore` and can never be committed, so CI is
+always reproducible from the pinned rev. Bump the rev in `Cargo.toml` to adopt
+a newer newt; keep gila's `[patch.crates-io]` agent-bridle block byte-for-byte
+in sync with newt's (delete both together once brush#1184 lands).
+
+## What's inherited (the `newt-*` crates, over git-dep)
 
 - `newt-tui` — the chat + agentic-coding TUI (and, transitively, `newt-core`,
-  `newt-coder`, `newt-inference`, `newt-tools`).
+  `newt-inference`, `newt-tools`, `newt-skills`, `newt-mcp-client`).
 - `newt-identity` — the per-user `UserKey` → session `AgentKey` → attenuated
   operating-key chain. The whole matrix runs under one capability model.
 

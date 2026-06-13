@@ -1,2 +1,12 @@
 /target
 Cargo.lock
+
+# Coverage artifact emitted by `just cov-ci` / the CI coverage job.
+/lcov.info
+
+# Local-dev cargo overlay: points the newt-* git deps at a local newt-agent
+# checkout (path override) for fast iteration. Git-ignored so CI always resolves
+# the pinned `rev` git dep in Cargo.toml, never a developer's local tree.
+# Copy .cargo/config.toml.template -> .cargo/config.toml and edit the path
+# (or run `just overlay-on`).
+/.cargo/config.toml

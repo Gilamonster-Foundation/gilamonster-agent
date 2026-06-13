@@ -14,21 +14,58 @@ path = "src/main.rs"
 
 [dependencies]
 # --- Inherited from newt-agent (the "airframe") -------------------------------
+# gila is a PRIVATE binary, not a published library — so it consumes newt over a
+# GIT dependency pinned to a newt-agent main rev, NOT a crates.io version dep.
+# newt 0.6.x cannot publish `newt-core`/`newt-tui`/`newt-mcp-server` to crates.io
+# while the agent-bridle stub-shell `[patch.crates-io]` git patch stands (brush
+# git dep → crates.io forbids it; see reubeno/brush#1184 and newt-agent's
+# docs/decisions/agent_bridle_publishing.md). A binary never needs crates.io, so
+# the git-dep is the correct permanent shape, not a stopgap. For LOCAL dev a
+# git-ignored `.cargo/config.toml` overlays these onto the local newt checkout
+# (see .cargo/config.toml.template); CI uses the pinned `rev` below.
+#
 # newt-tui pulls the lean chat + agentic-coding TUI (and, transitively,
-# newt-core / newt-coder / newt-inference / newt-tools). gilamonster reuses it
-# directly and will extend it; "inherits and extends" is a published-crate dep,
-# not a fork.
-newt-tui = "0.6.5"
+# newt-core / newt-inference / newt-tools / newt-skills / newt-mcp-client).
+# gilamonster reuses it directly and will extend it; "inherits and extends" is a
+# git dependency on a sibling repo, not a fork.
+newt-tui = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev = "d7842ab6c4201e0fa10d7b435486f2583a44f5b7" }
 # The object-capability identity layer — signed, attenuation-only AgentKey
 # caveats. Shared with newt so the whole matrix runs under one capability model.
-newt-identity = "0.6.5"
+newt-identity = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev = "d7842ab6c4201e0fa10d7b435486f2583a44f5b7" }
 
 # --- Local ---------------------------------------------------------------------
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 
+[dev-dependencies]
+# CLI integration tests: run the real `gila` binary and assert on its output.
+# Mirrors newt-agent's CLI test stack (assert_cmd + predicates). This is what
+# covers `main()` + the `matrix` arm so the coverage gate holds without faking
+# the inherited TUI launch (the only line left uncovered by design).
+assert_cmd = "2"
+predicates = "3"
+
 [profile.release]
 opt-level = 3
 lto = "thin"
 strip = true
+
+# ── Temporary patch: agent-bridle → crates.io transition ──────────────────────
+#
+# REPLICATED VERBATIM from newt-agent's top-level Cargo.toml. newt-tui
+# transitively depends on `agent-bridle = "0.1"` (a crates.io dep that is not yet
+# published — it lands only after agent-bridle PR #21 merges and brush#1184
+# unblocks the real confined shell). newt satisfies that registry dep from the
+# stub-shell branch via this `[patch.crates-io]` block; because gila consumes
+# newt over a git dep, gila's OWN dependency tree must carry the identical patch
+# or `agent-bridle 0.1` won't resolve. Keep this byte-for-byte in sync with
+# newt-agent's block — when newt deletes it (post-brush#1184 + agent-bridle
+# 0.1.0 on crates.io), delete it here too.
+# See: https://github.com/Gilamonster-Foundation/agent-bridle/issues/20
+
+[patch.crates-io]
+agent-bridle           = { git = "https://github.com/Gilamonster-Foundation/agent-bridle", branch = "feat/stub-shell" }
+agent-bridle-core      = { git = "https://github.com/Gilamonster-Foundation/agent-bridle", branch = "feat/stub-shell" }
+agent-bridle-tool-shell = { git = "https://github.com/Gilamonster-Foundation/agent-bridle", branch = "feat/stub-shell" }
+agent-bridle-tool-web  = { git = "https://github.com/Gilamonster-Foundation/agent-bridle", branch = "feat/stub-shell" }
