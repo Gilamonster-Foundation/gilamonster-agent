@@ -1,10 +1,12 @@
 //! End-to-end CLI tests for the `gila` binary.
 //!
 //! These run the real compiled binary (via `assert_cmd`) and assert on its
-//! stdout / exit status. They cover `main()` and the `matrix` subcommand arm —
-//! the shim lines that the pure unit tests in `src/lib.rs` can't reach. The
-//! only deliberately-uncovered line is the `gila code` hand-off to newt's
-//! interactive TUI (`newt_tui::run_code`), which cannot run headless in CI.
+//! stdout / exit status. They cover `main()`, the `matrix` arm, and the
+//! `follow` arm's no-typescript path — the shim lines that the pure unit tests
+//! in `src/lib.rs` / `src/follow.rs` can't reach. The deliberately-uncovered
+//! lines are the `gila code` hand-off to newt's interactive TUI
+//! (`newt_tui::run_code`) and the live `gila follow` tail/print loop, neither of
+//! which can run headless in CI.
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -53,7 +55,34 @@ fn help_flag_lists_subcommands() {
         .assert()
         .success()
         .stdout(predicate::str::contains("code"))
+        .stdout(predicate::str::contains("follow"))
         .stdout(predicate::str::contains("matrix"));
+}
+
+#[test]
+fn follow_help_describes_read_only_observation() {
+    gila()
+        .args(["follow", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Read-only"))
+        .stdout(predicate::str::contains("typescript"));
+}
+
+#[test]
+fn follow_with_no_typescript_prints_read_only_guidance() {
+    // An empty watch dir → no typescript to tail. The follow arm short-circuits
+    // BEFORE touching any inference backend, printing the read-only guidance and
+    // exiting cleanly. This exercises the binary's `Follow` arm headlessly.
+    let dir = tempfile::tempdir().expect("tempdir");
+    gila()
+        .args(["follow", "--dir"])
+        .arg(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("read-only"))
+        .stdout(predicate::str::contains("no typescript found"))
+        .stdout(predicate::str::contains("never drives your shell"));
 }
 
 #[test]

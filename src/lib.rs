@@ -24,6 +24,8 @@ use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 
+pub mod follow;
+
 /// The `gila` command-line surface. Parsed in `main`, re-exported here so the
 /// argv contract is unit-testable without launching the inherited TUI.
 #[derive(Parser, Debug)]
@@ -37,14 +39,25 @@ pub struct Cli {
     pub command: Option<Command>,
 }
 
-/// `gila` subcommands. `Code` inherits newt's TUI; `Matrix` is the (not-yet
-/// built) extension layer.
+/// `gila` subcommands. `Code` inherits newt's TUI; `Follow` is the read-only
+/// "follow me" shell observer; `Matrix` is the (not-yet built) extension layer.
 #[derive(Subcommand, Debug, PartialEq, Eq)]
 pub enum Command {
     /// Run the inherited newt chat + agentic-coding TUI (the airframe).
     Code {
         /// Optional working path.
         path: Option<PathBuf>,
+    },
+    /// Read-only "follow me": watch the human's own shell (a `script -F`
+    /// typescript) and let the agent comment, never driving the shell.
+    Follow {
+        /// Path to the `script -F` typescript to tail. When omitted, the newest
+        /// file in the watch directory is followed (see `--dir`).
+        logpath: Option<PathBuf>,
+        /// Directory to search for the newest typescript when `logpath` is
+        /// omitted. Defaults to the current directory.
+        #[arg(long)]
+        dir: Option<PathBuf>,
     },
     /// The multi-agent matrix — the extension layer (scaffold: not yet built).
     Matrix,
@@ -95,6 +108,36 @@ pub fn code_path(path: &Option<PathBuf>) -> Option<&Path> {
     path.as_deref()
 }
 
+/// Resolve the typescript `gila follow` will tail.
+///
+/// Threads the optional positional `logpath` and `--dir` into
+/// [`follow::locate_typescript`]: an explicit `logpath` wins (it need not exist
+/// yet — the tail waits for `script -F` to create it); otherwise the newest file
+/// in `dir` (defaulting to the current directory) is chosen. Pure resolution so
+/// the binary's `Follow` arm only has to act on the result.
+pub fn follow_target(logpath: &Option<PathBuf>, dir: &Option<PathBuf>) -> Option<PathBuf> {
+    let cwd = PathBuf::from(".");
+    let search_dir = dir.as_deref().unwrap_or(&cwd);
+    follow::locate_typescript(logpath.as_deref(), search_dir)
+}
+
+/// The text `gila follow` prints when it cannot locate a typescript to tail —
+/// the only side-effect-free arm of the command (the tailing loop itself is the
+/// binary's live, side-effecting work). Pure so the "no typescript found"
+/// message is unit-tested. The message states the read-only contract so the
+/// human knows the agent is a passenger, never a pilot.
+pub fn follow_no_target_report(dir: &Option<PathBuf>) -> String {
+    let cwd = PathBuf::from(".");
+    let search_dir = dir.as_deref().unwrap_or(&cwd);
+    format!(
+        "gila follow (read-only): no typescript found in {}.\n\
+         Start one with `script -F <file>` in another pane, then re-run\n\
+         `gila follow <file>` (or `gila follow --dir <dir>`). The agent only\n\
+         observes — it never drives your shell.\n",
+        search_dir.display()
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,6 +173,61 @@ mod tests {
     fn matrix_subcommand_parses() {
         let cli = Cli::parse_from(["gila", "matrix"]);
         assert_eq!(cli.effective_command(), Command::Matrix);
+    }
+
+    #[test]
+    fn follow_subcommand_bare_parses() {
+        let cli = Cli::parse_from(["gila", "follow"]);
+        assert_eq!(
+            cli.effective_command(),
+            Command::Follow {
+                logpath: None,
+                dir: None,
+            }
+        );
+    }
+
+    #[test]
+    fn follow_subcommand_with_logpath_and_dir_parses() {
+        let cli = Cli::parse_from(["gila", "follow", "/tmp/ts", "--dir", "/var/scripts"]);
+        assert_eq!(
+            cli.effective_command(),
+            Command::Follow {
+                logpath: Some(PathBuf::from("/tmp/ts")),
+                dir: Some(PathBuf::from("/var/scripts")),
+            }
+        );
+    }
+
+    #[test]
+    fn follow_target_prefers_explicit_logpath() {
+        let logpath = Some(PathBuf::from("/explicit/typescript"));
+        let got = follow_target(&logpath, &None).unwrap();
+        assert_eq!(got, PathBuf::from("/explicit/typescript"));
+    }
+
+    #[test]
+    fn follow_target_finds_newest_in_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let ts = dir.path().join("session.typescript");
+        std::fs::write(&ts, b"x").unwrap();
+        let got = follow_target(&None, &Some(dir.path().to_path_buf())).unwrap();
+        assert_eq!(got, ts);
+    }
+
+    #[test]
+    fn follow_target_none_when_dir_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(follow_target(&None, &Some(dir.path().to_path_buf())).is_none());
+    }
+
+    #[test]
+    fn follow_no_target_report_states_read_only_and_dir() {
+        let report = follow_no_target_report(&Some(PathBuf::from("/var/scripts")));
+        assert!(report.contains("read-only"));
+        assert!(report.contains("/var/scripts"));
+        assert!(report.contains("script -F"));
+        assert!(report.contains("never drives your shell"));
     }
 
     #[test]
