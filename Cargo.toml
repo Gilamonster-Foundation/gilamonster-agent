@@ -28,7 +28,7 @@ path = "src/main.rs"
 # newt-core / newt-inference / newt-tools / newt-skills / newt-mcp-client).
 # gilamonster reuses it directly and will extend it; "inherits and extends" is a
 # git dependency on a sibling repo, not a fork.
-newt-tui = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev = "d7842ab6c4201e0fa10d7b435486f2583a44f5b7" }
+newt-tui = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev = "81488ef9a57394c724eeff5518b36fe4bbc4c08a" }
 # The cowork foundation (newt PR #310 / issue #308): the redaction-gated
 # `ShellObservation` seam, the non-blocking `TurnDriver` (submit_observation /
 # submit / poll / cancel), and `transcript_lines`. `gila follow` consumes these
@@ -36,10 +36,10 @@ newt-tui = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev =
 # built once in newt-core, gila only feeds it. The attenuation-only `Caveats`
 # lattice (re-exported from newt-core) is what clamps follow to a read-only
 # posture. Same pinned rev as the rest of the airframe.
-newt-core = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev = "d7842ab6c4201e0fa10d7b435486f2583a44f5b7" }
+newt-core = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev = "81488ef9a57394c724eeff5518b36fe4bbc4c08a" }
 # The object-capability identity layer — signed, attenuation-only AgentKey
 # caveats. Shared with newt so the whole matrix runs under one capability model.
-newt-identity = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev = "d7842ab6c4201e0fa10d7b435486f2583a44f5b7" }
+newt-identity = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev = "81488ef9a57394c724eeff5518b36fe4bbc4c08a" }
 
 # --- Local ---------------------------------------------------------------------
 anyhow = "1"
@@ -96,19 +96,25 @@ strip = true
 
 # ── Temporary patch: agent-bridle → crates.io transition ──────────────────────
 #
-# REPLICATED VERBATIM from newt-agent's top-level Cargo.toml. newt-tui
-# transitively depends on `agent-bridle = "0.1"` (a crates.io dep that is not yet
-# published — it lands only after agent-bridle PR #21 merges and brush#1184
-# unblocks the real confined shell). newt satisfies that registry dep from the
-# stub-shell branch via this `[patch.crates-io]` block; because gila consumes
-# newt over a git dep, gila's OWN dependency tree must carry the identical patch
-# or `agent-bridle 0.1` won't resolve. Keep this byte-for-byte in sync with
-# newt-agent's block — when newt deletes it (post-brush#1184 + agent-bridle
-# 0.1.0 on crates.io), delete it here too.
+# Mirrors newt-agent's top-level `[patch.crates-io]`. newt-tui transitively
+# depends on `agent-bridle = "0.1"` (a crates.io dep that is not yet published —
+# it lands only after agent-bridle PR #21 merges and brush#1184 unblocks the
+# real confined shell). newt satisfies that registry dep from the stub-shell
+# branch; because gila consumes newt over a git dep, gila's OWN dependency tree
+# must carry the identical patch or `agent-bridle 0.1` won't resolve.
+#
+# We pin a fixed `rev` (not the floating `feat/stub-shell` branch newt's block
+# uses) because gila's Cargo.lock is .gitignored: without a pinned rev, a fresh
+# clone / CI build would resolve whatever the branch tip is at build time and
+# could silently drift away from what newt's release builds. This rev is exactly
+# the one newt's main Cargo.lock resolves the stub-shell branch to, so gila and
+# newt build the identical agent-bridle. Re-sync this rev whenever the newt pin
+# above advances and newt's lock moves agent-bridle. When newt deletes its patch
+# (post-brush#1184 + agent-bridle 0.1.0 on crates.io), delete this block too.
 # See: https://github.com/Gilamonster-Foundation/agent-bridle/issues/20
 
 [patch.crates-io]
-agent-bridle           = { git = "https://github.com/Gilamonster-Foundation/agent-bridle", branch = "feat/stub-shell" }
-agent-bridle-core      = { git = "https://github.com/Gilamonster-Foundation/agent-bridle", branch = "feat/stub-shell" }
-agent-bridle-tool-shell = { git = "https://github.com/Gilamonster-Foundation/agent-bridle", branch = "feat/stub-shell" }
-agent-bridle-tool-web  = { git = "https://github.com/Gilamonster-Foundation/agent-bridle", branch = "feat/stub-shell" }
+agent-bridle           = { git = "https://github.com/Gilamonster-Foundation/agent-bridle", rev = "f120fcbf31476d3bfb2db9f68463a67af1e3ec80" }
+agent-bridle-core      = { git = "https://github.com/Gilamonster-Foundation/agent-bridle", rev = "f120fcbf31476d3bfb2db9f68463a67af1e3ec80" }
+agent-bridle-tool-shell = { git = "https://github.com/Gilamonster-Foundation/agent-bridle", rev = "f120fcbf31476d3bfb2db9f68463a67af1e3ec80" }
+agent-bridle-tool-web  = { git = "https://github.com/Gilamonster-Foundation/agent-bridle", rev = "f120fcbf31476d3bfb2db9f68463a67af1e3ec80" }
