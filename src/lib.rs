@@ -26,6 +26,7 @@ use clap::{Parser, Subcommand};
 
 pub mod cowork;
 pub mod follow;
+pub mod hotseat;
 
 /// The `gila` command-line surface. Parsed in `main`, re-exported here so the
 /// argv contract is unit-testable without launching the inherited TUI.
@@ -67,6 +68,23 @@ pub enum Command {
     Cowork {
         /// Optional working path the cowork session runs against.
         path: Option<PathBuf>,
+    },
+    /// Open the **hotseat** on-call / triage cockpit: launch the inherited TUI
+    /// under a read-only / ack-only posture (newt's #307 named-permission-preset
+    /// FLOOR), with a triage runbook skill preloaded and **authenticated MCP
+    /// search via the modulex proxy** wired as a stdio tool surface. gila ships
+    /// the generic composition only — the enterprise search targets + credentials
+    /// live in the operator's private modulex config. Engage the floor with
+    /// `/mode hotseat` once the TUI is up.
+    Hotseat {
+        /// Optional working path the hotseat session runs against.
+        path: Option<PathBuf>,
+        /// Triage skill name to preload. Defaults to the generic
+        /// [`hotseat::DEFAULT_TRIAGE_SKILL`]; the skill *body* is operator config
+        /// on the newt skill search path. Also settable via
+        /// [`hotseat::TRIAGE_SKILL_ENV`].
+        #[arg(long)]
+        skill: Option<String>,
     },
     /// The multi-agent matrix — the extension layer (scaffold: not yet built).
     Matrix,
@@ -197,6 +215,30 @@ mod tests {
             cli.effective_command(),
             Command::Cowork {
                 path: Some(PathBuf::from("/tmp/project")),
+            }
+        );
+    }
+
+    #[test]
+    fn hotseat_subcommand_bare_parses() {
+        let cli = Cli::parse_from(["gila", "hotseat"]);
+        assert_eq!(
+            cli.effective_command(),
+            Command::Hotseat {
+                path: None,
+                skill: None,
+            }
+        );
+    }
+
+    #[test]
+    fn hotseat_subcommand_with_path_and_skill_parses() {
+        let cli = Cli::parse_from(["gila", "hotseat", "/tmp/incident", "--skill", "my-runbook"]);
+        assert_eq!(
+            cli.effective_command(),
+            Command::Hotseat {
+                path: Some(PathBuf::from("/tmp/incident")),
+                skill: Some("my-runbook".to_string()),
             }
         );
     }
