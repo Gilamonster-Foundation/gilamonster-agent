@@ -6,12 +6,13 @@
 //! Tier B is the cowork target: a tmux-style split — the **agent chat** on top,
 //! the **human's live interactive shell** on the bottom. This module lands the
 //! full-screen, non-blocking event-loop scaffold: the split layout, a focus
-//! indicator, a focus-swap hotkey, and a *placeholder* shell pane. The
-//! PTY-hosted shell that fills the bottom pane lands in the follow-up issue
-//! (#10); it plugs into the very same [`ObservationChannel`](crate::follow)
-//! seam `gila follow` already feeds, so #10 only has to add a PTY
-//! [`ObservationSource`](crate::follow::ObservationSource) — it does not
-//! restructure this app.
+//! indicator, a focus-swap hotkey, and the shell pane. Part 1 (#9) shipped this
+//! scaffold with a *placeholder* bottom pane; part 2 (#10) fills it with a real
+//! PTY-hosted shell — see [`crate::pty`] — which plugs into the very same
+//! [`ObservationChannel`](crate::follow) seam `gila follow` already feeds, by
+//! adding a PTY [`ObservationSource`](crate::follow::ObservationSource) rather
+//! than restructuring this app. The placeholder ([`SHELL_PLACEHOLDER`]) still
+//! shows until a shell is attached.
 //!
 //! ```text
 //!   ┌──────────────────────────────────────────────┐
@@ -233,6 +234,10 @@ pub struct CoworkApp {
     status: TurnState,
     /// Set once the human asks to quit; the live loop breaks on it.
     should_quit: bool,
+    /// The hosted shell's rendered grid for the bottom pane, refreshed each frame
+    /// from the PTY's vt100 screen. `None` until a shell is attached (#10) — then
+    /// the placeholder shows, preserving the #9 scaffold behaviour.
+    shell_lines: Option<Vec<Line<'static>>>,
 }
 
 /// A render-friendly snapshot of the turn driver's state for the status line.
@@ -276,6 +281,7 @@ impl CoworkApp {
             input: String::new(),
             status: TurnState::Idle,
             should_quit: false,
+            shell_lines: None,
         }
     }
 
@@ -384,6 +390,21 @@ impl CoworkApp {
         transcript_to_lines(self.channel.driver().transcript(), width)
     }
 
+    /// Install the hosted shell's freshly-rendered grid lines for the next frame.
+    /// The live loop calls this each tick with
+    /// [`crate::pty::screen_to_lines`] of the PTY screen; passing `Some` switches
+    /// the shell pane from the placeholder to the live shell.
+    pub fn set_shell_lines(&mut self, lines: Vec<Line<'static>>) {
+        self.shell_lines = Some(lines);
+    }
+
+    /// The shell pane's current lines, or `None` if no shell is attached yet
+    /// (the pane shows the placeholder). Read by [`render_frame`].
+    #[must_use]
+    pub fn shell_lines(&self) -> Option<&[Line<'static>]> {
+        self.shell_lines.as_deref()
+    }
+
     /// The status / help line text.
     #[must_use]
     pub fn status_line(&self) -> String {
@@ -408,6 +429,34 @@ fn border_style(pane: Focus, focus: Focus) -> Style {
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::DarkGray)
+    }
+}
+
+/// Build the bottom shell-pane widget: the live hosted-PTY grid when a shell is
+/// attached, or the [`SHELL_PLACEHOLDER`] before one is (`shell_lines` is `None`).
+///
+/// `shell_lines` are the [`crate::pty::screen_to_lines`] mapping of the PTY's
+/// vt100 grid — already styled with the shell's own colours. When present they
+/// fill the pane verbatim (no centering — a shell is top-left anchored); when
+/// absent the dim italic placeholder shows, exactly as in the #9 scaffold. The
+/// pane's border is the focus indicator. Pure over `(shell_lines, focus)`, so the
+/// PTY-grid → shell-pane composition is unit-testable with a `TestBackend`.
+#[must_use]
+fn shell_pane_widget(shell_lines: Option<&[Line<'static>]>, focus: Focus) -> Paragraph<'static> {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style(Focus::Shell, focus))
+        .title(" shell ");
+    match shell_lines {
+        Some(lines) => Paragraph::new(Text::from(lines.to_vec())).block(block),
+        None => Paragraph::new(Line::from(Span::styled(
+            SHELL_PLACEHOLDER,
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
+        )))
+        .alignment(Alignment::Center)
+        .block(block),
     }
 }
 
@@ -442,20 +491,8 @@ pub fn render_frame(app: &mut CoworkApp, frame: &mut Frame) {
     );
     frame.render_widget(chat, layout.chat);
 
-    // Bottom: the shell placeholder (#10 swaps in a real PTY here).
-    let shell = Paragraph::new(Line::from(Span::styled(
-        SHELL_PLACEHOLDER,
-        Style::default()
-            .fg(Color::DarkGray)
-            .add_modifier(Modifier::ITALIC),
-    )))
-    .alignment(Alignment::Center)
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(border_style(Focus::Shell, focus))
-            .title(" shell "),
-    );
+    // Bottom: the hosted PTY shell, or the placeholder before one is attached.
+    let shell = shell_pane_widget(app.shell_lines(), focus);
     frame.render_widget(shell, layout.shell);
 
     // Status / help line, with the live input echoed.
@@ -998,6 +1035,98 @@ mod tests {
         assert_eq!(shell_corner.style().fg, Some(Color::Cyan));
         let chat_corner = &buf[(layout.chat.x, layout.chat.y)];
         assert_eq!(chat_corner.style().fg, Some(Color::DarkGray));
+    }
+
+    // --- shell pane: placeholder vs live PTY grid ---------------------------
+
+    #[test]
+    fn shell_pane_shows_placeholder_when_no_shell_attached() {
+        // No shell lines installed (the #9 scaffold state) → the placeholder.
+        let w = shell_pane_widget(None, Focus::Chat);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(50, 6)).unwrap();
+        terminal.draw(|f| f.render_widget(w, f.area())).unwrap();
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(rendered.contains("PTY lands in #10"), "placeholder shown");
+        assert!(rendered.contains("shell"), "pane titled");
+    }
+
+    /// THE PTY-render test: a vt100 grid (mapped via the pty module) draws into
+    /// the shell pane, replacing the placeholder — proving the live shell content
+    /// reaches the bottom pane.
+    #[test]
+    fn shell_pane_draws_live_pty_grid() {
+        // Parse some shell output into a vt100 grid, map it to ratatui lines, and
+        // render it into the shell pane.
+        let mut parser = vt100::Parser::new(4, 30, 0);
+        parser.process(b"$ whoami\r\nhuman\r\n");
+        let lines = crate::pty::screen_to_lines(parser.screen());
+
+        let w = shell_pane_widget(Some(&lines), Focus::Shell);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(34, 8)).unwrap();
+        terminal.draw(|f| f.render_widget(w, f.area())).unwrap();
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(
+            rendered.contains("whoami"),
+            "live shell line drawn: {rendered}"
+        );
+        assert!(rendered.contains("human"), "shell output drawn");
+        assert!(
+            !rendered.contains("PTY lands in #10"),
+            "placeholder replaced by the live grid"
+        );
+    }
+
+    #[test]
+    fn app_shell_lines_default_none_then_settable() {
+        let mut a = app();
+        assert!(a.shell_lines().is_none(), "no shell attached by default");
+        a.set_shell_lines(vec![Line::from("$ ls")]);
+        let lines = a.shell_lines().expect("shell lines installed");
+        assert_eq!(lines.len(), 1);
+    }
+
+    /// A full `render_frame` with shell lines installed draws the live grid in the
+    /// bottom pane instead of the placeholder — the whole compose path with a PTY.
+    #[test]
+    fn render_frame_draws_live_shell_when_lines_present() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut a = app();
+        let mut parser = vt100::Parser::new(3, 30, 0);
+        parser.process(b"$ uname\r\nLinux\r\n");
+        a.set_shell_lines(crate::pty::screen_to_lines(parser.screen()));
+
+        let mut terminal = Terminal::new(TestBackend::new(60, 16)).unwrap();
+        terminal.draw(|f| render_frame(&mut a, f)).unwrap();
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(
+            rendered.contains("uname"),
+            "live shell content in the frame"
+        );
+        assert!(!rendered.contains("PTY lands in #10"), "placeholder gone");
+        // The chat pane is still drawn alongside.
+        assert!(rendered.contains("agent chat"));
     }
 
     // --- RAII teardown guard ------------------------------------------------
