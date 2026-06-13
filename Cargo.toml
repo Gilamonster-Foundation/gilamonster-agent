@@ -45,6 +45,13 @@ newt-identity = { git = "https://github.com/Gilamonster-Foundation/newt-agent", 
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
+# `gila hotseat` serializes the composed session config (the operator's config
+# overlaid with the read-only-triage preset, the hotseat mode, and the modulex
+# stdio MCP entry) to a per-session file and points $NEWT_CONFIG at it. newt's
+# `Config` is serde-shaped, so a single `toml::to_string` round-trips through
+# newt's own loader — gila never reimplements config writing. Pinned to the
+# version newt resolves transitively so the two halves agree on the serializer.
+toml = "0.8"
 # The rich-TUI surface lives HERE, not in newt: newt deliberately keeps its chat
 # a plain scroller (docs/decisions/plain_scroller_tui.md) and exposes transcript
 # render DATA only (newt_core::agentic::transcript_lines). gila is the rich-TUI

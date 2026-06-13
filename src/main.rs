@@ -21,6 +21,7 @@ use gilamonster_agent::cowork::{
 use gilamonster_agent::follow::{
     config_from_backend, drive_comment, follow_tick, FollowTick, ObservationChannel, TypescriptTail,
 };
+use gilamonster_agent::hotseat::{compose_hotseat_config, hotseat_notice, triage_skill_name};
 use gilamonster_agent::{
     code_path, follow_no_target_report, follow_target, matrix_report, Cli, Command,
 };
@@ -45,6 +46,14 @@ async fn main() -> anyhow::Result<()> {
         // testable logic lives in `cowork.rs`; this arm owns only the raw
         // terminal render/event loop, the by-design-uncovered tty surface.
         Command::Cowork { path } => run_cowork(path),
+        // Hotseat: the on-call / triage cockpit. Compose the read-only floor
+        // (#307 preset) + the triage skill + the modulex MCP search surface onto
+        // the operator's config, write it to a session file, point newt at it,
+        // and hand off to the inherited TUI. The operator engages the clamp with
+        // `/mode hotseat`. All composition logic is in `hotseat.rs` (unit-tested);
+        // this arm owns only the config write + TUI hand-off (the by-design-
+        // uncovered surface, same carve-out as `gila code`).
+        Command::Hotseat { path, skill } => run_hotseat(path, skill),
         // The matrix runs under the same inherited object-capability identity
         // as newt — surface where the operator key lives, then the scaffold
         // notice. The rendering is in `matrix_report` (unit-tested); here we
@@ -213,4 +222,52 @@ fn run_cowork(path: Option<std::path::PathBuf>) -> anyhow::Result<()> {
     // a no-op. (Drop would still fire on an error/panic path above.)
     guard.restore();
     loop_result
+}
+
+/// Launch the **hotseat** on-call / triage cockpit (binary-owned, side-effecting).
+///
+/// Composition lives in [`compose_hotseat_config`] (pure, unit-tested); this arm
+/// only performs the side effects the library can't:
+///
+/// 1. Resolve the operator's existing newt [`Config`](newt_core::Config) (their
+///    backends, skill search path, any MCP servers).
+/// 2. Resolve the triage skill name ([`triage_skill_name`]) and overlay the
+///    hotseat preset + mode + modulex MCP entry ([`compose_hotseat_config`]).
+/// 3. Serialize the composed config to a per-session file and point
+///    `$NEWT_CONFIG` at it — the highest-precedence config source newt resolves —
+///    so the inherited TUI sees the hotseat mode/preset/MCP alongside everything
+///    the operator already had.
+/// 4. Print the [`hotseat_notice`] (read-only contract + the `/mode hotseat`
+///    engage step) and hand off to newt's TUI exactly as `gila code` does.
+///
+/// The read-only authority FLOOR is engaged in-session with `/mode hotseat`
+/// (newt #307): the preset clamp is `meet`-ed into the session authority and
+/// wins over `--yolo` / session grants. The config write + TUI hand-off are the
+/// only by-design-uncovered lines (they need a real tty + a writable session
+/// dir); the composition they wrap is fully unit-tested in `hotseat.rs`.
+fn run_hotseat(path: Option<std::path::PathBuf>, skill: Option<String>) -> anyhow::Result<()> {
+    let skill = triage_skill_name(skill.as_deref());
+
+    // Start from the operator's resolved config so hotseat is an OVERLAY, not a
+    // replacement — their backends, skills path, and MCP servers carry through.
+    let base = newt_core::Config::resolve()?;
+    let composed = compose_hotseat_config(base, &skill);
+
+    // Serialize the composed config to a per-session file and point newt at it
+    // via $NEWT_CONFIG (its highest-precedence config source). Keyed on the PID
+    // so concurrent hotseat sessions don't collide.
+    let session_path =
+        std::env::temp_dir().join(format!("gila-hotseat-{}.toml", std::process::id()));
+    let toml = toml::to_string(&composed)
+        .map_err(|e| anyhow::anyhow!("failed to serialize hotseat session config: {e}"))?;
+    std::fs::write(&session_path, toml).map_err(|e| {
+        anyhow::anyhow!("failed to write hotseat session config {session_path:?}: {e}")
+    })?;
+    std::env::set_var("NEWT_CONFIG", &session_path);
+
+    print!("{}", hotseat_notice(&skill));
+
+    // Hand off to the inherited TUI exactly as `gila code` does; the operator
+    // engages the read-only floor in-session with `/mode hotseat`.
+    newt_tui::run_code(code_path(&path), false, None)
 }

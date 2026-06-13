@@ -59,7 +59,24 @@ fn help_flag_lists_subcommands() {
         .stdout(predicate::str::contains("code"))
         .stdout(predicate::str::contains("follow"))
         .stdout(predicate::str::contains("cowork"))
+        .stdout(predicate::str::contains("hotseat"))
         .stdout(predicate::str::contains("matrix"));
+}
+
+#[test]
+fn hotseat_help_describes_the_triage_cockpit() {
+    // `gila hotseat --help` exercises the clap registration of the new arm
+    // without launching the TUI (which needs a real tty). The help text should
+    // describe the on-call/triage cockpit, the read-only posture, the modulex
+    // MCP search surface, and the `--skill` flag — and name NO enterprise system.
+    gila()
+        .args(["hotseat", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("triage"))
+        .stdout(predicate::str::contains("read-only"))
+        .stdout(predicate::str::contains("modulex"))
+        .stdout(predicate::str::contains("--skill"));
 }
 
 #[test]
