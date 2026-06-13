@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 
+pub mod cowork;
 pub mod follow;
 
 /// The `gila` command-line surface. Parsed in `main`, re-exported here so the
@@ -58,6 +59,14 @@ pub enum Command {
         /// omitted. Defaults to the current directory.
         #[arg(long)]
         dir: Option<PathBuf>,
+    },
+    /// Open the **cowork** split-pane cockpit: agent chat (top) + the human's
+    /// live shell (bottom). Tier B/1 ships the non-blocking full-screen scaffold
+    /// with a placeholder shell pane; the PTY shell lands in #10. Separate from
+    /// `gila code` so the inherited SSH-safe inline REPL never regresses.
+    Cowork {
+        /// Optional working path the cowork session runs against.
+        path: Option<PathBuf>,
     },
     /// The multi-agent matrix — the extension layer (scaffold: not yet built).
     Matrix,
@@ -173,6 +182,23 @@ mod tests {
     fn matrix_subcommand_parses() {
         let cli = Cli::parse_from(["gila", "matrix"]);
         assert_eq!(cli.effective_command(), Command::Matrix);
+    }
+
+    #[test]
+    fn cowork_subcommand_bare_parses() {
+        let cli = Cli::parse_from(["gila", "cowork"]);
+        assert_eq!(cli.effective_command(), Command::Cowork { path: None });
+    }
+
+    #[test]
+    fn cowork_subcommand_with_path_parses() {
+        let cli = Cli::parse_from(["gila", "cowork", "/tmp/project"]);
+        assert_eq!(
+            cli.effective_command(),
+            Command::Cowork {
+                path: Some(PathBuf::from("/tmp/project")),
+            }
+        );
     }
 
     #[test]

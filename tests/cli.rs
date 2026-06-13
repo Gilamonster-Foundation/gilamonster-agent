@@ -5,8 +5,10 @@
 //! `follow` arm's no-typescript path — the shim lines that the pure unit tests
 //! in `src/lib.rs` / `src/follow.rs` can't reach. The deliberately-uncovered
 //! lines are the `gila code` hand-off to newt's interactive TUI
-//! (`newt_tui::run_code`) and the live `gila follow` tail/print loop, neither of
-//! which can run headless in CI.
+//! (`newt_tui::run_code`), the live `gila follow` tail/print loop, and the
+//! `gila cowork` full-screen render/event loop (`run_cowork`) — none of which
+//! can run headless in CI (they need a real tty). The cowork *logic* is unit-
+//! tested in `src/cowork.rs`; only the tty wiring is the carve-out.
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -56,7 +58,23 @@ fn help_flag_lists_subcommands() {
         .success()
         .stdout(predicate::str::contains("code"))
         .stdout(predicate::str::contains("follow"))
+        .stdout(predicate::str::contains("cowork"))
         .stdout(predicate::str::contains("matrix"));
+}
+
+#[test]
+fn cowork_help_describes_the_split_pane_cockpit() {
+    // `gila cowork --help` exercises the clap registration of the new arm
+    // without launching the full-screen TUI (which needs a real tty). The help
+    // text should describe the split cockpit and name its separation from
+    // `gila code`.
+    gila()
+        .args(["cowork", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("split-pane"))
+        .stdout(predicate::str::contains("chat"))
+        .stdout(predicate::str::contains("shell"));
 }
 
 #[test]
