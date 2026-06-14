@@ -45,6 +45,12 @@ newt-identity = { git = "https://github.com/Gilamonster-Foundation/newt-agent", 
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
+# newt's MCP client — `gila capabilities check` connects to a capability's MCP
+# server over the SAME stdio JSON-RPC transport the inherited TUI uses, so the
+# check exercises the real path, not a re-implementation. Same pinned rev.
+newt-mcp-client = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev = "81488ef9a57394c724eeff5518b36fe4bbc4c08a" }
+# `gila capabilities check` builds tool-call arguments and reads MCP results.
+serde_json = "1"
 # `gila hotseat` serializes the composed session config (the operator's config
 # overlaid with the read-only-triage preset, the hotseat mode, and the modulex
 # stdio MCP entry) to a per-session file and points $NEWT_CONFIG at it. newt's
