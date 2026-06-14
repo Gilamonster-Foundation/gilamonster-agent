@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 
+pub mod capabilities;
 pub mod cowork;
 pub mod follow;
 pub mod hotseat;
@@ -87,8 +88,33 @@ pub enum Command {
         #[arg(long)]
         skill: Option<String>,
     },
+    /// Discover and exercise installed Gilamonster **capabilities** — pip-installed
+    /// `gila-cap-*` packages that expose tools over MCP. The host side of the
+    /// capability framework (see `Gilamonster-Foundation/gilamonster-capabilities`).
+    Capabilities {
+        #[command(subcommand)]
+        cmd: CapabilitiesCmd,
+    },
     /// The multi-agent matrix — the extension layer (scaffold: not yet built).
     Matrix,
+}
+
+/// `gila capabilities` subcommands.
+#[derive(Subcommand, Debug, PartialEq, Eq)]
+pub enum CapabilitiesCmd {
+    /// List installed capabilities (the `gilamonster.capabilities` entry points).
+    List,
+    /// Connect to a capability's MCP server and exercise its tools (the
+    /// end-to-end check that it works through gila).
+    Check {
+        /// Capability name, e.g. `mogul`.
+        name: String,
+    },
+    /// Print the `[[mcp_servers]]` snippet that wires a capability into sessions.
+    Enable {
+        /// Capability name, e.g. `mogul`.
+        name: String,
+    },
 }
 
 impl Cli {

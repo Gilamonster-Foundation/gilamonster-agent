@@ -23,7 +23,8 @@ use gilamonster_agent::follow::{
 };
 use gilamonster_agent::hotseat::{compose_hotseat_config, hotseat_notice, triage_skill_name};
 use gilamonster_agent::{
-    code_path, follow_no_target_report, follow_target, matrix_report, Cli, Command,
+    capabilities, code_path, follow_no_target_report, follow_target, matrix_report,
+    CapabilitiesCmd, Cli, Command,
 };
 use newt_core::agentic::{TurnDriver, TurnDriverConfig};
 use newt_core::MemMessage;
@@ -54,6 +55,16 @@ async fn main() -> anyhow::Result<()> {
         // this arm owns only the config write + TUI hand-off (the by-design-
         // uncovered surface, same carve-out as `gila code`).
         Command::Hotseat { path, skill } => run_hotseat(path, skill),
+        // Capabilities: the host side of the capability framework. `list`
+        // enumerates installed gila-cap-* packages, `check` connects to one over
+        // newt's real MCP client and exercises it, `enable` prints the wiring
+        // snippet. Logic lives in `capabilities.rs`; `check` owns the live MCP
+        // round-trip (the by-design-uncovered subprocess surface).
+        Command::Capabilities { cmd } => match cmd {
+            CapabilitiesCmd::List => capabilities::list(),
+            CapabilitiesCmd::Check { name } => capabilities::check(&name).await,
+            CapabilitiesCmd::Enable { name } => capabilities::enable(&name),
+        },
         // The matrix runs under the same inherited object-capability identity
         // as newt — surface where the operator key lives, then the scaffold
         // notice. The rendering is in `matrix_report` (unit-tested); here we
