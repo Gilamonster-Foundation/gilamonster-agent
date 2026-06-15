@@ -32,6 +32,16 @@ build:
 release:
     cargo build --release
 
+# Install the `gila` release binary to DEST (default: ~/bin).
+# Override: just install /usr/local/bin
+[unix]
+install dest=`echo $HOME/bin`:
+    cargo build --release --bin gila
+    mkdir -p {{dest}}
+    cp target/release/gila {{dest}}/gila
+    @echo "Installed: {{dest}}/gila"
+    @case ":$PATH:" in *":{{dest}}:"*) ;; *) echo "Note: {{dest}} is not in PATH — add:  export PATH={{dest}}:\$PATH" ;; esac
+
 # Remove all Cargo build artefacts.
 clean:
     cargo clean
