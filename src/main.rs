@@ -29,8 +29,36 @@ use gilamonster_agent::{
 use newt_core::agentic::{TurnDriver, TurnDriverConfig};
 use newt_core::MemMessage;
 
+/// Point newt-tui's brand seam at gila's own splash assets so `gila code` shows
+/// the gilamonster silhouette (docs/logos/gilly-*.txt) and "gilamonster"
+/// wordmark instead of newt's. Each var is set only if the operator hasn't
+/// already, so an explicit environment override still wins.
+///
+/// Activation note: this consumes the runtime brand seam added in newt-agent
+/// (PR #355 — NEWT_BRAND_LOGO_DIR/PREFIX/NAME/TAGLINE/PLUGINS). It takes visible
+/// effect once the inherited `newt-tui` git dep is re-pinned to a rev that
+/// includes that seam; until then these are inert env vars newt-tui ignores —
+/// harmless, and compiles against the current pin.
+#[allow(unused_unsafe)]
+fn set_brand_defaults() {
+    let set = |k: &str, v: &str| {
+        if std::env::var_os(k).is_none() {
+            // SAFETY: single-threaded — runs before any TUI/async work starts.
+            unsafe { std::env::set_var(k, v) };
+        }
+    };
+    set(
+        "NEWT_BRAND_LOGO_DIR",
+        concat!(env!("CARGO_MANIFEST_DIR"), "/docs/logos"),
+    );
+    set("NEWT_BRAND_LOGO_PREFIX", "gilly");
+    set("NEWT_BRAND_NAME", "gilamonster");
+    set("NEWT_BRAND_TAGLINE", "the agent matrix");
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    set_brand_defaults();
     match Cli::parse().effective_command() {
         // Inherit: hand off to newt-agent's TUI directly. gilamonster's own
         // surfaces will wrap/extend this rather than reimplement it. `persona =
