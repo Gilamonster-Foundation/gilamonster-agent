@@ -10,3 +10,9 @@ Cargo.lock
 # Copy .cargo/config.toml.template -> .cargo/config.toml and edit the path
 # (or run `just overlay-on`).
 /.cargo/config.toml
+
+# macOS Finder metadata.
+.DS_Store
+
+# Python bytecode cache (e.g. from scripts/generate_logos.py).
+__pycache__/
