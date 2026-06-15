@@ -12,8 +12,12 @@ dark internal detail punches holes and only an outline survives. Instead we trac
 the source *alpha mask* (chafa `--colors=none`) for a clean, solid shape, then
 colorize it gold over newt's dark cell background.
 
+Sources are pinned in-script (SMALL_SRC / LARGE_SRC) so a run reproduces the
+committed art exactly: small sizes from the simple mascot mark, the larger
+splashes from the high-res hero render.
+
 Usage:
-    ~/venv/bin/python scripts/generate_logos.py [SOURCE_PNG]   # default: gilly-512.png
+    ~/venv/bin/python scripts/generate_logos.py
 
 Requires: Pillow + numpy and chafa on PATH (brew install chafa).
 """
@@ -31,7 +35,6 @@ from PIL import Image
 
 ROOT = Path(__file__).resolve().parent.parent
 LOGO_DIR = ROOT / "docs" / "logos"
-DEFAULT_SRC = LOGO_DIR / "gilly-512.png"
 PREFIX = "gilly"             # NEWT_BRAND_LOGO_PREFIX gila sets at startup
 
 FILL = (20, 20, 20)          # newt's dark cell background (#141414)
@@ -40,13 +43,15 @@ ALPHA_CUTOFF = 96            # alpha >= this counts as subject for the crop bbox
 CROP_PAD = 0.04              # padding around the subject bbox (fraction)
 THRESHOLD = "0.5"           # chafa luminance midpoint for the 1-bit mask
 
-# (cols, rows) — rows are newt-tui's per-logo height budget in logo_for_size();
-# chafa fits within the box so width binds and the result never exceeds it.
-ANSI_SIZES = {
-    "10": (10, 5), "20": (20, 10), "40": (40, 20),
-    "full": (80, 40), "120": (126, 61), "160": (166, 81),
-}
-PLAIN_COLS, PLAIN_ROWS = 40, 20   # <prefix>-ascii-40.txt (LOGO_PLAIN, monochrome)
+# Two sources, by size (cols, rows). Rows are newt-tui's per-logo height budget
+# in logo_for_size(); chafa fits within the box so width binds. The small sizes
+# read as a clean blob at any res, so they keep the simple mascot mark; the
+# larger splashes carry real detail, so they use the high-res hero render.
+SMALL_SRC = LOGO_DIR / "gilly-512.png"
+LARGE_SRC = LOGO_DIR / "gilamonster_logo_source.png"
+SMALL_SIZES = {"10": (10, 5), "20": (20, 10)}
+LARGE_SIZES = {"40": (40, 20), "full": (80, 40), "120": (126, 61), "160": (166, 81)}
+PLAIN_COLS, PLAIN_ROWS = 40, 20   # <prefix>-ascii-40.txt (LOGO_PLAIN, monochrome; from LARGE_SRC)
 CURSOR_RE = re.compile(r"\x1b\[\?\d+[hl]")
 SGR_RE = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -93,19 +98,23 @@ def silhouette(mask: Path, cols: int, rows: int, *, color: bool) -> str:
 
 
 def main() -> None:
-    src = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_SRC
-    if not src.exists():
-        sys.exit(f"source image not found: {src}")
     if not shutil.which("chafa"):
         sys.exit("chafa not on PATH — `brew install chafa`")
-    mask = subject_mask(src)
-    for tag, (cols, rows) in ANSI_SIZES.items():
+    for src in (SMALL_SRC, LARGE_SRC):
+        if not src.exists():
+            sys.exit(f"source image not found: {src}")
+    small, large = subject_mask(SMALL_SRC), subject_mask(LARGE_SRC)
+    for tag, (cols, rows) in SMALL_SIZES.items():
         dest = LOGO_DIR / f"{PREFIX}-ansi-{tag}.txt"
-        dest.write_text(silhouette(mask, cols, rows, color=True))
-        print(f"  ansi  {tag:>4}  {cols}x{rows}  -> {dest.name}")
+        dest.write_text(silhouette(small, cols, rows, color=True))
+        print(f"  ansi  {tag:>4}  {cols}x{rows}  [{SMALL_SRC.name}] -> {dest.name}")
+    for tag, (cols, rows) in LARGE_SIZES.items():
+        dest = LOGO_DIR / f"{PREFIX}-ansi-{tag}.txt"
+        dest.write_text(silhouette(large, cols, rows, color=True))
+        print(f"  ansi  {tag:>4}  {cols}x{rows}  [{LARGE_SRC.name}] -> {dest.name}")
     plain = LOGO_DIR / f"{PREFIX}-ascii-40.txt"
-    plain.write_text(silhouette(mask, PLAIN_COLS, PLAIN_ROWS, color=False))
-    print(f"  ascii   40  {PLAIN_COLS}x{PLAIN_ROWS}  -> {plain.name}")
+    plain.write_text(silhouette(large, PLAIN_COLS, PLAIN_ROWS, color=False))
+    print(f"  ascii   40  {PLAIN_COLS}x{PLAIN_ROWS}  [{LARGE_SRC.name}] -> {plain.name}")
     print("done.")
 
 
