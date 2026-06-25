@@ -128,6 +128,22 @@ mod tests {
         true
     }
 
+    // Build the expected program path the SAME way production does, so the
+    // assertions are separator-agnostic (`Path::join` uses `\` on Windows).
+    fn bin_path(venv: &str) -> String {
+        Path::new(venv)
+            .join("bin")
+            .join("gilacap")
+            .to_string_lossy()
+            .into_owned()
+    }
+    fn managed_path(home: &str) -> String {
+        Path::new(home)
+            .join(".gila/caps-venv/bin/gilacap")
+            .to_string_lossy()
+            .into_owned()
+    }
+
     fn env() -> VenvEnv {
         VenvEnv {
             gila_cap_python: Some("/opt/py/bin/python3".into()),
@@ -140,7 +156,7 @@ mod tests {
     #[test]
     fn explicit_override_wins_over_everything() {
         let g = resolve(Some("/srv/v"), &env(), &always_exists);
-        assert_eq!(g.program, "/srv/v/bin/gilacap");
+        assert_eq!(g.program, bin_path("/srv/v"));
         assert!(g.base_args.is_empty());
     }
 
@@ -165,7 +181,7 @@ mod tests {
             virtual_env: Some("/active".into()),
             home: Some("/home/op".into()),
         };
-        assert_eq!(resolve(None, &e, &never_exists).program, "/cap/bin/gilacap");
+        assert_eq!(resolve(None, &e, &never_exists).program, bin_path("/cap"));
 
         // VIRTUAL_ENV when no GILA_CAP_VENV.
         let e2 = VenvEnv {
@@ -174,7 +190,7 @@ mod tests {
         };
         assert_eq!(
             resolve(None, &e2, &never_exists).program,
-            "/active/bin/gilacap"
+            bin_path("/active")
         );
 
         // Managed default when it exists and nothing else is set.
@@ -184,7 +200,7 @@ mod tests {
         };
         assert_eq!(
             resolve(None, &e3, &always_exists).program,
-            "/home/op/.gila/caps-venv/bin/gilacap"
+            managed_path("/home/op")
         );
 
         // Bare `gilacap` when the managed venv is absent.
