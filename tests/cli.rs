@@ -124,3 +124,19 @@ fn follow_with_no_typescript_prints_read_only_guidance() {
 fn unknown_subcommand_is_rejected() {
     gila().arg("definitely-not-a-command").assert().failure();
 }
+
+#[test]
+fn capabilities_run_dispatches_and_errors_clearly_without_a_caps_venv() {
+    // Point the venv resolver at a venv that does not exist (a high-precedence
+    // env knob), so `gilacap` cannot be spawned regardless of the host. This
+    // proves the `capabilities run` arm is wired end-to-end (argv → main dispatch
+    // → capabilities::run → spawn attempt) and that a missing caps venv fails
+    // with an actionable message rather than a panic.
+    gila()
+        .args(["capabilities", "run", "confluence", "blog"])
+        .env("GILA_CAP_VENV", "/gila-caps-venv-does-not-exist")
+        .env_remove("GILA_CAP_PYTHON")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("confluence:blog"));
+}
