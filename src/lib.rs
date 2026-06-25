@@ -28,7 +28,9 @@ pub mod capabilities;
 pub mod cowork;
 pub mod follow;
 pub mod hotseat;
+pub mod manifest;
 pub mod pty;
+pub mod venv;
 
 /// The `gila` command-line surface. Parsed in `main`, re-exported here so the
 /// argv contract is unit-testable without launching the inherited TUI.
@@ -114,6 +116,17 @@ pub enum CapabilitiesCmd {
     Enable {
         /// Capability name, e.g. `mogul`.
         name: String,
+    },
+    /// Invoke one capability tool through the `gilacap` multiplexer, e.g.
+    /// `gila capabilities run confluence blog --args '{"source_file":"p.md"}'`.
+    Run {
+        /// Capability name, e.g. `confluence`.
+        name: String,
+        /// Tool name, e.g. `blog`.
+        tool: String,
+        /// JSON object of arguments for the tool (forwarded as `--args`).
+        #[arg(long)]
+        args: Option<String>,
     },
 }
 
@@ -227,6 +240,29 @@ mod tests {
     fn matrix_subcommand_parses() {
         let cli = Cli::parse_from(["gila", "matrix"]);
         assert_eq!(cli.effective_command(), Command::Matrix);
+    }
+
+    #[test]
+    fn capabilities_run_subcommand_parses_with_args() {
+        let cli = Cli::parse_from([
+            "gila",
+            "capabilities",
+            "run",
+            "confluence",
+            "blog",
+            "--args",
+            "{\"space\":\"~me\"}",
+        ]);
+        assert_eq!(
+            cli.effective_command(),
+            Command::Capabilities {
+                cmd: CapabilitiesCmd::Run {
+                    name: "confluence".to_string(),
+                    tool: "blog".to_string(),
+                    args: Some("{\"space\":\"~me\"}".to_string()),
+                },
+            }
+        );
     }
 
     #[test]

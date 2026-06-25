@@ -92,6 +92,7 @@ async fn main() -> anyhow::Result<()> {
             CapabilitiesCmd::List => capabilities::list(),
             CapabilitiesCmd::Check { name } => capabilities::check(&name).await,
             CapabilitiesCmd::Enable { name } => capabilities::enable(&name),
+            CapabilitiesCmd::Run { name, tool, args } => capabilities::run(&name, &tool, args),
         },
         // The matrix runs under the same inherited object-capability identity
         // as newt — surface where the operator key lives, then the scaffold
