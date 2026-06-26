@@ -12,15 +12,16 @@
 //! This is the host side of the capability framework: a pip-installed capability
 //! becomes reachable in a gila session with no gila rebuild.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use agent_bridle_core::{Caveats, ConfinedCommand, Gate, Scope, Tool, ToolContext, ToolResult};
 use anyhow::{Context, Result};
 use newt_core::mcp::{McpServerEntry, TransportKind};
 use newt_mcp_client::{McpConnection, StdioTransport};
 use serde_json::json;
 
-use crate::manifest::Manifest;
+use crate::manifest::{CapabilityEntry, Manifest};
 use crate::venv::{self, GilacapCmd};
 
 /// Load the selection manifest (best-effort: a missing file or unset HOME yields
@@ -90,18 +91,130 @@ pub fn list() -> Result<()> {
     Ok(())
 }
 
+/// A trivial leash-bearing tool used only to mint a [`ToolContext`] for a
+/// host-initiated confined spawn. `ToolContext` is constructible solely inside a
+/// gate, so the host authorizes itself through the gate to obtain the spawn token
+/// — the same discipline a real tool follows.
+struct CapRunTool;
+
+#[async_trait::async_trait]
+impl Tool for CapRunTool {
+    fn name(&self) -> &str {
+        "gila-cap-run"
+    }
+    fn schema(&self) -> serde_json::Value {
+        json!({})
+    }
+    async fn invoke(
+        &self,
+        _args: serde_json::Value,
+        _cx: &ToolContext,
+    ) -> ToolResult<serde_json::Value> {
+        Ok(serde_json::Value::Null)
+    }
+}
+
+/// The default caveats for a manifest-confined capability spawn: it may exec only
+/// its own launcher, and (the L3-enforced axis) write only under the working dir
+/// and the temp dir (caps commonly use tempfiles). `fs_read`/`net` are not
+/// L3-governed yet, so they stay unrestricted/advisory (a `net` allow-list per
+/// cap is a manifest follow-up; the real external-effect mitigation is a scoped
+/// token, not the net axis).
+fn confined_caveats(program: &str, cwd: &Path) -> Caveats {
+    Caveats {
+        exec: Scope::only([program.to_string()]),
+        fs_write: Scope::only([
+            cwd.to_string_lossy().into_owned(),
+            std::env::temp_dir().to_string_lossy().into_owned(),
+        ]),
+        ..Caveats::top()
+    }
+}
+
+/// Build the child's environment allow-list (it inherits **nothing** else): the
+/// manifest's granted vars (creds/config) plus the few essentials the interpreter
+/// and the `~/.confluence/token`-style fallbacks need. `get` is injected for
+/// testability.
+fn env_allow_with(
+    entry: Option<&CapabilityEntry>,
+    get: &dyn Fn(&str) -> Option<String>,
+) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for var in entry.map(|e| e.env.as_slice()).unwrap_or(&[]) {
+        if let Some(v) = get(var) {
+            out.push((var.clone(), v));
+        }
+    }
+    for essential in ["HOME", "PATH", "LANG"] {
+        if let Some(v) = get(essential) {
+            out.push((essential.to_string(), v));
+        }
+    }
+    out
+}
+
+fn env_allow(entry: Option<&CapabilityEntry>) -> Vec<(String, String)> {
+    env_allow_with(entry, &|k| std::env::var(k).ok())
+}
+
+/// Spawn the capability **confined** by agent-bridle: a Landlock `fs_write`
+/// domain + a scrubbed environment, applied before exec. Fails closed if the
+/// platform cannot enforce the restriction (the `ConfinedCommand` contract).
+fn run_confined(
+    g: &GilacapCmd,
+    argv: &[String],
+    name: &str,
+    tool: &str,
+    entry: Option<&CapabilityEntry>,
+) -> Result<()> {
+    let cwd = std::env::current_dir().context("resolving the working directory")?;
+    let caveats = confined_caveats(&g.program, &cwd);
+    // Mint the spawn token through the gate (the only mint site).
+    let cx = Gate::new(0)
+        .authorize(&CapRunTool, &caveats)
+        .map_err(|e| anyhow::anyhow!("authorizing confined spawn: {e}"))?;
+
+    let mut cmd = ConfinedCommand::new(g.program.as_str());
+    for a in argv {
+        cmd = cmd.arg(a);
+    }
+    for (k, v) in env_allow(entry) {
+        cmd = cmd.env(k, v);
+    }
+    let mut spawned = cmd
+        .spawn(&cx)
+        .map_err(|e| anyhow::anyhow!("confined spawn of `{}` ({name}:{tool}): {e}", g.program))?;
+    eprintln!(
+        "→ {name}:{tool} running confined (sandbox: {:?})",
+        spawned.sandbox_kind
+    );
+    let status = spawned
+        .child
+        .wait()
+        .context("waiting for the confined capability")?;
+    if !status.success() {
+        anyhow::bail!("capability '{name}' tool '{tool}' exited with {status}");
+    }
+    Ok(())
+}
+
 /// `gila capabilities run <name> <tool> [--args '{…}']` — invoke one capability
 /// tool through the `gilacap` multiplexer and stream its result.
 ///
-/// Confinement seam: today this spawns `gilacap` directly — for a human at the
-/// prompt that is correct (they run under their own authority). Once
-/// agent-bridle#55 lands (and gila's `[patch.crates-io]` agent-bridle rev is
-/// bumped past it), the *agent-exposed* path will mint per-capability caveats via
-/// `newt_identity::delegate_for_plugin` and spawn through
-/// `agent_bridle_core::spawn_confined_subprocess` instead of this bare spawn.
+/// If the manifest marks the capability `confined`, the spawn goes through
+/// agent-bridle (`ConfinedCommand` → Landlock `fs_write` + env scrub, fail-closed
+/// when the OS cannot enforce). Otherwise it is a bare spawn — a human at the
+/// prompt runs under their own authority, which needs no leash. (The next layer,
+/// a signed `newt_identity::delegate_for_plugin` envelope passed to caps that
+/// themselves re-enter bridle, is a follow-up.)
 pub fn run(name: &str, tool: &str, args: Option<String>) -> Result<()> {
+    let m = manifest();
     let g = gilacap_for(name);
     let argv = run_argv(&g, name, tool, args.as_deref());
+    let entry = m.entry(name);
+    if entry.map(|e| e.confined).unwrap_or(false) {
+        return run_confined(&g, &argv, name, tool, entry);
+    }
     let status = Command::new(&g.program)
         .args(&argv)
         .status()
@@ -229,5 +342,61 @@ mod tests {
             ),
             ["run", "confluence", "blog", "--args", "{\"space\":\"~me\"}"]
         );
+    }
+
+    #[test]
+    fn confined_caveats_scope_exec_to_program_and_writes_to_cwd_and_tmp() {
+        let cav = confined_caveats("/v/bin/gilacap", Path::new("/work"));
+        match &cav.exec {
+            Scope::Only(set) => assert!(set.contains("/v/bin/gilacap")),
+            Scope::All => panic!("exec must be bounded to the program"),
+        }
+        match &cav.fs_write {
+            Scope::Only(set) => {
+                assert!(set.contains("/work"), "cwd must be writable");
+                let tmp = std::env::temp_dir().to_string_lossy().into_owned();
+                assert!(set.contains(&tmp), "temp dir must be writable");
+            }
+            Scope::All => panic!("fs_write must be bounded (it is the L3-enforced axis)"),
+        }
+        // Non-enforced axes stay unrestricted (advisory).
+        assert_eq!(cav.net, Scope::All);
+        assert_eq!(cav.fs_read, Scope::All);
+    }
+
+    #[test]
+    fn confined_caveats_mint_a_valid_tool_context() {
+        // The host must be able to authorize its own spawn token through the gate.
+        let cav = confined_caveats("/v/bin/gilacap", Path::new("/work"));
+        let cx = Gate::new(0)
+            .authorize(&CapRunTool, &cav)
+            .expect("authorize");
+        assert!(cx.check_exec("/v/bin/gilacap").is_ok());
+        assert!(cx.check_exec("/usr/bin/rm").is_err());
+    }
+
+    #[test]
+    fn env_allow_passes_manifest_vars_and_essentials_only() {
+        let entry = CapabilityEntry {
+            name: "confluence".to_string(),
+            expose: crate::manifest::Expose::Both,
+            confined: true,
+            env: vec!["CONFLUENCE_TOKEN".to_string()],
+            tools: None,
+            venv: None,
+        };
+        let fake = |k: &str| match k {
+            "CONFLUENCE_TOKEN" => Some("secret".to_string()),
+            "HOME" => Some("/home/op".to_string()),
+            "PATH" => Some("/usr/bin".to_string()),
+            "SECRET_THAT_MUST_NOT_LEAK" => Some("nope".to_string()),
+            _ => None,
+        };
+        let allow = env_allow_with(Some(&entry), &fake);
+        assert!(allow.contains(&("CONFLUENCE_TOKEN".to_string(), "secret".to_string())));
+        assert!(allow.contains(&("HOME".to_string(), "/home/op".to_string())));
+        assert!(allow.contains(&("PATH".to_string(), "/usr/bin".to_string())));
+        // Nothing ungranted leaks.
+        assert!(!allow.iter().any(|(k, _)| k == "SECRET_THAT_MUST_NOT_LEAK"));
     }
 }
