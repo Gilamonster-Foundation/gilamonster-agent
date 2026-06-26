@@ -17,6 +17,41 @@ fn gila() -> Command {
     Command::cargo_bin("gila").expect("gila binary builds")
 }
 
+/// A temp dir holding a fake `gilacap` on PATH: `gilacap list` prints one demo
+/// capability; anything else echoes. Lets the `cap list`/`config` arms run
+/// headless without a real caps venv.
+#[cfg(unix)]
+fn fake_gilacap_dir() -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script = dir.path().join("gilacap");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\ncase \"$1\" in\n  list) printf 'demo\\tA demo capability.\\n' ;;\n  *) echo \"fake gilacap: $*\" ;;\nesac\n",
+    )
+    .expect("write fake gilacap");
+    let mut perm = std::fs::metadata(&script).unwrap().permissions();
+    perm.set_mode(0o755);
+    std::fs::set_permissions(&script, perm).unwrap();
+    dir
+}
+
+/// Point `gila` at the fake `gilacap` (PATH) with a clean HOME and no venv-env
+/// overrides, so resolution falls through to the bare `gilacap` on PATH.
+#[cfg(unix)]
+fn with_fake_gilacap<'a>(
+    cmd: &'a mut Command,
+    bin: &std::path::Path,
+    home: &std::path::Path,
+) -> &'a mut Command {
+    let path = std::env::var("PATH").unwrap_or_default();
+    cmd.env("HOME", home)
+        .env("PATH", format!("{}:{}", bin.display(), path))
+        .env_remove("GILA_CAP_VENV")
+        .env_remove("GILA_CAP_PYTHON")
+        .env_remove("VIRTUAL_ENV")
+}
+
 #[test]
 fn matrix_prints_identity_and_scaffold_notice() {
     gila()
@@ -166,4 +201,48 @@ fn capabilities_run_engages_the_confined_path_when_the_manifest_marks_it() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("confined spawn"));
+}
+
+#[cfg(unix)]
+#[test]
+fn cap_list_runs_gilacap_list() {
+    // `gila cap list` (alias) shells the resolved `gilacap list`.
+    let bin = fake_gilacap_dir();
+    let home = tempfile::tempdir().expect("home");
+    let mut cmd = gila();
+    with_fake_gilacap(cmd.arg("cap").arg("list"), bin.path(), home.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("demo"));
+}
+
+#[cfg(unix)]
+#[test]
+fn cap_config_writes_the_manifest_from_interactive_choices() {
+    // Drive the selector headlessly: `demo` → [b]oth, confine [y]. The chosen
+    // policy lands in <HOME>/.gila/capabilities.toml.
+    let bin = fake_gilacap_dir();
+    let home = tempfile::tempdir().expect("home");
+    let mut cmd = gila();
+    with_fake_gilacap(cmd.arg("cap").arg("config"), bin.path(), home.path())
+        .write_stdin("b\ny\n")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("wrote"));
+
+    let manifest = std::fs::read_to_string(home.path().join(".gila").join("capabilities.toml"))
+        .expect("manifest written");
+    assert!(manifest.contains("name = \"demo\""));
+    assert!(manifest.contains("expose = \"both\""));
+    assert!(manifest.contains("confined = true"));
+}
+
+#[test]
+fn cap_enable_prints_the_mcp_servers_snippet() {
+    gila()
+        .args(["cap", "enable", "confluence"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[[mcp_servers]]"))
+        .stdout(predicate::str::contains("confluence"));
 }

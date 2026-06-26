@@ -93,6 +93,7 @@ pub enum Command {
     /// Discover and exercise installed Gilamonster **capabilities** — pip-installed
     /// `gila-cap-*` packages that expose tools over MCP. The host side of the
     /// capability framework (see `Gilamonster-Foundation/gilamonster-capabilities`).
+    #[command(alias = "cap")]
     Capabilities {
         #[command(subcommand)]
         cmd: CapabilitiesCmd,
@@ -128,6 +129,9 @@ pub enum CapabilitiesCmd {
         #[arg(long)]
         args: Option<String>,
     },
+    /// Interactively choose which capabilities load as agent tools (and which run
+    /// confined), writing `~/.gila/capabilities.toml`. The opt-in selector.
+    Config,
 }
 
 impl Cli {
@@ -240,6 +244,17 @@ mod tests {
     fn matrix_subcommand_parses() {
         let cli = Cli::parse_from(["gila", "matrix"]);
         assert_eq!(cli.effective_command(), Command::Matrix);
+    }
+
+    #[test]
+    fn capabilities_config_parses_via_cap_alias() {
+        let cli = Cli::parse_from(["gila", "cap", "config"]);
+        assert_eq!(
+            cli.effective_command(),
+            Command::Capabilities {
+                cmd: CapabilitiesCmd::Config,
+            }
+        );
     }
 
     #[test]

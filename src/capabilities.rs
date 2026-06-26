@@ -12,6 +12,7 @@
 //! This is the host side of the capability framework: a pip-installed capability
 //! becomes reachable in a gila session with no gila rebuild.
 
+use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -21,7 +22,7 @@ use newt_core::mcp::{McpServerEntry, TransportKind};
 use newt_mcp_client::{McpConnection, StdioTransport};
 use serde_json::json;
 
-use crate::manifest::{CapabilityEntry, Manifest};
+use crate::manifest::{CapabilityEntry, Expose, Manifest};
 use crate::venv::{self, GilacapCmd};
 
 /// Load the selection manifest (best-effort: a missing file or unset HOME yields
@@ -293,6 +294,120 @@ pub fn enable(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Parse capability names from `gilacap list` output (each line is
+/// `NAME<TAB>description`). Pure, so the parsing is unit-tested.
+fn parse_list_names(stdout: &str) -> Vec<String> {
+    stdout
+        .lines()
+        .filter_map(|l| l.split('\t').next())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Enumerate installed capability names via `gilacap list`.
+fn installed_names(g: &GilacapCmd) -> Result<Vec<String>> {
+    let out = Command::new(&g.program)
+        .args(g.argv(&["list"]))
+        .output()
+        .with_context(|| format!("running `{} list`", g.program))?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "`gilacap list` failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(parse_list_names(&String::from_utf8_lossy(&out.stdout)))
+}
+
+/// Drive the interactive selection over `names`, prompting on `out` and reading
+/// answers from `input`. Pure over the injected streams (no TTY), so the choice
+/// logic is unit-tested. Default is CLI-only; agent exposure is opt-in.
+fn select_manifest(
+    names: &[String],
+    input: &mut dyn BufRead,
+    out: &mut dyn Write,
+) -> io::Result<Manifest> {
+    writeln!(out, "Configure capabilities → ~/.gila/capabilities.toml")?;
+    writeln!(out, "(default is CLI-only; agent tools are opt-in)\n")?;
+    let mut caps = Vec::new();
+    for name in names {
+        write!(
+            out,
+            "{name}: expose [c]li / [a]gent / [b]oth / [o]ff? (cli) "
+        )?;
+        out.flush()?;
+        let mut line = String::new();
+        if input.read_line(&mut line)? == 0 {
+            break; // EOF — keep what we have
+        }
+        let expose = match line.trim().chars().next().map(|c| c.to_ascii_lowercase()) {
+            Some('a') => Expose::Agent,
+            Some('b') => Expose::Both,
+            Some('o') => Expose::Off,
+            _ => Expose::Cli,
+        };
+        let confined = if expose.is_agent() {
+            write!(out, "  confine {name} when run as an agent tool? [y/N] ")?;
+            out.flush()?;
+            let mut c = String::new();
+            input.read_line(&mut c)?;
+            matches!(
+                c.trim().chars().next().map(|c| c.to_ascii_lowercase()),
+                Some('y')
+            )
+        } else {
+            false
+        };
+        caps.push(CapabilityEntry {
+            name: name.clone(),
+            expose,
+            confined,
+            env: Vec::new(),
+            tools: None,
+            venv: None,
+        });
+    }
+    Ok(Manifest {
+        venv: None,
+        capabilities: caps,
+    })
+}
+
+/// Write `m` to `path`, creating `~/.gila` if it does not exist.
+fn write_manifest(path: &Path, m: &Manifest) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    std::fs::write(path, m.to_toml()?).with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
+}
+
+/// `gila capabilities config` (aka `gila cap config`) — interactively choose
+/// which installed capabilities load as agent tools (and which run confined),
+/// then write `~/.gila/capabilities.toml`. The opt-in selector for the otherwise
+/// CLI-only-by-default surface.
+pub fn config() -> Result<()> {
+    let g = gilacap_global();
+    let names = installed_names(&g)?;
+    if names.is_empty() {
+        println!("no capabilities installed — nothing to configure.");
+        println!("  install one into the caps venv, then re-run `gila cap config`.");
+        return Ok(());
+    }
+    let stdin = io::stdin();
+    let manifest = select_manifest(&names, &mut stdin.lock(), &mut io::stdout())?;
+    let home = std::env::var("HOME")
+        .map(PathBuf::from)
+        .map_err(|_| anyhow::anyhow!("HOME is not set; cannot locate ~/.gila"))?;
+    let path = Manifest::default_path(&home);
+    write_manifest(&path, &manifest)?;
+    println!("\nwrote {}", path.display());
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -398,5 +513,62 @@ mod tests {
         assert!(allow.contains(&("PATH".to_string(), "/usr/bin".to_string())));
         // Nothing ungranted leaks.
         assert!(!allow.iter().any(|(k, _)| k == "SECRET_THAT_MUST_NOT_LEAK"));
+    }
+
+    #[test]
+    fn parse_list_names_takes_the_first_tab_field() {
+        let out = "confluence\tFetch, publish, blog.\nmogul\tStoryboards.\n";
+        assert_eq!(parse_list_names(out), ["confluence", "mogul"]);
+        assert!(parse_list_names("").is_empty());
+        assert!(parse_list_names("no capabilities installed.").len() == 1); // a stray line
+    }
+
+    #[test]
+    fn select_manifest_reads_choices_and_defaults_to_cli() {
+        let names = vec!["confluence".to_string(), "mogul".to_string()];
+        // confluence → [b]oth, then confine [y]; mogul → blank (defaults to cli).
+        let mut input = std::io::Cursor::new(&b"b\ny\n\n"[..]);
+        let mut out = Vec::new();
+        let m = select_manifest(&names, &mut input, &mut out).expect("select");
+
+        let c = m.entry("confluence").unwrap();
+        assert_eq!(c.expose, Expose::Both);
+        assert!(c.confined);
+        let mg = m.entry("mogul").unwrap();
+        assert_eq!(mg.expose, Expose::Cli);
+        assert!(!mg.confined);
+        // The prompts reached the output stream.
+        assert!(String::from_utf8_lossy(&out).contains("expose"));
+    }
+
+    #[test]
+    fn select_manifest_does_not_ask_to_confine_a_cli_only_cap() {
+        let names = vec!["mogul".to_string()];
+        let mut input = std::io::Cursor::new(&b"c\n"[..]); // cli only
+        let mut out = Vec::new();
+        let m = select_manifest(&names, &mut input, &mut out).expect("select");
+        assert_eq!(m.entry("mogul").unwrap().expose, Expose::Cli);
+        // No confine prompt for a non-agent choice.
+        assert!(!String::from_utf8_lossy(&out).contains("confine"));
+    }
+
+    #[test]
+    fn write_manifest_creates_dir_and_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".gila").join("capabilities.toml");
+        let m = Manifest {
+            venv: None,
+            capabilities: vec![CapabilityEntry {
+                name: "confluence".into(),
+                expose: Expose::Agent,
+                confined: true,
+                env: Vec::new(),
+                tools: None,
+                venv: None,
+            }],
+        };
+        write_manifest(&path, &m).expect("write");
+        assert!(path.exists());
+        assert_eq!(Manifest::load(&path).unwrap(), m);
     }
 }
