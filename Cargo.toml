@@ -54,6 +54,13 @@ serde_json = "1"
 # The `~/.gila/capabilities.toml` selection manifest deserializes via serde
 # derive (see `src/manifest.rs`); `toml` (below) is the format.
 serde = { version = "1", features = ["derive"] }
+# The object-capability leash. `gila capabilities run` spawns a manifest-confined
+# capability through `agent_bridle_core::spawn_confined_subprocess` (Landlock +
+# env-scrub, agent-bridle#56). Resolves via the `[patch.crates-io]` block below
+# to the same git rev newt builds. `async-trait` is needed only to implement the
+# trivial `Tool` that mints the spawn's `ToolContext` through the gate.
+agent-bridle-core = "0.1"
+async-trait = "0.1"
 # `gila hotseat` serializes the composed session config (the operator's config
 # overlaid with the read-only-triage preset, the hotseat mode, and the modulex
 # stdio MCP entry) to a per-session file and points $NEWT_CONFIG at it. newt's
@@ -116,14 +123,18 @@ strip = true
 # uses) because gila's Cargo.lock is .gitignored: without a pinned rev, a fresh
 # clone / CI build would resolve whatever the branch tip is at build time and
 # could silently drift away from what newt's release builds. This rev is exactly
-# the one newt's main Cargo.lock resolves the stub-shell branch to, so gila and
-# newt build the identical agent-bridle. Re-sync this rev whenever the newt pin
-# above advances and newt's lock moves agent-bridle. When newt deletes its patch
+# the one newt's main Cargo.lock resolves the stub-shell branch to, with an
+# intentional bump: as of 2026-06-26 this rev is PAST agent-bridle#56 so gila can
+# call `agent_bridle_core::spawn_confined_subprocess` (the confined-cap-spawn
+# path). #56 is purely additive (a new `spawn` module — no change to the crates
+# newt uses), so newt still builds against this rev. Re-sync whenever the newt
+# pin above advances and newt's lock moves agent-bridle; keep it >= the #56
+# merge. When newt deletes its patch
 # (post-brush#1184 + agent-bridle 0.1.0 on crates.io), delete this block too.
 # See: https://github.com/Gilamonster-Foundation/agent-bridle/issues/20
 
 [patch.crates-io]
-agent-bridle           = { git = "https://github.com/Gilamonster-Foundation/agent-bridle", rev = "f120fcbf31476d3bfb2db9f68463a67af1e3ec80" }
-agent-bridle-core      = { git = "https://github.com/Gilamonster-Foundation/agent-bridle", rev = "f120fcbf31476d3bfb2db9f68463a67af1e3ec80" }
-agent-bridle-tool-shell = { git = "https://github.com/Gilamonster-Foundation/agent-bridle", rev = "f120fcbf31476d3bfb2db9f68463a67af1e3ec80" }
-agent-bridle-tool-web  = { git = "https://github.com/Gilamonster-Foundation/agent-bridle", rev = "f120fcbf31476d3bfb2db9f68463a67af1e3ec80" }
+agent-bridle           = { git = "https://github.com/Gilamonster-Foundation/agent-bridle", rev = "f3382a8b29364f1ef949fc3d0d8c935748dba8a7" }
+agent-bridle-core      = { git = "https://github.com/Gilamonster-Foundation/agent-bridle", rev = "f3382a8b29364f1ef949fc3d0d8c935748dba8a7" }
+agent-bridle-tool-shell = { git = "https://github.com/Gilamonster-Foundation/agent-bridle", rev = "f3382a8b29364f1ef949fc3d0d8c935748dba8a7" }
+agent-bridle-tool-web  = { git = "https://github.com/Gilamonster-Foundation/agent-bridle", rev = "f3382a8b29364f1ef949fc3d0d8c935748dba8a7" }
