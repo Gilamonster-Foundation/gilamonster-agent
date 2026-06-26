@@ -59,7 +59,8 @@ fn matrix_prints_identity_and_scaffold_notice() {
         .assert()
         .success()
         .stdout(predicate::str::contains("operator identity"))
-        .stdout(predicate::str::contains("is not yet built"))
+        .stdout(predicate::str::contains("extension layer"))
+        .stdout(predicate::str::contains("gila matrix --mock"))
         .stdout(predicate::str::contains("agent-mesh airspace"));
 }
 

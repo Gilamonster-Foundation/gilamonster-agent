@@ -26,6 +26,7 @@ use clap::{Parser, Subcommand};
 
 pub mod capabilities;
 pub mod cowork;
+pub mod fleet;
 pub mod follow;
 pub mod hotseat;
 pub mod manifest;
@@ -98,8 +99,18 @@ pub enum Command {
         #[command(subcommand)]
         cmd: CapabilitiesCmd,
     },
-    /// The multi-agent matrix — the extension layer (scaffold: not yet built).
-    Matrix,
+    /// The multi-agent matrix — the **FleetView** crew-monitor dashboard.
+    ///
+    /// With `--mock` it opens the full-screen FleetView dashboard over a canned
+    /// demo roster (Phase 1: the standalone surface, no live crew yet — see
+    /// [`fleet`] and `docs/decisions/fleetview_full_screen_dashboard.md`). Bare
+    /// `gila matrix` prints the scaffold notice (a side-effect-free path that
+    /// never surprises the operator with an alternate screen).
+    Matrix {
+        /// Open the FleetView dashboard over the canned demo roster.
+        #[arg(long)]
+        mock: bool,
+    },
 }
 
 /// `gila capabilities` subcommands.
@@ -165,8 +176,10 @@ pub fn matrix_report<E>(key_path: Result<PathBuf, E>) -> String {
     out.push('\n');
     out.push('\n');
     out.push_str(
-        "gilamonster matrix — the multi-agent extension layer — is not yet built.\n\
-         It will compose newt airframes over the agent-mesh airspace, under one\n\
+        "gilamonster matrix — the multi-agent extension layer.\n\n\
+         FleetView, the live crew-monitor dashboard, is landing here (Phase 1).\n\
+         Preview the dashboard now:  gila matrix --mock\n\n\
+         It composes newt airframes over the agent-mesh airspace, under one\n\
          attenuation-only capability model, with drake lifecycle + orchestration.\n",
     );
     out
@@ -243,7 +256,20 @@ mod tests {
     #[test]
     fn matrix_subcommand_parses() {
         let cli = Cli::parse_from(["gila", "matrix"]);
-        assert_eq!(cli.effective_command(), Command::Matrix);
+        assert_eq!(cli.effective_command(), Command::Matrix { mock: false });
+    }
+
+    #[test]
+    fn matrix_mock_flag_parses() {
+        let cli = Cli::parse_from(["gila", "matrix", "--mock"]);
+        assert_eq!(cli.effective_command(), Command::Matrix { mock: true });
+    }
+
+    #[test]
+    fn matrix_report_points_at_the_mock_preview() {
+        let report = matrix_report::<DummyErr>(Err(DummyErr));
+        assert!(report.contains("gila matrix --mock"));
+        assert!(report.contains("FleetView"));
     }
 
     #[test]
@@ -394,11 +420,11 @@ mod tests {
     fn matrix_report_includes_identity_and_scaffold_notice() {
         let report = matrix_report::<DummyErr>(Ok(PathBuf::from("/home/op/.newt/identity.pem")));
         assert!(report.contains("/home/op/.newt/identity.pem"));
-        assert!(report.contains("is not yet built"));
+        assert!(report.contains("extension layer"));
         assert!(report.contains("agent-mesh airspace"));
         // Identity line first, scaffold notice after a blank line.
         let idx_id = report.find("operator identity").unwrap();
-        let idx_notice = report.find("not yet built").unwrap();
+        let idx_notice = report.find("extension layer").unwrap();
         assert!(idx_id < idx_notice);
     }
 
@@ -406,7 +432,7 @@ mod tests {
     fn matrix_report_err_branch_uses_fallback() {
         let report = matrix_report(Err(DummyErr));
         assert!(report.contains("HOME unset"));
-        assert!(report.contains("is not yet built"));
+        assert!(report.contains("extension layer"));
     }
 
     #[test]
