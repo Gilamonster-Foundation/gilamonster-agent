@@ -19,6 +19,7 @@ use std::process::Command;
 use agent_bridle_core::{Caveats, ConfinedCommand, Gate, Scope, Tool, ToolContext, ToolResult};
 use anyhow::{Context, Result};
 use newt_core::mcp::{McpServerEntry, TransportKind};
+use newt_core::Config;
 use newt_mcp_client::{McpConnection, StdioTransport};
 use serde_json::json;
 
@@ -408,6 +409,45 @@ pub fn config() -> Result<()> {
     Ok(())
 }
 
+/// The `[[mcp_servers]]` entries for the manifest's **agent-exposed** caps
+/// (`expose = agent | both`), each served by `gilacap mcp <name>` under the cap's
+/// resolved venv. Pure: the gilacap resolver is injected, so the mapping is
+/// unit-tested without touching the env.
+fn agent_mcp_entries_with(
+    m: &Manifest,
+    resolve: impl Fn(&str) -> GilacapCmd,
+) -> Vec<McpServerEntry> {
+    m.agent_exposed()
+        .map(|c| entry_for_with(&resolve(&c.name), &c.name))
+        .collect()
+}
+
+/// The agent-exposed capability MCP entries for the current manifest + env — what
+/// `gila code` mounts. Empty (the default) ⇒ nothing to compose.
+#[must_use]
+pub fn agent_mcp_entries() -> Vec<McpServerEntry> {
+    agent_mcp_entries_with(&manifest(), gilacap_for)
+}
+
+/// Overlay capability MCP `entries` onto a resolved newt [`Config`] so `gila code`
+/// mounts the opted-in capabilities as agent tools. An operator-declared server
+/// of the same name **wins** (no clobber/duplicate) — the same precedence as
+/// `compose_hotseat_config`. Pure (consumes + returns the config).
+///
+/// Note: the mounted server is `gilacap mcp <name>`, spawned by newt — i.e. *not*
+/// yet wrapped by the agent-bridle confined launcher (that interposition is a
+/// follow-up). The `confined` manifest flag governs `gila capabilities run`
+/// today; confining the agent-mounted MCP server is the next layer.
+#[must_use]
+pub fn compose_agent_mcp(mut base: Config, entries: Vec<McpServerEntry>) -> Config {
+    for entry in entries {
+        if !base.mcp_servers.iter().any(|s| s.name == entry.name) {
+            base.mcp_servers.push(entry);
+        }
+    }
+    base
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -570,5 +610,53 @@ mod tests {
         write_manifest(&path, &m).expect("write");
         assert!(path.exists());
         assert_eq!(Manifest::load(&path).unwrap(), m);
+    }
+
+    #[test]
+    fn agent_mcp_entries_includes_only_agent_exposed_caps() {
+        let m = Manifest::parse(
+            "[[capabilities]]\nname = \"confluence\"\nexpose = \"both\"\n\
+             [[capabilities]]\nname = \"mogul\"\nexpose = \"cli\"\n\
+             [[capabilities]]\nname = \"gl\"\nexpose = \"agent\"\n",
+        )
+        .unwrap();
+        let entries = agent_mcp_entries_with(&m, |_| gilacap());
+        let names: Vec<_> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["confluence", "gl"]); // mogul (cli-only) excluded
+        assert_eq!(entries[0].args, ["mcp", "confluence"]); // served via gilacap mcp
+    }
+
+    #[test]
+    fn compose_agent_mcp_adds_entries_and_respects_operator_precedence() {
+        let mut base = Config::default();
+        // The operator already declared their own `confluence` server.
+        base.mcp_servers.push(McpServerEntry {
+            name: "confluence".to_string(),
+            transport: TransportKind::Stdio,
+            command: Some("/opt/my-confluence".to_string()),
+            args: Vec::new(),
+            env: Default::default(),
+            url: None,
+            headers: Default::default(),
+        });
+        let entries = vec![
+            entry_for_with(&gilacap(), "confluence"),
+            entry_for_with(&gilacap(), "gl"),
+        ];
+        let composed = compose_agent_mcp(base, entries);
+
+        let confluence: Vec<_> = composed
+            .mcp_servers
+            .iter()
+            .filter(|s| s.name == "confluence")
+            .collect();
+        assert_eq!(confluence.len(), 1, "operator entry must not be duplicated");
+        assert_eq!(confluence[0].command.as_deref(), Some("/opt/my-confluence")); // theirs wins
+        assert!(composed.mcp_servers.iter().any(|s| s.name == "gl")); // gl added
+
+        // Round-trips through newt's own TOML loader (what gila writes is what newt resolves).
+        let toml = toml::to_string(&composed).unwrap();
+        let reloaded: Config = toml::from_str(&toml).unwrap();
+        assert!(reloaded.mcp_servers.iter().any(|s| s.name == "gl"));
     }
 }

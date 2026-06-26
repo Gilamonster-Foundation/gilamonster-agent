@@ -64,7 +64,7 @@ async fn main() -> anyhow::Result<()> {
         // surfaces will wrap/extend this rather than reimplement it. `persona =
         // None` → newt's default persona; gila's personas land with the matrix
         // layer (#8-#11).
-        Command::Code { path } => newt_tui::run_code(code_path(&path), false, None),
+        Command::Code { path } => run_code_with_caps(path),
         // Read-only "follow me": tail the human's `script -F` typescript, feed
         // each burst of shell activity into the shared observation channel, and
         // let the agent comment. The agent NEVER drives the human's shell.
@@ -375,5 +375,35 @@ fn run_hotseat(path: Option<std::path::PathBuf>, skill: Option<String>) -> anyho
 
     // Hand off to the inherited TUI exactly as `gila code` does; the operator
     // engages the read-only floor in-session with `/mode hotseat`.
+    newt_tui::run_code(code_path(&path), false, None)
+}
+
+/// `gila code` — the inherited TUI, with the **opted-in capabilities auto-mounted**
+/// as agent tools.
+///
+/// If the selection manifest (`~/.gila/capabilities.toml`, written by `gila cap
+/// config`) exposes any capability to the agent surface (`expose = agent|both`),
+/// compose those `[[mcp_servers]]` onto the operator's resolved newt config, write
+/// a per-session file, and point `$NEWT_CONFIG` at it before handing off — the same
+/// overlay pattern `gila hotseat` uses. With no agent-exposed caps (the default),
+/// hand off to the inherited TUI unchanged, so plain `gila code` is untouched. The
+/// config write + TUI launch are the by-design-uncovered surface (real tty +
+/// filesystem), mirroring `run_hotseat` / `run_cowork`.
+fn run_code_with_caps(path: Option<std::path::PathBuf>) -> anyhow::Result<()> {
+    let entries = capabilities::agent_mcp_entries();
+    if entries.is_empty() {
+        return newt_tui::run_code(code_path(&path), false, None);
+    }
+    let mounted = entries.len();
+    let base = newt_core::Config::resolve()?;
+    let composed = capabilities::compose_agent_mcp(base, entries);
+    let session_path = std::env::temp_dir().join(format!("gila-caps-{}.toml", std::process::id()));
+    let toml = toml::to_string(&composed)
+        .map_err(|e| anyhow::anyhow!("failed to serialize capability session config: {e}"))?;
+    std::fs::write(&session_path, toml).map_err(|e| {
+        anyhow::anyhow!("failed to write capability session config {session_path:?}: {e}")
+    })?;
+    std::env::set_var("NEWT_CONFIG", &session_path);
+    eprintln!("→ gila: mounted {mounted} capability MCP server(s) as agent tools");
     newt_tui::run_code(code_path(&path), false, None)
 }
