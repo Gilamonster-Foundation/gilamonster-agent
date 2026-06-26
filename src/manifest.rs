@@ -13,10 +13,10 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Where a capability's tools are exposed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Expose {
     /// Human CLI only — the safe default (no agent tools, no context flooding).
@@ -39,7 +39,7 @@ impl Expose {
 }
 
 /// One `[[capabilities]]` entry.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct CapabilityEntry {
     /// The capability name (matches the `gilamonster.capabilities` entry point).
     pub name: String,
@@ -47,29 +47,29 @@ pub struct CapabilityEntry {
     #[serde(default)]
     pub expose: Expose,
     /// Run the capability's tools under an agent-bridle leash when invoked as an
-    /// agent tool. (Enforced once the confined-spawn path lands — agent-bridle#55.)
+    /// agent tool (`gila capabilities run` confines it; see `capabilities.rs`).
     #[serde(default)]
     pub confined: bool,
     /// Environment variables to grant the capability subprocess (and nothing
     /// else reaches it — the external-boundary invariant).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env: Vec<String>,
     /// Optional per-tool allow-list when exposed as agent tools.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<String>>,
     /// A venv that serves this capability's `gilacap`, overriding the global.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub venv: Option<String>,
 }
 
 /// The parsed `capabilities.toml`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Manifest {
     /// A venv applied to every capability that does not name its own.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub venv: Option<String>,
     /// The `[[capabilities]]` array.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<CapabilityEntry>,
 }
 
@@ -112,6 +112,12 @@ impl Manifest {
         self.entry(name)
             .and_then(|c| c.venv.as_deref())
             .or(self.venv.as_deref())
+    }
+
+    /// Render the manifest back to TOML (what `gila cap config` writes). Defaults
+    /// (empty env, `None` venv/tools) are omitted, so the file stays minimal.
+    pub fn to_toml(&self) -> Result<String> {
+        toml::to_string_pretty(self).context("serializing the capabilities manifest")
     }
 }
 
@@ -185,5 +191,37 @@ mod tests {
     fn default_path_is_under_dot_gila() {
         let p = Manifest::default_path(Path::new("/home/op"));
         assert!(p.ends_with(".gila/capabilities.toml"));
+    }
+
+    #[test]
+    fn to_toml_round_trips_and_omits_defaults() {
+        let m = Manifest {
+            venv: None,
+            capabilities: vec![
+                CapabilityEntry {
+                    name: "confluence".into(),
+                    expose: Expose::Both,
+                    confined: true,
+                    env: vec!["CONFLUENCE_TOKEN".into()],
+                    tools: None,
+                    venv: None,
+                },
+                CapabilityEntry {
+                    name: "mogul".into(),
+                    expose: Expose::Cli,
+                    confined: false,
+                    env: vec![],
+                    tools: None,
+                    venv: None,
+                },
+            ],
+        };
+        let toml = m.to_toml().unwrap();
+        // Defaults are omitted — no `tools`/`venv` lines, no empty `env`.
+        assert!(!toml.contains("tools"));
+        assert!(!toml.contains("venv"));
+        // Enum serializes snake_case, and the document parses back to the same value.
+        assert!(toml.contains("expose = \"both\""));
+        assert_eq!(Manifest::parse(&toml).unwrap(), m);
     }
 }
