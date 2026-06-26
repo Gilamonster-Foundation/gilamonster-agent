@@ -18,6 +18,7 @@ use clap::Parser;
 use gilamonster_agent::cowork::{
     render_frame, restore_terminal, setup_terminal, CoworkApp, TerminalGuard, COWORK_SYSTEM_PROMPT,
 };
+use gilamonster_agent::fleet::{render_fleet_frame, FleetModel};
 use gilamonster_agent::follow::{
     config_from_backend, drive_comment, follow_tick, FollowTick, ObservationChannel, TypescriptTail,
 };
@@ -95,15 +96,77 @@ async fn main() -> anyhow::Result<()> {
             CapabilitiesCmd::Run { name, tool, args } => capabilities::run(&name, &tool, args),
             CapabilitiesCmd::Config => capabilities::config(),
         },
-        // The matrix runs under the same inherited object-capability identity
-        // as newt — surface where the operator key lives, then the scaffold
-        // notice. The rendering is in `matrix_report` (unit-tested); here we
-        // only resolve the real path and print.
-        Command::Matrix => {
-            print!("{}", matrix_report(newt_identity::default_key_path()));
-            Ok(())
-        }
+        // The matrix is the FleetView crew-monitor dashboard. `--mock` opens the
+        // full-screen dashboard over a canned roster (Phase 1: the standalone
+        // surface); bare `gila matrix` prints the scaffold notice. The render
+        // path + roster are unit-tested in `fleet.rs`; this arm owns only the raw
+        // terminal loop (the by-design-uncovered tty surface) and the print.
+        Command::Matrix { mock } => run_matrix(mock),
     }
+}
+
+/// `gila matrix` — print the scaffold notice, or (`--mock`) open the FleetView
+/// dashboard.
+///
+/// Bare `gila matrix` runs under the same inherited object-capability identity
+/// as newt: it surfaces where the operator key lives ([`matrix_report`], pure +
+/// unit-tested) and returns. `--mock` hands off to the full-screen dashboard
+/// loop over the canned [`FleetModel::mock`] roster.
+fn run_matrix(mock: bool) -> anyhow::Result<()> {
+    if !mock {
+        print!("{}", matrix_report(newt_identity::default_key_path()));
+        return Ok(());
+    }
+    run_fleet_dashboard(FleetModel::mock())
+}
+
+/// The live FleetView dashboard loop (binary-owned, the by-design-uncovered tty
+/// surface).
+///
+/// Puts the terminal into raw mode + the alternate screen under a
+/// [`TerminalGuard`] so it is **always** restored (clean exit, error, or panic
+/// mid-render), then draws the dashboard each frame via the tested
+/// [`render_fleet_frame`] and polls crossterm for input. Phase 1 is display-only:
+/// `q` / `Esc` / `Ctrl-C` quit; the [`Focus`](gilamonster_agent::cowork::Focus)-
+/// driven navigation state machine and live data sources land in later phases.
+/// All render/layout logic lives in the tested `fleet.rs`; this function only
+/// wires it to a real terminal — the same carve-out `run_cowork` uses.
+fn run_fleet_dashboard(model: FleetModel) -> anyhow::Result<()> {
+    use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+    use ratatui::backend::CrosstermBackend;
+    use ratatui::Terminal;
+
+    setup_terminal()?;
+    // The guard restores the terminal on a clean return, on an error unwinding
+    // out of this function, AND on a panic mid-render.
+    let mut guard = TerminalGuard::new(restore_terminal);
+    let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
+
+    let loop_result: anyhow::Result<()> = (|| {
+        loop {
+            terminal.draw(|f| render_fleet_frame(&model, f))?;
+
+            // Block until a key (short timeout keeps resize redraws responsive).
+            if event::poll(Duration::from_millis(100))? {
+                if let Event::Key(key) = event::read()? {
+                    if key.kind != KeyEventKind::Release {
+                        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                        match key.code {
+                            KeyCode::Char('q') | KeyCode::Esc => break,
+                            KeyCode::Char('c') if ctrl => break,
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    })();
+
+    // Restore deterministically before any post-exit output; Drop is then a
+    // no-op (it would still fire on the error/panic paths above).
+    guard.restore();
+    loop_result
 }
 
 /// The live `gila follow` loop (binary-owned, side-effecting).
