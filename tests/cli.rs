@@ -140,3 +140,30 @@ fn capabilities_run_dispatches_and_errors_clearly_without_a_caps_venv() {
         .failure()
         .stderr(predicate::str::contains("confluence:blog"));
 }
+
+#[test]
+fn capabilities_run_engages_the_confined_path_when_the_manifest_marks_it() {
+    // A manifest entry with `confined = true` routes `run` through the agent-bridle
+    // confined spawn (caveats mint + ConfinedCommand) instead of the bare spawn.
+    // The venv is bogus so the spawn fails fast — the point is to prove the
+    // *confined* code path executes, which surfaces a "confined spawn" error
+    // (or a fail-closed refusal on a kernel without Landlock — both wrapped here).
+    let home = tempfile::tempdir().expect("tempdir");
+    let gdir = home.path().join(".gila");
+    std::fs::create_dir_all(&gdir).expect("mkdir .gila");
+    std::fs::write(
+        gdir.join("capabilities.toml"),
+        "[[capabilities]]\nname = \"demo\"\nconfined = true\n",
+    )
+    .expect("write manifest");
+
+    gila()
+        .args(["capabilities", "run", "demo", "sometool"])
+        .env("HOME", home.path())
+        .env("GILA_CAP_VENV", "/gila-caps-venv-does-not-exist")
+        .env_remove("GILA_CAP_PYTHON")
+        .env_remove("VIRTUAL_ENV")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("confined spawn"));
+}
