@@ -18,7 +18,7 @@ use clap::Parser;
 use gilamonster_agent::cowork::{
     render_frame, restore_terminal, setup_terminal, CoworkApp, TerminalGuard, COWORK_SYSTEM_PROMPT,
 };
-use gilamonster_agent::fleet::{render_fleet_frame, FleetModel};
+use gilamonster_agent::fleet::{render_fleet_frame, FleetModel, Step};
 use gilamonster_agent::follow::{
     config_from_backend, drive_comment, follow_tick, FollowTick, ObservationChannel, TypescriptTail,
 };
@@ -126,13 +126,13 @@ fn run_matrix(mock: bool) -> anyhow::Result<()> {
 /// Puts the terminal into raw mode + the alternate screen under a
 /// [`TerminalGuard`] so it is **always** restored (clean exit, error, or panic
 /// mid-render), then draws the dashboard each frame via the tested
-/// [`render_fleet_frame`] and polls crossterm for input. Phase 1 is display-only:
-/// `q` / `Esc` / `Ctrl-C` quit; the [`Focus`](gilamonster_agent::cowork::Focus)-
-/// driven navigation state machine and live data sources land in later phases.
-/// All render/layout logic lives in the tested `fleet.rs`; this function only
-/// wires it to a real terminal — the same carve-out `run_cowork` uses.
-fn run_fleet_dashboard(model: FleetModel) -> anyhow::Result<()> {
-    use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+/// [`render_fleet_frame`] and folds each key press through the tested
+/// [`FleetModel::apply_key`] navigation state machine (↑↓ select, →/Enter drill
+/// in, Esc/← back, `f` freeze, `q`/`Ctrl-C` quit). All render/layout/navigation
+/// logic lives in the tested `fleet.rs`; this function only wires it to a real
+/// terminal — the same carve-out `run_cowork` uses.
+fn run_fleet_dashboard(mut model: FleetModel) -> anyhow::Result<()> {
+    use crossterm::event::{self, Event, KeyEventKind};
     use ratatui::backend::CrosstermBackend;
     use ratatui::Terminal;
 
@@ -146,16 +146,12 @@ fn run_fleet_dashboard(model: FleetModel) -> anyhow::Result<()> {
         loop {
             terminal.draw(|f| render_fleet_frame(&model, f))?;
 
-            // Block until a key (short timeout keeps resize redraws responsive).
+            // Block until a key (short timeout keeps resize redraws responsive),
+            // then fold it through the navigation state machine.
             if event::poll(Duration::from_millis(100))? {
                 if let Event::Key(key) = event::read()? {
-                    if key.kind != KeyEventKind::Release {
-                        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-                        match key.code {
-                            KeyCode::Char('q') | KeyCode::Esc => break,
-                            KeyCode::Char('c') if ctrl => break,
-                            _ => {}
-                        }
+                    if key.kind != KeyEventKind::Release && model.apply_key(key) == Step::Quit {
+                        break;
                     }
                 }
             }
