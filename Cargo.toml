@@ -41,6 +41,12 @@ newt-core = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev 
 # caveats. Shared with newt so the whole matrix runs under one capability model.
 newt-identity = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev = "81488ef9a57394c724eeff5518b36fe4bbc4c08a" }
 
+# The MCP server facade — `gila cockpit` runs Scrybe as a stdio JSON-RPC
+# server through this, inheriting newt's tool-call / observation protocol. Same
+# pinned rev as the rest of the airframe; kept alongside newt-mcp-client so the
+# two halves (client + server) stay in lockstep with upstream.
+newt-mcp-server = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev = "81488ef9a57394c724eeff5518b36fe4bbc4c08a" }
+
 # --- Local ---------------------------------------------------------------------
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }

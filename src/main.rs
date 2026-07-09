@@ -12,6 +12,7 @@
 //! See the crate-level docs in `src/lib.rs` for the inherit/extend rationale.
 
 use std::io;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::Parser;
@@ -102,6 +103,11 @@ async fn main() -> anyhow::Result<()> {
         // path + roster are unit-tested in `fleet.rs`; this arm owns only the raw
         // terminal loop (the by-design-uncovered tty surface) and the print.
         Command::Matrix { mock } => run_matrix(mock),
+        // Live Markdown session against a scrybe MCP peer — open a doc, let the
+        // human edit it back, with edits flowing both ways (see `cockpit` and
+        // docs/design/scrybe-markdown-surface.md). The actual loop lives in
+        // `gilamonster_agent::cockpit`; this arm just hands off.
+        Command::Cockpit { uri, doc_path } => run_cockpit(&uri, doc_path.as_deref().map(|p| p.to_str().unwrap_or(""))),
     }
 }
 
@@ -118,6 +124,27 @@ fn run_matrix(mock: bool) -> anyhow::Result<()> {
         return Ok(());
     }
     run_fleet_dashboard(FleetModel::mock())
+}
+
+/// `gila cockpit` — open a live Markdown session against a scrybe MCP peer.
+///
+/// Phase 1: accept the URI + doc path, print the config, exit (the by-design-
+/// uncovered surface). The full loop lives in [`gilamonster_agent::cockpit`]
+/// and will be wired once the MCP handshake is implemented.
+fn run_cockpit(server_uri: &str, doc_path: Option<&str>) -> anyhow::Result<()> {
+    let path = doc_path
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+            .join("cockpit.md"));
+    let config = gilamonster_agent::cockpit::CockpitConfig {
+        server_uri: server_uri.to_string(),
+        doc_path: path,
+    };
+    println!("Cockpit session starting");
+    println!("  Server: {}", config.server_uri);
+    println!("  Doc:    {}", config.doc_path.display());
+    println!("Phase 1 scaffold — full MCP loop lands in later phases.");
+    Ok(())
 }
 
 /// The live FleetView dashboard loop (binary-owned, the by-design-uncovered tty

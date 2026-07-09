@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 
+  pub mod cockpit;
 pub mod capabilities;
 pub mod cowork;
 pub mod fleet;
@@ -90,6 +91,18 @@ pub enum Command {
         /// [`hotseat::TRIAGE_SKILL_ENV`].
         #[arg(long)]
         skill: Option<String>,
+    },
+    /// Open the **cockpit** — a full-screen Scrybe-powered dashboard that surfaces
+    /// the agent matrix (fleet status, worker health, active sessions) with live
+    /// Mermaid diagrams and real-time metrics. The cockpit is the primary operator
+    /// interface for monitoring and controlling the multi-agent system.
+    Cockpit {
+        /// URI of the scrybe MCP server to connect to.
+        #[arg(long)]
+        uri: String,
+        /// Path of the document to open/update in the session.
+        #[arg(long)]
+        doc_path: Option<PathBuf>,
     },
     /// Discover and exercise installed Gilamonster **capabilities** — pip-installed
     /// `gila-cap-*` packages that expose tools over MCP. The host side of the
