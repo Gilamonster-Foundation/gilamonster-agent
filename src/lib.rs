@@ -35,6 +35,7 @@ pub mod keys;
 pub mod layout;
 pub mod manifest;
 pub mod pty;
+pub mod scrybe;
 pub mod venv;
 
 /// The `gila` command-line surface. Parsed in `main`, re-exported here so the
@@ -123,6 +124,21 @@ pub enum Command {
     Cockpit {
         /// Optional working path the cockpit session runs against.
         path: Option<PathBuf>,
+    },
+    /// Open a live **scrybe** Markdown session: gila is the MCP *client*, a
+    /// scrybe MCP server (local or an agent-mesh peer) owns the document; the
+    /// agent opens/updates it and the human edits it back, edits flowing both
+    /// ways. Shape #1 (MCP peer) of `docs/design/scrybe-markdown-surface.md`.
+    /// Phase 1 accepts the connection + doc and prints the config; the live MCP
+    /// loop lands in later phases.
+    Scrybe {
+        /// URI of the scrybe MCP server to connect to.
+        #[arg(long)]
+        uri: String,
+        /// Path of the Markdown document to open/update. Defaults to
+        /// `./scrybe.md`.
+        #[arg(long)]
+        doc_path: Option<PathBuf>,
     },
 }
 
@@ -316,6 +332,38 @@ mod tests {
                     args: Some("{\"space\":\"~me\"}".to_string()),
                 },
             }
+        );
+    }
+
+    #[test]
+    fn scrybe_subcommand_parses() {
+        let cli = Cli::parse_from([
+            "gila",
+            "scrybe",
+            "--uri",
+            "http://localhost:3001",
+            "--doc-path",
+            "/tmp/notes.md",
+        ]);
+        assert_eq!(
+            cli.effective_command(),
+            Command::Scrybe {
+                uri: "http://localhost:3001".to_string(),
+                doc_path: Some(PathBuf::from("/tmp/notes.md")),
+            }
+        );
+        // doc-path is optional; uri is required.
+        let cli = Cli::parse_from(["gila", "scrybe", "--uri", "http://x"]);
+        assert_eq!(
+            cli.effective_command(),
+            Command::Scrybe {
+                uri: "http://x".to_string(),
+                doc_path: None,
+            }
+        );
+        assert!(
+            Cli::try_parse_from(["gila", "scrybe"]).is_err(),
+            "uri required"
         );
     }
 

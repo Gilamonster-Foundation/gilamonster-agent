@@ -108,7 +108,34 @@ async fn main() -> anyhow::Result<()> {
         // shell PTY land in the next ratchet. Raw terminal loop = the same
         // by-design-uncovered carve-out as run_cowork / run_fleet_dashboard.
         Command::Cockpit { path } => run_cockpit(path),
+        // Scrybe: a live Markdown session against a scrybe MCP peer — gila is
+        // the client, scrybe owns the doc, edits flow both ways (see `scrybe`
+        // and docs/design/scrybe-markdown-surface.md). Phase 1 prints the
+        // resolved config and exits; the live MCP loop lands in later phases.
+        Command::Scrybe { uri, doc_path } => {
+            run_scrybe(&uri, doc_path.as_deref().and_then(|p| p.to_str()))
+        }
     }
+}
+
+/// `gila scrybe` — open a live Markdown session against a scrybe MCP peer.
+///
+/// Phase 1: resolve + validate the [`ScrybeConfig`](gilamonster_agent::scrybe::ScrybeConfig),
+/// print it, and exit (the by-design-uncovered surface). The full MCP loop
+/// lives in [`gilamonster_agent::scrybe`] and will be wired once the handshake
+/// is implemented.
+fn run_scrybe(server_uri: &str, doc_path: Option<&str>) -> anyhow::Result<()> {
+    use gilamonster_agent::scrybe::{build_config, validate_config, ScrybeConfig};
+    let mut config: ScrybeConfig = build_config(doc_path);
+    config.server_uri = server_uri.to_string();
+    if let Err(e) = validate_config(&config) {
+        anyhow::bail!("{e}");
+    }
+    println!("scrybe session starting");
+    println!("  server: {}", config.server_uri);
+    println!("  doc:    {}", config.doc_path.display());
+    println!("Phase 1 scaffold — the live MCP loop lands in later phases.");
+    Ok(())
 }
 
 /// The cockpit raw render/event loop (binary-owned, the by-design-uncovered tty
