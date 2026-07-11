@@ -26,6 +26,7 @@ use clap::{Parser, Subcommand};
 
 pub mod authority;
 pub mod capabilities;
+pub mod cockpit;
 pub mod cowork;
 pub mod fleet;
 pub mod follow;
