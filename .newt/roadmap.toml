@@ -1,0 +1,250 @@
+schema_version = 1
+id = "1783727322129749288-f61f08ce-cfdd-4cc6-82dc-2e462f0b99c9"
+title = "Gilamonster 0.x — multi-newt cockpit UX"
+
+[tree]
+aggregation = "concat"
+
+[[tree.subtask]]
+id = "node-1"
+instruction = "v0.1.0 Keys & doctrine — cockpit ADR + keys.rs dispatcher"
+deps = []
+parallel_ok = false
+context = []
+status = "pending"
+kind = "phase"
+
+[tree.subtask.caveat_policy]
+fs_read = "none"
+fs_write = "none"
+exec = "none"
+net = "none"
+
+[[tree.subtask]]
+id = "node-2"
+instruction = "v0.2.0 Kill the leak — dispatcher into cowork, no Ctrl+B 0x02"
+deps = []
+parallel_ok = false
+context = []
+status = "pending"
+kind = "phase"
+
+[tree.subtask.caveat_policy]
+fs_read = "none"
+fs_write = "none"
+exec = "none"
+net = "none"
+
+[[tree.subtask]]
+id = "node-3"
+instruction = "v0.3.0 Layout — layout.rs arena tree + presets"
+deps = []
+parallel_ok = false
+context = []
+status = "pending"
+kind = "phase"
+
+[tree.subtask.caveat_policy]
+fs_read = "none"
+fs_write = "none"
+exec = "none"
+net = "none"
+
+[[tree.subtask]]
+id = "node-4"
+instruction = "v0.4.0 Cockpit + authority — N chat drivers, observe-only proven 3 ways"
+deps = []
+parallel_ok = false
+context = []
+status = "pending"
+kind = "phase"
+
+[tree.subtask.caveat_policy]
+fs_read = "none"
+fs_write = "none"
+exec = "none"
+net = "none"
+
+[[tree.subtask]]
+id = "node-5"
+instruction = "v0.5.0 MCP actor — per-tab mcp_actor over NoMcp"
+deps = []
+parallel_ok = false
+context = []
+status = "pending"
+kind = "phase"
+
+[tree.subtask.caveat_policy]
+fs_read = "none"
+fs_write = "none"
+exec = "none"
+net = "none"
+
+[[tree.subtask]]
+id = "node-6"
+instruction = "v0.6.0 newt 0.8.x pin-bump + workbench panes (with_tools)"
+deps = []
+parallel_ok = false
+context = []
+status = "pending"
+kind = "phase"
+
+[tree.subtask.caveat_policy]
+fs_read = "none"
+fs_write = "none"
+exec = "none"
+net = "none"
+
+[[tree.subtask]]
+id = "node-7"
+instruction = "v0.7.0 Jupyter + browser — venv mgmt, status pane, open chokepoint"
+deps = []
+parallel_ok = false
+context = []
+status = "pending"
+kind = "phase"
+
+[tree.subtask.caveat_policy]
+fs_read = "none"
+fs_write = "none"
+exec = "none"
+net = "none"
+
+[[tree.subtask]]
+id = "node-8"
+instruction = "v0.8.0 Copy/scroll + escalation modal (PermissionGate)"
+deps = []
+parallel_ok = false
+context = []
+status = "pending"
+kind = "phase"
+
+[tree.subtask.caveat_policy]
+fs_read = "none"
+fs_write = "none"
+exec = "none"
+net = "none"
+
+[[tree.subtask]]
+id = "node-9"
+instruction = "v0.9.0 Save & resume — session serde, with_transcript"
+deps = []
+parallel_ok = false
+context = []
+status = "pending"
+kind = "phase"
+
+[tree.subtask.caveat_policy]
+fs_read = "none"
+fs_write = "none"
+exec = "none"
+net = "none"
+
+[[tree.subtask]]
+id = "node-10"
+instruction = "v0.10.0 Fleet tab — Tab::Fleet, gila matrix alias, closes #21"
+deps = []
+parallel_ok = false
+context = []
+status = "pending"
+kind = "phase"
+
+[tree.subtask.caveat_policy]
+fs_read = "none"
+fs_write = "none"
+exec = "none"
+net = "none"
+
+[[tree.subtask]]
+id = "node-11"
+instruction = "v0.11.0 pane-drive tool-set — agent pane API, guards become guarantees (#39)"
+deps = []
+parallel_ok = false
+context = []
+status = "pending"
+kind = "phase"
+
+[tree.subtask.caveat_policy]
+fs_read = "none"
+fs_write = "none"
+exec = "none"
+net = "none"
+
+[[tree.subtask]]
+id = "node-12"
+instruction = "v0.12.0 pane-drive skill + multi-newt orchestration capstone (#39)"
+deps = []
+parallel_ok = false
+context = []
+status = "pending"
+kind = "phase"
+
+[tree.subtask.caveat_policy]
+fs_read = "none"
+fs_write = "none"
+exec = "none"
+net = "none"
+
+[[tree.subtask]]
+id = "node-13"
+instruction = "pane API as cockpit MCP tools — open/read/write/wait_for/status/rename/close"
+deps = []
+parallel_ok = false
+context = []
+status = "pending"
+parent = "node-11"
+kind = "plan"
+
+[tree.subtask.caveat_policy]
+fs_read = "none"
+fs_write = "none"
+exec = "none"
+net = "none"
+
+[[tree.subtask]]
+id = "node-14"
+instruction = "adversarial regression suite — tmux-drive gotchas as tests"
+deps = []
+parallel_ok = false
+context = []
+status = "pending"
+parent = "node-11"
+kind = "plan"
+
+[tree.subtask.caveat_policy]
+fs_read = "none"
+fs_write = "none"
+exec = "none"
+net = "none"
+
+[[tree.subtask]]
+id = "node-15"
+instruction = "bundled pane-drive skill derived from tmux-drive"
+deps = []
+parallel_ok = false
+context = []
+status = "pending"
+parent = "node-12"
+kind = "plan"
+
+[tree.subtask.caveat_policy]
+fs_read = "none"
+fs_write = "none"
+exec = "none"
+net = "none"
+
+[[tree.subtask]]
+id = "node-16"
+instruction = "demo — roadmap-driving newt dispatches Blocked nodes to pane-seated newts"
+deps = []
+parallel_ok = false
+context = []
+status = "pending"
+parent = "node-12"
+kind = "plan"
+
+[tree.subtask.caveat_policy]
+fs_read = "none"
+fs_write = "none"
+exec = "none"
+net = "none"
