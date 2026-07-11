@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 
+pub mod authority;
 pub mod capabilities;
 pub mod cowork;
 pub mod fleet;
