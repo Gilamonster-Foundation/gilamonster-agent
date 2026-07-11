@@ -424,8 +424,9 @@ const SHELL_SCROLLBACK: usize = 1000;
 ///
 /// - [`shared`](PtyShell::shared) — the grid the render reads and the
 ///   [`PtyShellSource`] drains, cloneable for both.
-/// - [`write_input`](PtyShell::write_input) — forward the human's keystrokes
-///   (already [`encode_key`]-encoded) to the shell.
+/// - the **write half is split off entirely** into a separate [`PtyWriter`]
+///   (returned alongside the shell by [`spawn`](PtyShell::spawn)) — the
+///   `PtyShell` itself has no way to write to the shell. See [`PtyWriter`].
 /// - [`resize`](PtyShell::resize) — resize the kernel pty *and* the parser grid
 ///   together when the pane changes size.
 /// - the embedded [`PtyChildGuard`], so dropping the `PtyShell` kills the shell
@@ -436,9 +437,31 @@ const SHELL_SCROLLBACK: usize = 1000;
 /// same carve-out #8's live tail loop and #9's crossterm event loop are; the
 /// logic it wires (the grid mapping, the key encoding, the resize math, the
 /// guard's kill-on-drop, the channel feed) is all unit-tested above.
+/// The **write half** of a hosted shell — the sole way to send keystrokes to
+/// the PTY, split off from [`PtyShell`] (the observe half) at
+/// [`spawn`](PtyShell::spawn).
+///
+/// This is the cockpit's write-side observe-only proof (#54): `PtyWriter` is a
+/// **linear, non-`Clone`** capability. The cockpit input router owns the one
+/// and only instance; because it cannot be cloned and no agent-facing struct
+/// (driver, observation channel, pane model) has a field of this type, an agent
+/// is *structurally* unable to type into the human's shell — the guarantee is
+/// the compiler's, not a review convention. The read side (`PtyShell::shared` /
+/// `observation_source`) is freely shareable; only writing is capability-gated.
+pub struct PtyWriter {
+    writer: Box<dyn std::io::Write + Send>,
+}
+
+impl PtyWriter {
+    /// Forward already-encoded keystroke bytes (see [`encode_key`]) to the shell.
+    pub fn write_input(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        self.writer.write_all(bytes)?;
+        self.writer.flush()
+    }
+}
+
 pub struct PtyShell {
     master: Box<dyn portable_pty::MasterPty + Send>,
-    writer: Box<dyn std::io::Write + Send>,
     shared: Arc<Mutex<SharedScreen>>,
     /// Killing the child on drop closes the slave, which EOFs the master read,
     /// which lets the reader thread fall out of its loop and finish.
@@ -458,7 +481,7 @@ impl PtyShell {
         program: &str,
         size: PtySize,
         cwd: Option<&std::path::Path>,
-    ) -> anyhow::Result<Self> {
+    ) -> anyhow::Result<(Self, PtyWriter)> {
         let pty_system = portable_pty::native_pty_system();
         let pair = pty_system.openpty(size)?;
 
@@ -502,13 +525,15 @@ impl PtyShell {
                 }
             })?;
 
-        Ok(Self {
-            master: pair.master,
-            writer,
-            shared,
-            guard: PtyChildGuard::new(child),
-            reader: Some(handle),
-        })
+        Ok((
+            Self {
+                master: pair.master,
+                shared,
+                guard: PtyChildGuard::new(child),
+                reader: Some(handle),
+            },
+            PtyWriter { writer },
+        ))
     }
 
     /// The shared screen accumulator — clone the `Arc` for the render side and
@@ -522,12 +547,6 @@ impl PtyShell {
     #[must_use]
     pub fn observation_source(&self) -> PtyShellSource {
         PtyShellSource::new(self.shared())
-    }
-
-    /// Forward already-encoded keystroke bytes (see [`encode_key`]) to the shell.
-    pub fn write_input(&mut self, bytes: &[u8]) -> std::io::Result<()> {
-        self.writer.write_all(bytes)?;
-        self.writer.flush()
     }
 
     /// Resize the hosted shell to a new pane [`Rect`]: resize the kernel pty (so
@@ -564,6 +583,18 @@ impl Drop for PtyShell {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- PtyWriter: the write-side observe-only capability (#54) -------------
+
+    /// `PtyWriter` must be `Send` so the input router can own it across the
+    /// render loop. (Its non-`Clone`-ness is the compiler's to enforce — there
+    /// is no `.clone()` in the tree, and adding one would fail to build; a
+    /// runtime test cannot assert the *absence* of a trait impl.)
+    #[test]
+    fn pty_writer_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<PtyWriter>();
+    }
 
     // --- shell resolution ---------------------------------------------------
 
@@ -995,7 +1026,7 @@ mod tests {
         // Spawn a real shell on a real pty, drive a deterministic one-shot
         // command through the keystroke-forwarding path, and assert the output
         // lands in the rendered grid.
-        let mut shell = PtyShell::spawn(
+        let (shell, mut writer) = PtyShell::spawn(
             "/bin/sh",
             PtySize {
                 rows: 4,
@@ -1007,7 +1038,7 @@ mod tests {
         )
         .expect("spawn sh on a pty");
 
-        shell.write_input(b"printf hello\r\n").unwrap();
+        writer.write_input(b"printf hello\r\n").unwrap();
 
         let mut got = false;
         for _ in 0..300 {
