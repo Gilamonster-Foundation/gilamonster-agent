@@ -262,9 +262,7 @@ async fn run_follow(
 /// excludes — the same shape `gila follow` uses for its live tail loop.
 fn run_cowork(path: Option<std::path::PathBuf>) -> anyhow::Result<()> {
     use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-    use gilamonster_agent::pty::{
-        encode_key, pty_shell_program, pty_size_for, screen_to_lines, PtyShell,
-    };
+    use gilamonster_agent::pty::{pty_shell_program, pty_size_for, screen_to_lines, PtyShell};
     use ratatui::backend::CrosstermBackend;
     use ratatui::Terminal;
 
@@ -291,6 +289,10 @@ fn run_cowork(path: Option<std::path::PathBuf>) -> anyhow::Result<()> {
         vec![MemMessage::system(COWORK_SYSTEM_PROMPT)],
     );
     let mut app = CoworkApp::new(ObservationChannel::new(driver));
+    // #48: the tmux prefix dispatcher. Every keystroke passes through it before
+    // reaching the PTY, so a bare Ctrl+B arms a prefix instead of leaking 0x02
+    // into the user's shell.
+    let mut dispatcher = gilamonster_agent::keys::KeyDispatcher::default();
 
     // --- terminal setup under an RAII guard (restored on EVERY exit) ---------
     setup_terminal()?;
@@ -354,26 +356,42 @@ fn run_cowork(path: Option<std::path::PathBuf>) -> anyhow::Result<()> {
                 if let Event::Key(key) = event::read()? {
                     if key.kind != KeyEventKind::Release {
                         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-                        // Ctrl-Q always quits and Ctrl-O always swaps focus, from
-                        // EITHER pane — they are the cockpit's global keys.
-                        match key.code {
-                            KeyCode::Char('q') if ctrl => app.request_quit(),
-                            KeyCode::Char('o') if ctrl => app.swap_focus(),
-                            // When the SHELL pane has focus, every other key is the
-                            // human's input to their own shell: encode it and write
-                            // it to the pty master.
-                            _ if app.focus() == gilamonster_agent::cowork::Focus::Shell => {
-                                if let Some(bytes) = encode_key(key.code, key.modifiers) {
+                        // Ctrl-Q quits and Ctrl-O swaps focus, from EITHER pane —
+                        // the cockpit's direct global keys. They are held while a
+                        // prefix is armed, so a post-prefix key always resolves
+                        // through the dispatcher (never as a stray global).
+                        if !dispatcher.is_armed() && ctrl && key.code == KeyCode::Char('q') {
+                            app.request_quit();
+                        } else if !dispatcher.is_armed() && ctrl && key.code == KeyCode::Char('o') {
+                            app.swap_focus();
+                        } else {
+                            // Everything else routes through the prefix dispatcher
+                            // FIRST (kills the Ctrl+B → 0x02 leak); the pure router
+                            // in cowork.rs decides what actually happens.
+                            use gilamonster_agent::cowork::CoworkKey;
+                            match gilamonster_agent::cowork::route_key(
+                                &mut dispatcher,
+                                key.code,
+                                key.modifiers,
+                                app.focus(),
+                                std::time::Instant::now(),
+                            ) {
+                                CoworkKey::Pty(bytes) => {
                                     let _ = shell.write_input(&bytes);
                                 }
+                                CoworkKey::Submit => {
+                                    app.submit_input();
+                                }
+                                CoworkKey::Backspace => app.backspace(),
+                                CoworkKey::Char(c) => app.push_char(c),
+                                // Focus actions the scaffold already supports; the
+                                // rest of the cockpit actions land in later phases.
+                                CoworkKey::Action(
+                                    gilamonster_agent::keys::Action::FocusNext
+                                    | gilamonster_agent::keys::Action::FocusLast,
+                                ) => app.swap_focus(),
+                                CoworkKey::Action(_) | CoworkKey::Absorbed | CoworkKey::Ignore => {}
                             }
-                            // Otherwise the chat pane owns the key.
-                            KeyCode::Enter => {
-                                app.submit_input();
-                            }
-                            KeyCode::Backspace => app.backspace(),
-                            KeyCode::Char(c) if !ctrl => app.push_char(c),
-                            _ => {}
                         }
                     }
                 }
