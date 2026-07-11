@@ -115,6 +115,15 @@ pub enum Command {
         #[arg(long)]
         mock: bool,
     },
+    /// Open the **cockpit** — the tmux-semantics multiplexer: tabs + panes with
+    /// prefix keybindings (`Ctrl+B c` new chat tab, `Ctrl+B "` shell pane, arrows
+    /// to move focus, `z` zoom). This first slice renders the tab/pane layout and
+    /// responds to the keys; live per-pane drivers + the ambient shell PTY land
+    /// in the next ratchet. Companion chat panes are clamped by `authority`.
+    Cockpit {
+        /// Optional working path the cockpit session runs against.
+        path: Option<PathBuf>,
+    },
 }
 
 /// `gila capabilities` subcommands.
@@ -306,6 +315,20 @@ mod tests {
                     tool: "blog".to_string(),
                     args: Some("{\"space\":\"~me\"}".to_string()),
                 },
+            }
+        );
+    }
+
+    #[test]
+    fn cockpit_subcommand_parses() {
+        assert_eq!(
+            Cli::parse_from(["gila", "cockpit"]).effective_command(),
+            Command::Cockpit { path: None }
+        );
+        assert_eq!(
+            Cli::parse_from(["gila", "cockpit", "/tmp/p"]).effective_command(),
+            Command::Cockpit {
+                path: Some(PathBuf::from("/tmp/p"))
             }
         );
     }
