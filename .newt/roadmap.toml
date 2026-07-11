@@ -11,8 +11,11 @@ instruction = "v0.1.0 Keys & doctrine — cockpit ADR + keys.rs dispatcher"
 deps = []
 parallel_ok = false
 context = []
-status = "pending"
+status = "done"
 kind = "phase"
+
+[tree.subtask.artifact_ref]
+issue = 43
 
 [tree.subtask.caveat_policy]
 fs_read = "none"
@@ -163,6 +166,9 @@ parallel_ok = false
 context = []
 status = "pending"
 kind = "phase"
+
+[tree.subtask.artifact_ref]
+issue = 39
 
 [tree.subtask.caveat_policy]
 fs_read = "none"
