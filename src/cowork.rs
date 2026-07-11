@@ -58,11 +58,15 @@
 
 use std::io::{self, Write};
 
+use crossterm::event::{KeyCode as XKeyCode, KeyModifiers};
 use crossterm::{
     cursor::Show,
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+
+use crate::keys::{self, Action, KeyCode as GKeyCode, KeyCombo, KeyDispatcher, KeyDisposition};
+use crate::pty::encode_key;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
@@ -113,6 +117,148 @@ impl Focus {
             Self::Shell => "shell",
         }
     }
+}
+
+// ── #48 / cockpit phase 2: route keystrokes through the prefix dispatcher ────
+//
+// Before this, the raw loop encoded EVERY shell-focused key straight to the PTY
+// — so `Ctrl+B` wrote `0x02` into the user's shell (the leak). Now every key
+// (except the direct global hotkeys, held while a prefix is armed) passes
+// through `KeyDispatcher` first, and this pure router decides what actually
+// happens. The raw loop performs the side effects; the decision is testable.
+
+/// What the cockpit loop should do with one key, after the prefix dispatcher
+/// has seen it. Pure — the raw loop maps each variant to a side effect.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CoworkKey {
+    /// Nothing reaches the PTY or the app: a bare prefix armed the sequence, or
+    /// a post-prefix miss was swallowed. **This is the leak guard.**
+    Absorbed,
+    /// A cockpit action fired (the loop routes it to the app).
+    Action(Action),
+    /// Bytes to write to the focused shell PTY (a forwarded shell key, or the
+    /// literal prefix byte from send-prefix).
+    Pty(Vec<u8>),
+    /// The chat pane owns the key: submit the input line.
+    Submit,
+    /// The chat pane owns the key: delete a char.
+    Backspace,
+    /// The chat pane owns the key: insert a char.
+    Char(char),
+    /// Nothing to do (an unmapped key with chat focus).
+    Ignore,
+}
+
+/// Convert a crossterm key into the dispatcher's own [`KeyCombo`] vocabulary
+/// (the adapter the design keeps out of `keys.rs`). `None` for a key the
+/// dispatcher has no vocabulary for — those bypass the dispatcher and take the
+/// legacy forward path.
+#[must_use]
+pub fn to_key_combo(code: XKeyCode, mods: KeyModifiers) -> Option<KeyCombo> {
+    let g = match code {
+        XKeyCode::Char(c) => GKeyCode::Char(c),
+        XKeyCode::Left => GKeyCode::Left,
+        XKeyCode::Right => GKeyCode::Right,
+        XKeyCode::Up => GKeyCode::Up,
+        XKeyCode::Down => GKeyCode::Down,
+        XKeyCode::Home => GKeyCode::Home,
+        XKeyCode::End => GKeyCode::End,
+        XKeyCode::PageUp => GKeyCode::PageUp,
+        XKeyCode::PageDown => GKeyCode::PageDown,
+        XKeyCode::Enter => GKeyCode::Enter,
+        XKeyCode::Esc => GKeyCode::Esc,
+        XKeyCode::Tab => GKeyCode::Tab,
+        XKeyCode::Backspace => GKeyCode::Backspace,
+        XKeyCode::F(n) => GKeyCode::F(n),
+        _ => return None,
+    };
+    Some(
+        KeyCombo {
+            code: g,
+            mods: keys::Mods {
+                ctrl: mods.contains(KeyModifiers::CONTROL),
+                alt: mods.contains(KeyModifiers::ALT),
+                shift: mods.contains(KeyModifiers::SHIFT),
+            },
+        }
+        .normalized(),
+    )
+}
+
+/// Route one key through the prefix `dispatcher`, given the focused pane. Pure
+/// (the loop supplies `now` and performs the resulting side effect), so the
+/// leak guarantees are unit-tested off the raw terminal loop.
+///
+/// - A bare prefix or a swallowed post-prefix miss → [`CoworkKey::Absorbed`]
+///   (zero bytes to the PTY — the leak is closed here).
+/// - `Ctrl+B Ctrl+B` (send-prefix) → the literal prefix byte to the shell.
+/// - Any other consumed binding → [`CoworkKey::Action`].
+/// - A forwarded key → the shell PTY bytes (shell focus) or a chat edit.
+#[must_use]
+pub fn route_key(
+    dispatcher: &mut KeyDispatcher,
+    code: XKeyCode,
+    mods: KeyModifiers,
+    focus: Focus,
+    now: std::time::Instant,
+) -> CoworkKey {
+    // A key outside the dispatcher's vocabulary can never be a prefix binding:
+    // take the legacy forward path directly (and leave any armed prefix intact).
+    let Some(combo) = to_key_combo(code, mods) else {
+        return forward(code, mods, focus);
+    };
+    match dispatcher.on_key(combo, now) {
+        KeyDisposition::Pending | KeyDisposition::Swallow => CoworkKey::Absorbed,
+        KeyDisposition::Consumed(Action::SendPrefix) => {
+            // Inject the literal prefix byte into the focused shell (how you
+            // type a real Ctrl+B into a nested shell/tmux). No-op with chat
+            // focus — there is no PTY to receive it.
+            match focus {
+                Focus::Shell => {
+                    prefix_bytes(dispatcher.prefix()).map_or(CoworkKey::Absorbed, CoworkKey::Pty)
+                }
+                Focus::Chat => CoworkKey::Absorbed,
+            }
+        }
+        KeyDisposition::Consumed(action) => CoworkKey::Action(action),
+        KeyDisposition::Forward => forward(code, mods, focus),
+    }
+}
+
+/// The legacy forward path: a key the dispatcher did not consume. Shell focus
+/// encodes it to PTY bytes; chat focus maps the edit keys.
+fn forward(code: XKeyCode, mods: KeyModifiers, focus: Focus) -> CoworkKey {
+    match focus {
+        Focus::Shell => encode_key(code, mods).map_or(CoworkKey::Absorbed, CoworkKey::Pty),
+        Focus::Chat => match code {
+            XKeyCode::Enter => CoworkKey::Submit,
+            XKeyCode::Backspace => CoworkKey::Backspace,
+            XKeyCode::Char(c) if !mods.contains(KeyModifiers::CONTROL) => CoworkKey::Char(c),
+            _ => CoworkKey::Ignore,
+        },
+    }
+}
+
+/// The PTY bytes for the configured prefix combo (send-prefix). Converts the
+/// dispatcher's [`KeyCombo`] back to a crossterm key and reuses [`encode_key`],
+/// so the emitted byte is exactly what the same physical key would produce.
+fn prefix_bytes(prefix: KeyCombo) -> Option<Vec<u8>> {
+    let code = match prefix.code {
+        GKeyCode::Char(c) => XKeyCode::Char(c),
+        GKeyCode::Enter => XKeyCode::Enter,
+        GKeyCode::Tab => XKeyCode::Tab,
+        GKeyCode::Backspace => XKeyCode::Backspace,
+        GKeyCode::Esc => XKeyCode::Esc,
+        _ => return None,
+    };
+    let mut mods = KeyModifiers::NONE;
+    if prefix.mods.ctrl {
+        mods |= KeyModifiers::CONTROL;
+    }
+    if prefix.mods.alt {
+        mods |= KeyModifiers::ALT;
+    }
+    encode_key(code, mods)
 }
 
 /// The three regions a cowork frame splits into, in screen order.
@@ -581,6 +727,200 @@ mod tests {
     use newt_core::{BackendKind, MemMessage};
     use std::cell::Cell;
     use std::rc::Rc;
+    use std::time::Instant;
+
+    // ── #48 / phase 2: the prefix dispatcher routing + the leak guarantees ──
+
+    /// Arm the prefix (Ctrl+B) then send `code`+`mods`, returning the route.
+    fn after_prefix(
+        d: &mut KeyDispatcher,
+        code: XKeyCode,
+        mods: KeyModifiers,
+        focus: Focus,
+    ) -> CoworkKey {
+        let now = Instant::now();
+        assert_eq!(
+            route_key(d, XKeyCode::Char('b'), KeyModifiers::CONTROL, focus, now),
+            CoworkKey::Absorbed,
+            "the bare prefix must arm, never reach the PTY"
+        );
+        route_key(d, code, mods, focus, now)
+    }
+
+    #[test]
+    fn bare_prefix_writes_zero_bytes_to_the_shell() {
+        // THE leak: before phase 2, Ctrl+B with shell focus encoded 0x02 into
+        // the user's shell. It must now be absorbed (prefix armed).
+        let mut d = KeyDispatcher::default();
+        assert_eq!(
+            route_key(
+                &mut d,
+                XKeyCode::Char('b'),
+                KeyModifiers::CONTROL,
+                Focus::Shell,
+                Instant::now(),
+            ),
+            CoworkKey::Absorbed
+        );
+    }
+
+    #[test]
+    fn swallowed_post_prefix_typo_writes_zero_bytes_to_the_shell() {
+        let mut d = KeyDispatcher::default();
+        // Ctrl+B then an unbound key (`e`) → swallowed, zero PTY bytes.
+        assert_eq!(
+            after_prefix(
+                &mut d,
+                XKeyCode::Char('e'),
+                KeyModifiers::NONE,
+                Focus::Shell
+            ),
+            CoworkKey::Absorbed
+        );
+        // `%` is unbound in v1 → also swallowed, never mis-forwarded.
+        let mut d2 = KeyDispatcher::default();
+        assert_eq!(
+            after_prefix(
+                &mut d2,
+                XKeyCode::Char('%'),
+                KeyModifiers::NONE,
+                Focus::Shell
+            ),
+            CoworkKey::Absorbed
+        );
+    }
+
+    #[test]
+    fn send_prefix_writes_exactly_0x02_to_the_shell() {
+        // Ctrl+B Ctrl+B injects the literal prefix byte (0x02) — the way to
+        // type a real Ctrl+B into a nested shell/tmux.
+        let mut d = KeyDispatcher::default();
+        assert_eq!(
+            after_prefix(
+                &mut d,
+                XKeyCode::Char('b'),
+                KeyModifiers::CONTROL,
+                Focus::Shell
+            ),
+            CoworkKey::Pty(vec![0x02])
+        );
+        // With chat focus there is no PTY to receive it → absorbed.
+        let mut d2 = KeyDispatcher::default();
+        assert_eq!(
+            after_prefix(
+                &mut d2,
+                XKeyCode::Char('b'),
+                KeyModifiers::CONTROL,
+                Focus::Chat
+            ),
+            CoworkKey::Absorbed
+        );
+    }
+
+    #[test]
+    fn prefix_binding_becomes_a_cockpit_action() {
+        let mut d = KeyDispatcher::default();
+        assert_eq!(
+            after_prefix(
+                &mut d,
+                XKeyCode::Char('c'),
+                KeyModifiers::NONE,
+                Focus::Shell
+            ),
+            CoworkKey::Action(Action::NewChatTab)
+        );
+        let mut d2 = KeyDispatcher::default();
+        assert_eq!(
+            after_prefix(
+                &mut d2,
+                XKeyCode::Char('"'),
+                KeyModifiers::NONE,
+                Focus::Shell
+            ),
+            CoworkKey::Action(Action::SplitShell)
+        );
+    }
+
+    #[test]
+    fn ordinary_shell_keys_still_forward_to_the_pty() {
+        // A non-prefix key with shell focus encodes and forwards as before —
+        // the dispatcher only intercepts the prefix and its sequences.
+        let mut d = KeyDispatcher::default();
+        assert_eq!(
+            route_key(
+                &mut d,
+                XKeyCode::Char('a'),
+                KeyModifiers::NONE,
+                Focus::Shell,
+                Instant::now(),
+            ),
+            CoworkKey::Pty(b"a".to_vec())
+        );
+        // Ctrl-C still reaches the shell (0x03) — not swallowed.
+        assert_eq!(
+            route_key(
+                &mut d,
+                XKeyCode::Char('c'),
+                KeyModifiers::CONTROL,
+                Focus::Shell,
+                Instant::now(),
+            ),
+            CoworkKey::Pty(vec![0x03])
+        );
+    }
+
+    #[test]
+    fn ordinary_chat_keys_map_to_edits_not_the_pty() {
+        let mut d = KeyDispatcher::default();
+        assert_eq!(
+            route_key(
+                &mut d,
+                XKeyCode::Char('x'),
+                KeyModifiers::NONE,
+                Focus::Chat,
+                Instant::now()
+            ),
+            CoworkKey::Char('x')
+        );
+        assert_eq!(
+            route_key(
+                &mut d,
+                XKeyCode::Enter,
+                KeyModifiers::NONE,
+                Focus::Chat,
+                Instant::now()
+            ),
+            CoworkKey::Submit
+        );
+        assert_eq!(
+            route_key(
+                &mut d,
+                XKeyCode::Backspace,
+                KeyModifiers::NONE,
+                Focus::Chat,
+                Instant::now(),
+            ),
+            CoworkKey::Backspace
+        );
+    }
+
+    #[test]
+    fn to_key_combo_normalizes_and_rejects_unmapped_keys() {
+        // Shifted `"` and shouty Ctrl+B both normalize to the canonical combo.
+        assert_eq!(
+            to_key_combo(XKeyCode::Char('"'), KeyModifiers::SHIFT),
+            Some(KeyCombo::char('"'))
+        );
+        assert_eq!(
+            to_key_combo(
+                XKeyCode::Char('B'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            ),
+            Some(KeyCombo::ctrl('b'))
+        );
+        // A key with no dispatcher vocabulary (e.g. Insert) → None → legacy path.
+        assert_eq!(to_key_combo(XKeyCode::Insert, KeyModifiers::NONE), None);
+    }
 
     fn test_channel() -> ObservationChannel {
         // A driver pointed at a dead port — we never start a turn in the pure

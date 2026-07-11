@@ -396,6 +396,15 @@ impl KeyDispatcher {
         self.prefix
     }
 
+    /// Whether a prefix sequence is currently armed (the dispatcher is reading
+    /// the Prefix table). The cockpit loop uses this to hold its direct global
+    /// hotkeys while a prefix is pending, so a post-prefix key always resolves
+    /// through the dispatcher.
+    #[must_use]
+    pub fn is_armed(&self) -> bool {
+        self.current == TableId::Prefix
+    }
+
     /// Re-configure the prefix: the old prefix's `send-prefix` binding moves
     /// to the new combo (derived-at-build, per the design).
     pub fn set_prefix(&mut self, prefix: KeyCombo) {
