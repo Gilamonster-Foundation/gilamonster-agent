@@ -1,9 +1,12 @@
 # Changelog
 
 Gilamonster Agent follows the version line chartered in [ROADMAP.md](ROADMAP.md):
-one tagged minor version per ratchet milestone, v0.1.0 → v0.12.0.
+one tagged version per ratchet milestone, **v0.3.1 → v0.3.12**, all under the
+`v0.3.x` cockpit line. Milestones 1 & 2 shipped before this scheme and keep
+their original git tags **`v0.1.0`** (≡ v0.3.1) and **`v0.2.0`** (≡ v0.3.2);
+the live `v0.3.N` tag series runs from `v0.3.3` onward.
 
-## v0.2.0 — Kill the leak (2026-07-11)
+## v0.3.2 — Kill the leak (2026-07-11, tagged `v0.2.0`)
 
 The cockpit prefix dispatcher takes over cowork's keystroke path, closing the
 live shell leak.
@@ -20,10 +23,10 @@ live shell leak.
   `swap_focus`); the rest are consumed-but-no-op until their phases — which
   still closes the leak. 7 pure tests; verified live in tmux.
 
-Next: **v0.3.0 — Layout** (`layout.rs`, the tmux absolute-cell arena tree with
+Next: **v0.3.3 — Layout** (`layout.rs`, the tmux absolute-cell arena tree with
 its proptest invariant suite; #50).
 
-## v0.1.0 — Keys & doctrine (2026-07-11)
+## v0.3.1 — Keys & doctrine (2026-07-11, tagged `v0.1.0`)
 
 The first tagged release: the cockpit's decision record and its key
 dispatcher, plus the roadmap-as-code foundation.
@@ -42,12 +45,12 @@ dispatcher, plus the roadmap-as-code foundation.
   configured prefix, fail-loud `parse_key_string`/`bind`/`unbind` where
   bindings name `Action`s only — rebinding can never mint authority. 14
   design-mandated tests.
-- **Roadmap-as-code** (PRs #40, #41) — `ROADMAP.md` (the v0.1.0→v0.12.0
+- **Roadmap-as-code** (PRs #40, #41) — `ROADMAP.md` (the v0.3.1→v0.3.12
   charter) and `.newt/roadmap.toml` (the same plan as machine-loadable data,
   exported via newt's `/roadmap export`, #1082). `/roadmap import` on a fresh
   checkout bootstraps the working copy; newt's `/roadmap eval` can now also
   gate nodes on their referenced issues (#1083).
 
-Versioning discipline from here: tag `vX.Y.0` when a milestone's last PR
-merges; patch releases for fixes only. Next: **v0.2.0 — Kill the leak**
-(dispatcher wired into cowork before `encode_key`; closes part of #10).
+Versioning discipline from here: tag `v0.3.N` when milestone _N_'s last PR
+merges. Next: **v0.3.2 — Kill the leak** (dispatcher wired into cowork before
+`encode_key`; closes part of #10).
