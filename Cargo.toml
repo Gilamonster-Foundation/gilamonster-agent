@@ -104,6 +104,10 @@ predicates = "3"
 wiremock = "0.6"
 tempfile = "3"
 serde_json = "1"
+# layout.rs (#50): property-based invariant suite for the tmux cell tree —
+# after arbitrary split/close/resize sequences, the size invariant holds, no
+# panes overlap, directional nav is total, and area is conserved.
+proptest = "1"
 
 [profile.release]
 opt-level = 3
