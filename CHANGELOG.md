@@ -6,6 +6,27 @@ one tagged version per ratchet milestone, **v0.3.1 → v0.3.12**, all under the
 their original git tags **`v0.1.0`** (≡ v0.3.1) and **`v0.2.0`** (≡ v0.3.2);
 the live `v0.3.N` tag series runs from `v0.3.3` onward.
 
+## v0.3.3 — Layout (2026-07-11)
+
+The tmux cell tree that the cockpit's panes are laid out on.
+
+- **`src/layout.rs`** (#50, PR #53) — a pure (no newt-*/ratatui) `LayoutTree`
+  arena of `Leaf`/`Split` cells with **absolute integer sizes** and a 1-cell
+  divider, upholding `sum(children)+(n-1)==parent`. `split` (new pane =
+  `(ss+1)/2-1`), `close` (freed `size+1` to one neighbour + single-child
+  collapse), `resize_tree` (round-robin ±1 fit, `PANE_MIN=3` floor), `rects`
+  (pure walk + clip-at-render), `zoom` (unzoom→mutate→rezoom), geometric
+  directional nav with an MRU tie-break, and the even-h / even-v /
+  main-vertical presets.
+- The hard deliverable ships: a **proptest invariant suite** (400 cases over
+  arbitrary op sequences — invariant holds, no overlaps, nav total, area
+  conserved) plus 16 unit tests. The proptest earned its keep, catching a
+  `close` that round-robin'd freed space instead of handing it to one neighbour.
+
+Next: **v0.3.4 — Cockpit + authority** (`run_cockpit`, N companion `TurnDriver`
+panes, `authority.rs`, ambient shell + observe-only proven three ways; #54) —
+the first release that seats multiple newt-agents in panes.
+
 ## v0.3.2 — Kill the leak (2026-07-11, tagged `v0.2.0`)
 
 The cockpit prefix dispatcher takes over cowork's keystroke path, closing the
