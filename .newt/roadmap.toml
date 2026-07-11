@@ -47,8 +47,11 @@ instruction = "v0.3.3 Layout — layout.rs arena tree + presets"
 deps = []
 parallel_ok = false
 context = []
-status = "pending"
+status = "done"
 kind = "phase"
+
+[tree.subtask.artifact_ref]
+issue = 50
 
 [tree.subtask.caveat_policy]
 fs_read = "none"
