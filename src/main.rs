@@ -311,7 +311,10 @@ fn run_cowork(path: Option<std::path::PathBuf>) -> anyhow::Result<()> {
     let initial_area = terminal.size()?;
     let initial_rect = ratatui::layout::Rect::new(0, 0, initial_area.width, initial_area.height);
     let shell_area = gilamonster_agent::cowork::split_panes(initial_rect).shell;
-    let mut shell = PtyShell::spawn(
+    // The write half is split off into a non-`Clone` `PtyWriter` owned only here
+    // in the input router; the agent-facing observation channel never sees it,
+    // so the agent is structurally unable to type into the human's shell.
+    let (mut shell, mut shell_writer) = PtyShell::spawn(
         &pty_shell_program(),
         pty_size_for(shell_area),
         path.as_deref(),
@@ -377,7 +380,7 @@ fn run_cowork(path: Option<std::path::PathBuf>) -> anyhow::Result<()> {
                                 std::time::Instant::now(),
                             ) {
                                 CoworkKey::Pty(bytes) => {
-                                    let _ = shell.write_input(&bytes);
+                                    let _ = shell_writer.write_input(&bytes);
                                 }
                                 CoworkKey::Submit => {
                                     app.submit_input();
