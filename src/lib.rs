@@ -29,6 +29,7 @@ pub mod cowork;
 pub mod fleet;
 pub mod follow;
 pub mod hotseat;
+pub mod keys;
 pub mod manifest;
 pub mod pty;
 pub mod venv;
