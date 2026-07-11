@@ -1,5 +1,5 @@
-//! `gila matrix` — the **FleetView** crew-monitor dashboard (Phase 1: the
-//! standalone mock surface).
+//! `gila matrix` — the **FleetView** crew-monitor dashboard (Phase 2:
+//! navigation + drill-in over the standalone mock surface).
 //!
 //! # What this is
 //!
@@ -55,22 +55,30 @@
 //! - [`AgentState::glyph`] / [`Locality::badge`] — the row decoration lookups.
 //! - [`fmt_tokens`] / [`fmt_tools`] / [`fmt_duration`] / [`fmt_idle`] — the
 //!   honest formatters (incl. the `—` degradation path).
-//! - [`header_lines`] / [`rail_lines`] / [`panel_lines`] — the pure
-//!   `model -> ratatui::Line` builders.
+//! - [`header_lines`] / [`rail_lines`] / [`panel_lines`] / [`detail_lines`] /
+//!   [`footer_line_for`] — the pure `model -> ratatui::Line` builders.
+//! - [`FleetModel::apply_key`] — the ↑↓/Enter/Esc navigation state machine,
+//!   driven by synthetic [`KeyEvent`]s (no terminal).
 //! - [`render_fleet_frame`] — the whole render path, snapshot-tested with a
 //!   ratatui [`TestBackend`](ratatui::backend::TestBackend).
 //!
-//! Phase 1 renders the rail and panel as static [`Paragraph`]s over a mock
-//! roster ([`FleetModel::mock`]); navigation ([`Focus`]-driven selection) and a
-//! stateful `List`/`Table` land in Phase 2, live data sources in Phase 3+.
+//! Phase 2 adds the [`Focus`]-driven navigation: the agent panel is a stateful
+//! [`List`] (cursor + viewport scroll), and Enter drills into a [`Detail`](Focus::Detail)
+//! view of the selected agent's (mock) transcript. Live data sources replace the
+//! mock roster ([`FleetModel::mock`]) in Phase 3+.
 
 use std::time::Duration;
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
+
+use newt_core::MemMessage;
+
+use crate::cowork::transcript_to_lines;
 
 /// The dim placeholder for a metric the producer cannot report — the visible
 /// face of the honest-metrics principle. Never substitute a fabricated `0`.
@@ -79,8 +87,35 @@ pub const NA: &str = "—";
 /// The fixed width (in columns) of the left "Phases" rail.
 pub const RAIL_WIDTH: u16 = 24;
 
-/// The footer key hint, matching the target display.
-pub const FOOTER_HINT: &str = "↑↓ select · f freeze · esc back · s save";
+/// The footer key hint for the rail/panel, matching the target display.
+pub const FOOTER_HINT: &str = "↑↓ select · → drill in · f freeze · esc back · s save";
+
+/// The footer key hint while drilled into an agent's detail view.
+pub const DETAIL_FOOTER_HINT: &str = "↑↓ scroll · esc back · f freeze · q quit";
+
+/// Which pane currently has keyboard focus, and so where ↑↓ and Enter route.
+/// The navigation state machine ([`FleetModel::apply_key`]) moves between these:
+/// `Rail` (pick a phase) → `Panel` (pick an agent) → `Detail` (read its
+/// transcript).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    /// The left "Phases" rail has focus; ↑↓ moves the phase cursor.
+    Rail,
+    /// The agent panel has focus; ↑↓ moves the agent cursor, Enter drills in.
+    Panel,
+    /// Drilled into the selected agent; ↑↓ scrolls its transcript, Esc backs out.
+    Detail,
+}
+
+/// The outcome of feeding one key to [`FleetModel::apply_key`]: keep looping, or
+/// quit the dashboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Step {
+    /// Continue the render/event loop.
+    Continue,
+    /// The operator asked to quit (`q` / `Ctrl-C`).
+    Quit,
+}
 
 /// Where a crew member runs: a local in-process subagent, or a remote peer bound
 /// over the agent-mesh (co-equal in the roster, but degraded in what it can
@@ -153,6 +188,18 @@ impl AgentState {
     #[must_use]
     pub fn is_done(&self) -> bool {
         matches!(self, Self::Done)
+    }
+
+    /// A short status word for the drill-in header (`failed` carries its reason).
+    #[must_use]
+    pub fn label(&self) -> String {
+        match self {
+            Self::Pending => "pending".to_string(),
+            Self::Running => "running".to_string(),
+            Self::Done => "done".to_string(),
+            Self::Blocked => "blocked".to_string(),
+            Self::Failed(why) => format!("failed: {why}"),
+        }
     }
 }
 
@@ -235,6 +282,10 @@ pub struct AgentRow {
     pub idle: Option<Duration>,
     /// Local subagent or remote mesh peer.
     pub locality: Locality,
+    /// The agent's transcript, shown in the drill-in Detail view. Phase 2 carries
+    /// a canned mock; live transcripts arrive in Phase 3+. Empty → an honest
+    /// "no transcript yet" state in the detail view.
+    pub transcript: Vec<MemMessage>,
 }
 
 impl AgentRow {
@@ -258,7 +309,15 @@ impl AgentRow {
             elapsed,
             idle,
             locality: Locality::Local,
+            transcript: Vec::new(),
         }
+    }
+
+    /// Attach a transcript to this row (builder style), for the drill-in view.
+    #[must_use]
+    pub fn with_transcript(mut self, transcript: Vec<MemMessage>) -> Self {
+        self.transcript = transcript;
+        self
     }
 
     /// The trailing metrics cell: `tokens · tools · (elapsed | idle)`, each
@@ -330,19 +389,32 @@ pub struct FleetModel {
     sel_phase: usize,
     /// The panel cursor: which agent row carries the `❯` marker, if any.
     sel_agent: Option<usize>,
+    /// Which pane has keyboard focus (the navigation state machine).
+    focus: Focus,
+    /// Whether the view fold is frozen (the `f` key) — a *view* freeze only; the
+    /// underlying agents keep running. Phase 1/2 has no live source, so this is
+    /// just the indicator + state.
+    frozen: bool,
+    /// Vertical scroll offset of the drill-in Detail transcript.
+    detail_scroll: u16,
 }
 
 impl FleetModel {
     /// Build a model over a plan header and its phases, with the rail cursor on
-    /// the first phase and no agent selected.
+    /// the first phase, no agent selected, and focus on the rail.
     #[must_use]
     pub fn new(plan: PlanHeader, phases: Vec<Phase>) -> Self {
-        Self {
+        let mut m = Self {
             plan,
             phases,
             sel_phase: 0,
             sel_agent: None,
-        }
+            focus: Focus::Rail,
+            frozen: false,
+            detail_scroll: 0,
+        };
+        m.clamp_agent_to_phase();
+        m
     }
 
     /// The plan header.
@@ -386,6 +458,127 @@ impl FleetModel {
     #[must_use]
     pub fn agents_total(&self) -> usize {
         self.phases.iter().map(Phase::total).sum()
+    }
+
+    /// Which pane has keyboard focus.
+    #[must_use]
+    pub fn focus(&self) -> Focus {
+        self.focus
+    }
+
+    /// Whether the view is frozen (the `f` toggle).
+    #[must_use]
+    pub fn frozen(&self) -> bool {
+        self.frozen
+    }
+
+    /// The drill-in transcript's scroll offset.
+    #[must_use]
+    pub fn detail_scroll(&self) -> u16 {
+        self.detail_scroll
+    }
+
+    /// The currently-selected agent row, if any.
+    #[must_use]
+    pub fn selected_agent(&self) -> Option<&AgentRow> {
+        let phase = self.selected_phase()?;
+        phase.agents.get(self.sel_agent?)
+    }
+
+    /// Keep `sel_agent` valid for the selected phase: `None` when the phase is
+    /// empty, otherwise clamped into range (defaulting to the first row).
+    fn clamp_agent_to_phase(&mut self) {
+        let n = self.selected_phase().map_or(0, |p| p.agents.len());
+        self.sel_agent = if n == 0 {
+            None
+        } else {
+            Some(self.sel_agent.unwrap_or(0).min(n - 1))
+        };
+    }
+
+    /// Move the rail (phase) cursor by `delta`, clamped to the phase list. The
+    /// agent cursor resets to the new phase's first row and the detail scroll
+    /// resets.
+    pub fn move_phase(&mut self, delta: isize) {
+        let n = self.phases.len();
+        if n == 0 {
+            return;
+        }
+        let next = (self.sel_phase as isize + delta).clamp(0, n as isize - 1);
+        self.sel_phase = next as usize;
+        self.sel_agent = Some(0);
+        self.detail_scroll = 0;
+        self.clamp_agent_to_phase();
+    }
+
+    /// Move the panel (agent) cursor by `delta`, clamped to the selected phase's
+    /// rows. A no-op on an empty phase.
+    pub fn move_agent(&mut self, delta: isize) {
+        let n = self.selected_phase().map_or(0, |p| p.agents.len());
+        if n == 0 {
+            self.sel_agent = None;
+            return;
+        }
+        let cur = self.sel_agent.unwrap_or(0) as isize;
+        self.sel_agent = Some((cur + delta).clamp(0, n as isize - 1) as usize);
+    }
+
+    /// Scroll the drill-in transcript by `delta` rows (clamped at the top).
+    pub fn scroll_detail(&mut self, delta: i32) {
+        self.detail_scroll = (self.detail_scroll as i32 + delta).max(0) as u16;
+    }
+
+    /// Toggle the view freeze (the `f` key). View-only — agents keep running.
+    pub fn toggle_freeze(&mut self) {
+        self.frozen = !self.frozen;
+    }
+
+    /// The navigation state machine: fold one key press into the model, returning
+    /// whether the loop should continue or quit. Pure (no terminal), so the whole
+    /// state machine is unit-testable with synthetic [`KeyEvent`]s — the
+    /// `lean_input.rs` discipline.
+    ///
+    /// Global keys (any focus): `q` / `Ctrl-C` quit, `f` toggles freeze, `s` is
+    /// reserved for save (Phase 6, currently inert). Otherwise keys route by
+    /// focus: Rail ↑↓ moves the phase, →/Enter enters the Panel; Panel ↑↓ moves
+    /// the agent, Enter drills into Detail, ←/Esc backs to the Rail; Detail ↑↓
+    /// scrolls the transcript, ←/Esc backs to the Panel.
+    pub fn apply_key(&mut self, key: KeyEvent) -> Step {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Char('q') => return Step::Quit,
+            KeyCode::Char('c') if ctrl => return Step::Quit,
+            KeyCode::Char('f') => self.toggle_freeze(),
+            // `s` save lands in Phase 6 — reserved, inert for now.
+            KeyCode::Char('s') => {}
+            _ => match self.focus {
+                Focus::Rail => match key.code {
+                    KeyCode::Up => self.move_phase(-1),
+                    KeyCode::Down => self.move_phase(1),
+                    KeyCode::Right | KeyCode::Enter => self.focus = Focus::Panel,
+                    _ => {}
+                },
+                Focus::Panel => match key.code {
+                    KeyCode::Up => self.move_agent(-1),
+                    KeyCode::Down => self.move_agent(1),
+                    KeyCode::Enter => {
+                        if self.sel_agent.is_some() {
+                            self.focus = Focus::Detail;
+                            self.detail_scroll = 0;
+                        }
+                    }
+                    KeyCode::Left | KeyCode::Esc => self.focus = Focus::Rail,
+                    _ => {}
+                },
+                Focus::Detail => match key.code {
+                    KeyCode::Up => self.scroll_detail(-1),
+                    KeyCode::Down => self.scroll_detail(1),
+                    KeyCode::Left | KeyCode::Esc => self.focus = Focus::Panel,
+                    _ => {}
+                },
+            },
+        }
+        Step::Continue
     }
 
     /// The canned demo roster, matching the target display: the
@@ -461,7 +654,26 @@ impl FleetModel {
                     Some(4),
                     Some(Duration::from_secs(101)),
                     None,
-                ),
+                )
+                .with_transcript(vec![
+                    MemMessage::system(
+                        "You are design:security — review the Authentik deployment for \
+                         OCAP / secret-handling risks.",
+                    ),
+                    MemMessage::user(
+                        "Audit the phased plan's handling of the Google OAuth client secret \
+                         and the Authentik bootstrap token.",
+                    ),
+                    MemMessage::assistant(
+                        "Findings:\n\
+                         1. The OAuth client secret must land in the target (Vault), never \
+                         the git tree.\n\
+                         2. The bootstrap token should be a one-time, Presence-gated step-up \
+                         — not a static env var.\n\
+                         3. The account-linking flow must enforce the email-verified claim \
+                         before merge, to avoid account takeover.",
+                    ),
+                ]),
             ],
         };
         let review = Phase {
@@ -488,6 +700,11 @@ impl FleetModel {
             sel_phase: 0,
             // The target display selects the last Design row (design:security).
             sel_agent: Some(6),
+            // Focus starts on the panel so the agent cursor is live (the target
+            // display shows a selected agent row).
+            focus: Focus::Panel,
+            frozen: false,
+            detail_scroll: 0,
         }
     }
 }
@@ -627,10 +844,11 @@ pub fn rail_lines(model: &FleetModel) -> Vec<Line<'static>> {
         .collect()
 }
 
-/// Build the panel lines: one row per agent in the selected phase, each headed
-/// by the selection cursor (`❯` on the selected row, else a space) and the
-/// state glyph, then the label, model, and honest metrics cell. Pure over the
-/// model, so the panel is unit-testable.
+/// Build the panel rows: one per agent in the selected phase — the state glyph,
+/// label, model, and honest metrics cell. The selection cursor (`❯`) is **not**
+/// here: it is the [`List`]'s `highlight_symbol`, driven by `sel_agent`, so the
+/// cursor and viewport scrolling come from the widget. Pure over the model, so
+/// the row content is unit-testable.
 #[must_use]
 pub fn panel_lines(model: &FleetModel) -> Vec<Line<'static>> {
     let Some(phase) = model.selected_phase() else {
@@ -650,17 +868,8 @@ pub fn panel_lines(model: &FleetModel) -> Vec<Line<'static>> {
     phase
         .agents
         .iter()
-        .enumerate()
-        .map(|(i, a)| {
-            let selected = model.sel_agent() == Some(i);
-            let cursor = if selected { "❯" } else { " " };
+        .map(|a| {
             Line::from(vec![
-                Span::styled(
-                    cursor,
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
                 Span::styled(
                     a.state.glyph(),
                     Style::default()
@@ -681,13 +890,88 @@ pub fn panel_lines(model: &FleetModel) -> Vec<Line<'static>> {
         .collect()
 }
 
-/// The footer key-hint line.
+/// Build the drill-in Detail lines for the selected agent: a one-line header
+/// (glyph · label · model · status) then a blank line, then the transcript
+/// rendered through [`transcript_to_lines`] (the same newt-data → ratatui bridge
+/// `gila cowork` uses). An agent with no transcript yet shows an honest
+/// empty-state. Pure over `(model, width)`, so the detail body is unit-testable.
 #[must_use]
-pub fn footer_line() -> Line<'static> {
-    Line::from(Span::styled(
-        FOOTER_HINT,
-        Style::default().fg(Color::DarkGray),
-    ))
+pub fn detail_lines(model: &FleetModel, width: usize) -> Vec<Line<'static>> {
+    let Some(agent) = model.selected_agent() else {
+        return vec![Line::from(Span::styled(
+            "no agent selected",
+            Style::default().fg(Color::DarkGray),
+        ))];
+    };
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(
+                agent.state.glyph(),
+                Style::default()
+                    .fg(agent.state.color())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                agent.label.clone(),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled(agent.model.clone(), Style::default().fg(Color::DarkGray)),
+            Span::raw("  "),
+            Span::styled(
+                agent.state.label(),
+                Style::default().fg(agent.state.color()),
+            ),
+        ]),
+        Line::from(""),
+    ];
+    if agent.transcript.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "— no transcript yet (live drill-in lands in Phase 3) —",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
+        )));
+    } else {
+        lines.extend(transcript_to_lines(&agent.transcript, width));
+    }
+    lines
+}
+
+/// The focus-dependent footer hint, with a frozen indicator appended when the
+/// view is frozen. Pure over the model.
+#[must_use]
+pub fn footer_line_for(model: &FleetModel) -> Line<'static> {
+    let hint = if model.focus() == Focus::Detail {
+        DETAIL_FOOTER_HINT
+    } else {
+        FOOTER_HINT
+    };
+    let mut spans = vec![Span::styled(hint, Style::default().fg(Color::DarkGray))];
+    if model.frozen() {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            "❄ FROZEN",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    Line::from(spans)
+}
+
+/// A pane's border style: bold cyan when the pane holds focus, dim gray
+/// otherwise — the on-screen focus indicator (mirrors `cowork::border_style`).
+#[must_use]
+fn pane_border(focused: bool) -> Style {
+    if focused {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    }
 }
 
 /// Draw one full FleetView frame into `frame` from the model's current state.
@@ -710,30 +994,63 @@ pub fn render_fleet_frame(model: &FleetModel, frame: &mut Frame) {
     )));
     frame.render_widget(header, layout.header);
 
-    // Left rail: the phase list.
+    // Left rail: the phase list (border highlighted when the rail has focus).
     let rail = Paragraph::new(Text::from(rail_lines(model))).block(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray))
+            .border_style(pane_border(model.focus() == Focus::Rail))
             .title(" Phases "),
     );
     frame.render_widget(rail, layout.rail);
 
-    // Main panel: the selected phase's agent rows.
-    let panel_title = match model.selected_phase() {
-        Some(p) => format!(" {} · {} agents ", p.name, p.total()),
-        None => " agents ".to_string(),
-    };
-    let panel = Paragraph::new(Text::from(panel_lines(model))).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray))
-            .title(panel_title),
-    );
-    frame.render_widget(panel, layout.panel);
+    // Main area: the agent panel, or — when drilled in — the Detail view.
+    if model.focus() == Focus::Detail {
+        let inner_w = layout.panel.width.saturating_sub(2).max(1) as usize;
+        let title = match model.selected_agent() {
+            Some(a) => format!(" {} ", a.label),
+            None => " detail ".to_string(),
+        };
+        let detail = Paragraph::new(Text::from(detail_lines(model, inner_w)))
+            .scroll((model.detail_scroll(), 0))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(pane_border(true))
+                    .title(title),
+            );
+        frame.render_widget(detail, layout.panel);
+    } else {
+        let panel_title = match model.selected_phase() {
+            Some(p) => format!(" {} · {} agents ", p.name, p.total()),
+            None => " agents ".to_string(),
+        };
+        let focused = model.focus() == Focus::Panel;
+        let items: Vec<ListItem> = panel_lines(model).into_iter().map(ListItem::new).collect();
+        let list = List::new(items)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(pane_border(focused))
+                    .title(panel_title),
+            )
+            .highlight_symbol("❯ ")
+            .highlight_style(if focused {
+                Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
+            } else {
+                Style::default().add_modifier(Modifier::BOLD)
+            });
+        // Drive selection + viewport scroll from the model — but only when the
+        // phase actually has agents (an empty phase shows its one info row with
+        // no highlight).
+        let mut state = ListState::default();
+        if model.selected_phase().is_some_and(|p| !p.agents.is_empty()) {
+            state.select(model.sel_agent());
+        }
+        frame.render_stateful_widget(list, layout.panel, &mut state);
+    }
 
-    // Footer key hint.
-    frame.render_widget(Paragraph::new(footer_line()), layout.footer);
+    // Footer: focus-dependent key hint + the frozen indicator.
+    frame.render_widget(Paragraph::new(footer_line_for(model)), layout.footer);
 }
 
 #[cfg(test)]
@@ -823,6 +1140,7 @@ mod tests {
             elapsed: None,
             idle: None,
             locality: Locality::Mesh,
+            transcript: Vec::new(),
         };
         let text = row.metrics_text();
         // Two dim dashes (tokens, tools) and the mesh badge — never a fake 0.
@@ -991,23 +1309,26 @@ mod tests {
     }
 
     #[test]
-    fn panel_lines_render_rows_with_cursor_and_glyph() {
+    fn panel_lines_render_rows_with_glyph_and_metrics() {
         let m = FleetModel::mock();
         let lines = panel_lines(&m);
         assert_eq!(lines.len(), 7);
-        // The selected (last) row carries the `❯` cursor; the first does not.
         let first: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         let last: String = lines[6].spans.iter().map(|s| s.content.as_ref()).collect();
+        // The cursor is the List's highlight_symbol now, not baked into the row —
+        // each row leads with its state glyph.
         assert!(
-            first.starts_with(' '),
-            "unselected row has no cursor: {first:?}"
+            !first.contains('❯'),
+            "no manual cursor in the row: {first:?}"
         );
         assert!(
-            last.starts_with('❯'),
-            "selected row has the cursor: {last:?}"
+            first.starts_with('●'),
+            "a running row leads with its glyph: {first:?}"
         );
-        assert!(first.contains('●'), "a running row's glyph: {first}");
-        assert!(last.contains('✔'), "a done row's glyph: {last}");
+        assert!(
+            last.starts_with('✔'),
+            "a done row leads with its glyph: {last:?}"
+        );
         assert!(first.contains("design:deploy"));
         assert!(first.contains("Opus 4.8 (1M context)"));
         assert!(first.contains("34.1k tok"));
@@ -1072,5 +1393,210 @@ mod tests {
         terminal
             .draw(|f| render_fleet_frame(&m, f))
             .expect("render must not panic on a tiny area");
+    }
+
+    // --- Phase 2: navigation state machine ----------------------------------
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn agent_state_label_words() {
+        assert_eq!(AgentState::Pending.label(), "pending");
+        assert_eq!(AgentState::Running.label(), "running");
+        assert_eq!(AgentState::Done.label(), "done");
+        assert_eq!(AgentState::Blocked.label(), "blocked");
+        assert_eq!(AgentState::Failed("boom".into()).label(), "failed: boom");
+    }
+
+    #[test]
+    fn apply_key_walks_rail_panel_detail() {
+        let mut m = FleetModel::mock();
+        // The mock starts on the Panel with the last Design row selected.
+        assert_eq!(m.focus(), Focus::Panel);
+        assert_eq!(m.sel_agent(), Some(6));
+
+        // Esc backs out to the Rail.
+        assert_eq!(m.apply_key(key(KeyCode::Esc)), Step::Continue);
+        assert_eq!(m.focus(), Focus::Rail);
+
+        // Down moves to the (empty) Review phase; the agent cursor goes None.
+        m.apply_key(key(KeyCode::Down));
+        assert_eq!(m.sel_phase(), 1);
+        assert_eq!(m.sel_agent(), None, "an empty phase has no agent cursor");
+
+        // Up back to Design; the agent cursor resets to the first row.
+        m.apply_key(key(KeyCode::Up));
+        assert_eq!(m.sel_phase(), 0);
+        assert_eq!(m.sel_agent(), Some(0));
+
+        // Enter/Right moves focus into the Panel; Down moves the agent cursor.
+        m.apply_key(key(KeyCode::Enter));
+        assert_eq!(m.focus(), Focus::Panel);
+        m.apply_key(key(KeyCode::Down));
+        assert_eq!(m.sel_agent(), Some(1));
+
+        // Enter drills into Detail; Down scrolls; Up clamps at the top.
+        m.apply_key(key(KeyCode::Enter));
+        assert_eq!(m.focus(), Focus::Detail);
+        m.apply_key(key(KeyCode::Down));
+        assert_eq!(m.detail_scroll(), 1);
+        m.apply_key(key(KeyCode::Up));
+        m.apply_key(key(KeyCode::Up));
+        assert_eq!(m.detail_scroll(), 0, "scroll clamps at the top");
+
+        // Esc backs out of Detail to the Panel.
+        m.apply_key(key(KeyCode::Esc));
+        assert_eq!(m.focus(), Focus::Panel);
+    }
+
+    #[test]
+    fn move_phase_and_agent_clamp_at_ends() {
+        let mut m = FleetModel::mock();
+        m.move_phase(-5);
+        assert_eq!(m.sel_phase(), 0);
+        m.move_phase(99);
+        assert_eq!(m.sel_phase(), 2, "3 phases → max index 2");
+
+        m.move_phase(-99); // back to Design (7 agents)
+        m.move_agent(-99);
+        assert_eq!(m.sel_agent(), Some(0));
+        m.move_agent(99);
+        assert_eq!(m.sel_agent(), Some(6));
+    }
+
+    #[test]
+    fn apply_key_quits_on_q_and_ctrl_c_only() {
+        let mut m = FleetModel::mock();
+        assert_eq!(m.apply_key(key(KeyCode::Char('q'))), Step::Quit);
+        assert_eq!(
+            m.apply_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            Step::Quit
+        );
+        // A plain 'c' is not a quit.
+        assert_eq!(m.apply_key(key(KeyCode::Char('c'))), Step::Continue);
+    }
+
+    #[test]
+    fn apply_key_freeze_toggles_from_any_focus() {
+        let mut m = FleetModel::mock();
+        assert!(!m.frozen());
+        m.apply_key(key(KeyCode::Char('f')));
+        assert!(m.frozen());
+        m.apply_key(key(KeyCode::Char('f')));
+        assert!(!m.frozen());
+    }
+
+    // --- Phase 2: drill-in detail view --------------------------------------
+
+    #[test]
+    fn detail_lines_show_the_selected_agents_transcript() {
+        let m = FleetModel::mock(); // design:security (idx 6) carries a transcript
+        let text: String = detail_lines(&m, 80)
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(
+            text.contains("design:security"),
+            "header names the agent: {text}"
+        );
+        assert!(text.contains("done"), "header shows the status");
+        assert!(
+            text.contains("OAuth client secret"),
+            "transcript body rendered: {text}"
+        );
+    }
+
+    #[test]
+    fn detail_lines_honest_empty_state_without_a_transcript() {
+        let mut m = FleetModel::mock();
+        m.move_agent(-99); // design:deploy (idx 0) has no transcript
+        let text: String = detail_lines(&m, 80)
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(text.contains("design:deploy"));
+        assert!(
+            text.contains("no transcript yet"),
+            "honest empty state: {text}"
+        );
+    }
+
+    // --- Phase 2: focus-aware rendering -------------------------------------
+
+    #[test]
+    fn footer_is_focus_aware_and_shows_frozen() {
+        let mut m = FleetModel::mock();
+        let panel: String = footer_line_for(&m)
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(panel.contains("drill in"), "panel footer: {panel}");
+        assert!(!panel.contains("FROZEN"));
+
+        m.toggle_freeze();
+        let frozen: String = footer_line_for(&m)
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(frozen.contains("FROZEN"), "frozen indicator: {frozen}");
+
+        m.apply_key(key(KeyCode::Enter)); // drill into Detail
+        let detail: String = footer_line_for(&m)
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(detail.contains("scroll"), "detail footer: {detail}");
+    }
+
+    #[test]
+    fn render_detail_view_draws_the_transcript() {
+        let mut m = FleetModel::mock();
+        m.apply_key(key(KeyCode::Enter)); // Panel → Detail on design:security
+        assert_eq!(m.focus(), Focus::Detail);
+
+        let mut terminal = Terminal::new(TestBackend::new(110, 18)).unwrap();
+        terminal.draw(|f| render_fleet_frame(&m, f)).unwrap();
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(rendered.contains("design:security"), "detail box title");
+        assert!(rendered.contains("Findings"), "transcript content drawn");
+        assert!(rendered.contains("↑↓ scroll"), "detail footer hint");
+        // The rail is still drawn alongside the detail view.
+        assert!(rendered.contains("Phases"));
+    }
+
+    #[test]
+    fn render_panel_focus_highlights_the_panel_border() {
+        // With focus on the Panel, the panel's border corner is cyan; the rail's
+        // is gray. (The mock starts focused on the Panel.)
+        let m = FleetModel::mock();
+        let mut terminal = Terminal::new(TestBackend::new(110, 18)).unwrap();
+        terminal.draw(|f| render_fleet_frame(&m, f)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let layout = fleet_layout(ratatui::layout::Rect::new(0, 0, 110, 18));
+        let panel_corner = &buf[(layout.panel.x, layout.panel.y)];
+        assert_eq!(
+            panel_corner.style().fg,
+            Some(Color::Cyan),
+            "focused panel border"
+        );
+        let rail_corner = &buf[(layout.rail.x, layout.rail.y)];
+        assert_eq!(
+            rail_corner.style().fg,
+            Some(Color::DarkGray),
+            "unfocused rail border"
+        );
     }
 }
