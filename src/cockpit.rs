@@ -323,6 +323,72 @@ fn map_dir(d: KeyDir) -> Dir {
     }
 }
 
+// ── rendering + key routing (the raw loop's testable helpers) ───────────────
+
+use crate::keys::{KeyCombo, KeyDispatcher, KeyDisposition};
+
+/// What the cockpit raw loop should do with one key. Pure so the routing is
+/// tested off the terminal loop (mirrors `cowork`'s `route_key`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CockpitKey {
+    /// Perform a cockpit [`Action`] (`apply` it to the model).
+    Do(Action),
+    /// Quit the cockpit.
+    Quit,
+    /// Nothing (a bare prefix armed, a swallowed miss, or an unbound key).
+    Ignore,
+}
+
+/// Route a key through the prefix `dispatcher`. `Ctrl+Q` (in the Root table)
+/// quits; a completed prefix binding becomes [`CockpitKey::Do`]; a pending
+/// prefix or a swallowed miss is [`CockpitKey::Ignore`]. Pure.
+#[must_use]
+pub fn route_cockpit_key(
+    dispatcher: &mut KeyDispatcher,
+    combo: KeyCombo,
+    now: std::time::Instant,
+) -> CockpitKey {
+    // Ctrl+Q is the one direct global (only when not mid-prefix), matching cowork.
+    if !dispatcher.is_armed() && combo == KeyCombo::ctrl('q') {
+        return CockpitKey::Quit;
+    }
+    match dispatcher.on_key(combo, now) {
+        KeyDisposition::Consumed(action) => CockpitKey::Do(action),
+        KeyDisposition::Pending | KeyDisposition::Swallow | KeyDisposition::Forward => {
+            CockpitKey::Ignore
+        }
+    }
+}
+
+/// The tab-bar line for the status row: each tab as `n:title`, the active one
+/// marked with a leading `▸` and shown first-class. Pure and testable.
+#[must_use]
+pub fn tab_bar(titles: &[String], active: usize) -> String {
+    titles
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            let mark = if i == active { "▸" } else { " " };
+            format!("{mark}{}:{t}", i + 1)
+        })
+        .collect::<Vec<_>>()
+        .join("  ")
+}
+
+/// The placeholder label a pane shows until live content (transcript / shell
+/// grid) is wired in the next ratchet. Pure.
+#[must_use]
+pub fn pane_label(role: PaneRole, id: PaneId, focused: bool) -> String {
+    let what = match role {
+        PaneRole::Chat(PaneKind::Companion) => "companion chat",
+        PaneRole::Chat(PaneKind::Reader) => "reader chat",
+        PaneRole::Chat(PaneKind::Workbench) => "workbench chat",
+        PaneRole::Shell => "shell",
+    };
+    let focus = if focused { " ●" } else { "" };
+    format!("{what} [{id}]{focus}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -456,6 +522,43 @@ mod tests {
         assert_eq!(eff, Effect::None);
         assert_eq!(c.tab_count(), 1);
         assert_eq!(c.pane_count(), 1);
+    }
+
+    #[test]
+    fn tab_bar_marks_the_active_tab() {
+        let titles = vec!["1".to_string(), "2".to_string(), "3".to_string()];
+        let bar = tab_bar(&titles, 1);
+        assert_eq!(bar, " 1:1  ▸2:2   3:3");
+    }
+
+    #[test]
+    fn pane_label_names_role_and_focus() {
+        assert_eq!(
+            pane_label(PaneRole::Chat(PaneKind::Companion), 0, true),
+            "companion chat [0] ●"
+        );
+        assert_eq!(pane_label(PaneRole::Shell, 2, false), "shell [2]");
+    }
+
+    #[test]
+    fn route_ctrl_q_quits_and_prefix_binding_acts() {
+        use crate::keys::{KeyCombo, KeyDispatcher};
+        let mut d = KeyDispatcher::default();
+        let now = std::time::Instant::now();
+        // Ctrl+Q from Root quits.
+        assert_eq!(
+            route_cockpit_key(&mut d, KeyCombo::ctrl('q'), now),
+            CockpitKey::Quit
+        );
+        // Prefix then `c` → NewChatTab; the bare prefix itself is ignored.
+        assert_eq!(
+            route_cockpit_key(&mut d, KeyCombo::ctrl('b'), now),
+            CockpitKey::Ignore
+        );
+        assert_eq!(
+            route_cockpit_key(&mut d, KeyCombo::char('c'), now),
+            CockpitKey::Do(Action::NewChatTab)
+        );
     }
 
     #[test]
