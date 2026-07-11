@@ -102,7 +102,97 @@ async fn main() -> anyhow::Result<()> {
         // path + roster are unit-tested in `fleet.rs`; this arm owns only the raw
         // terminal loop (the by-design-uncovered tty surface) and the print.
         Command::Matrix { mock } => run_matrix(mock),
+        // Cockpit: the tmux-semantics multiplexer. This first slice renders the
+        // tab/pane layout (composing cockpit.rs + layout.rs) and drives it with
+        // the keys.rs prefix dispatcher; live per-pane drivers + the ambient
+        // shell PTY land in the next ratchet. Raw terminal loop = the same
+        // by-design-uncovered carve-out as run_cowork / run_fleet_dashboard.
+        Command::Cockpit { path } => run_cockpit(path),
     }
+}
+
+/// The cockpit raw render/event loop (binary-owned, the by-design-uncovered tty
+/// surface). Wires the tested [`Cockpit`](gilamonster_agent::cockpit::Cockpit)
+/// model + the [`keys`](gilamonster_agent::keys) dispatcher to a real terminal;
+/// all decision logic (the action state machine, key routing, tab bar, pane
+/// labels) is unit-tested in `cockpit.rs`.
+fn run_cockpit(_path: Option<std::path::PathBuf>) -> anyhow::Result<()> {
+    use crossterm::event::{self, Event, KeyEventKind};
+    use gilamonster_agent::cockpit::{route_cockpit_key, tab_bar, Cockpit, CockpitKey};
+    use gilamonster_agent::cowork::to_key_combo;
+    use gilamonster_agent::keys::KeyDispatcher;
+    use gilamonster_agent::layout::Rect as LRect;
+    use ratatui::backend::CrosstermBackend;
+    use ratatui::layout::{Alignment, Rect};
+    use ratatui::style::{Color, Modifier, Style};
+    use ratatui::widgets::{Block, Borders, Paragraph};
+    use ratatui::Terminal;
+
+    let mut cockpit = Cockpit::new();
+    let mut dispatcher = KeyDispatcher::default();
+
+    setup_terminal()?;
+    let mut guard = TerminalGuard::new(restore_terminal);
+    let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
+
+    let mut quit = false;
+    let loop_result: anyhow::Result<()> = (|| {
+        while !quit {
+            terminal.draw(|frame| {
+                let area = frame.area();
+                // Top row: the tab bar. Everything below: the panes.
+                let bar = tab_bar(&cockpit.tab_titles(), cockpit.active_tab());
+                frame.render_widget(
+                    Paragraph::new(bar).style(Style::default().fg(Color::Cyan)),
+                    Rect::new(area.x, area.y, area.width, 1),
+                );
+                let panes_area = LRect::new(0, 1, area.width, area.height.saturating_sub(1));
+                let focused = cockpit.focused_pane();
+                for (pane, r) in cockpit.rects(panes_area) {
+                    let role = cockpit.pane_role(pane);
+                    let is_focused = pane == focused;
+                    let border = if is_focused {
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    };
+                    let label = role
+                        .map(|role| gilamonster_agent::cockpit::pane_label(role, pane, is_focused))
+                        .unwrap_or_default();
+                    let widget = Paragraph::new(label)
+                        .alignment(Alignment::Center)
+                        .block(Block::default().borders(Borders::ALL).border_style(border));
+                    frame.render_widget(widget, Rect::new(r.x, r.y, r.w, r.h));
+                }
+            })?;
+
+            if event::poll(Duration::from_millis(50))? {
+                if let Event::Key(key) = event::read()? {
+                    if key.kind != KeyEventKind::Release {
+                        if let Some(combo) = to_key_combo(key.code, key.modifiers) {
+                            match route_cockpit_key(
+                                &mut dispatcher,
+                                combo,
+                                std::time::Instant::now(),
+                            ) {
+                                CockpitKey::Quit => quit = true,
+                                CockpitKey::Do(action) => {
+                                    cockpit.apply(action);
+                                }
+                                CockpitKey::Ignore => {}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    })();
+
+    guard.restore();
+    loop_result
 }
 
 /// `gila matrix` — print the scaffold notice, or (`--mock`) open the FleetView
