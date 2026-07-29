@@ -108,6 +108,11 @@ async fn main() -> anyhow::Result<()> {
         // shell PTY land in the next ratchet. Raw terminal loop = the same
         // by-design-uncovered carve-out as run_cowork / run_fleet_dashboard.
         Command::Cockpit { path } => run_cockpit(path),
+        // Chain: one question through a LangChain LLMChain against the
+        // configured newt backend. All logic is in `chain.rs` (unit + mocked
+        // end-to-end tests); this arm owns only the config resolve + print,
+        // the same by-design-uncovered carve-out as the other run_* arms.
+        Command::Chain { question } => run_chain(question).await,
         // Scrybe: a live Markdown session against a scrybe MCP peer — gila is
         // the client, scrybe owns the doc, edits flow both ways (see `scrybe`
         // and docs/design/scrybe-markdown-surface.md). Phase 1 prints the
@@ -116,6 +121,29 @@ async fn main() -> anyhow::Result<()> {
             run_scrybe(&uri, doc_path.as_deref().and_then(|p| p.to_str()))
         }
     }
+}
+
+/// `gila chain` — run one question through the LangChain LLMChain.
+///
+/// Resolves the operator's first configured newt backend (the same seam
+/// `gila follow` / `gila cowork` use), maps it through
+/// [`chain::settings_from_backend`](gilamonster_agent::chain::settings_from_backend)
+/// (fail-loud on an unset model), and prints the chain's reply.
+async fn run_chain(question: Vec<String>) -> anyhow::Result<()> {
+    use gilamonster_agent::chain::{ask, settings_from_backend};
+    let cfg = newt_core::Config::resolve()?;
+    let backend = cfg.backends.first().ok_or_else(|| {
+        anyhow::anyhow!("no inference backend configured — set one up in newt's config first")
+    })?;
+    let settings = settings_from_backend(backend)?;
+    let question = question.join(" ");
+    eprintln!(
+        "gila chain: LLMChain → {} [{}]",
+        settings.model, settings.base_url
+    );
+    let reply = ask(&settings, &question).await?;
+    println!("{reply}");
+    Ok(())
 }
 
 /// `gila scrybe` — open a live Markdown session against a scrybe MCP peer.

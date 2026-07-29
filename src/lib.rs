@@ -26,6 +26,7 @@ use clap::{Parser, Subcommand};
 
 pub mod authority;
 pub mod capabilities;
+pub mod chain;
 pub mod cockpit;
 pub mod cowork;
 pub mod fleet;
@@ -124,6 +125,17 @@ pub enum Command {
     Cockpit {
         /// Optional working path the cockpit session runs against.
         path: Option<PathBuf>,
+    },
+    /// Run one question through a **LangChain** `LLMChain` (system frame +
+    /// human template) against the configured newt backend — the LangChain
+    /// exploration surface (see [`chain`]). Same endpoint/model/token seam as
+    /// `gila follow`/`gila cowork`: everything comes from newt's config,
+    /// nothing from code. Tool-capable LangChain agents are out of scope for
+    /// this slice; they would come back through the `authority` seam.
+    Chain {
+        /// The question to send through the chain (words are joined).
+        #[arg(required = true)]
+        question: Vec<String>,
     },
     /// Open a live **scrybe** Markdown session: gila is the MCP *client*, a
     /// scrybe MCP server (local or an agent-mesh peer) owns the document; the
@@ -364,6 +376,25 @@ mod tests {
         assert!(
             Cli::try_parse_from(["gila", "scrybe"]).is_err(),
             "uri required"
+        );
+    }
+
+    #[test]
+    fn chain_subcommand_parses() {
+        assert_eq!(
+            Cli::parse_from(["gila", "chain", "why", "is", "the", "sky", "blue"])
+                .effective_command(),
+            Command::Chain {
+                question: ["why", "is", "the", "sky", "blue"]
+                    .map(String::from)
+                    .to_vec()
+            }
+        );
+        // A question is required — bare `gila chain` is a usage error, not an
+        // empty prompt on the wire.
+        assert!(
+            Cli::try_parse_from(["gila", "chain"]).is_err(),
+            "question required"
         );
     }
 
