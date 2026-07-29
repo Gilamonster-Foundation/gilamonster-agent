@@ -61,7 +61,7 @@
 //! surface, mirroring the carve-out `gila follow` / `gila cowork` use.
 
 use newt_core::config::ModeConfig;
-use newt_core::mcp::{McpServerEntry, TransportKind};
+use newt_core::mcp::{McpServerEntry, McpTrust, TransportKind};
 use newt_core::{Config, NamedPermissionPreset};
 
 /// The name of the hotseat mode (`[modes.hotseat]`) the operator engages with
@@ -125,6 +125,9 @@ pub const HOTSEAT_MAX_CALLS: u64 = 40;
 #[must_use]
 pub fn readonly_triage_preset() -> NamedPermissionPreset {
     NamedPermissionPreset {
+        // Reads stay at the top of the axis (`all`) — the triage agent orients
+        // itself from runbooks and repo context; #755's narrowing is opt-in.
+        fs_read: None,
         // Deny all writes; (with no exec_allow) deny all exec.
         readonly: true,
         // A read-only triage agent runs no local commands at all — search and
@@ -151,12 +154,16 @@ pub fn readonly_triage_preset() -> NamedPermissionPreset {
 pub fn modulex_mcp_entry() -> McpServerEntry {
     McpServerEntry {
         name: MODULEX_MCP_NAME.to_string(),
+        enabled: true,
         transport: TransportKind::Stdio,
         command: Some(MODULEX_MCP_COMMAND.to_string()),
         args: Vec::new(),
         env: std::collections::BTreeMap::new(),
         url: None,
         headers: std::collections::BTreeMap::new(),
+        request_timeout_secs: None,
+        // gila-owned wiring, minted here (not a borrowed overlay) — trusted.
+        trust: McpTrust::Trusted,
     }
 }
 
@@ -443,12 +450,15 @@ mod tests {
         let mut base = Config::default();
         base.mcp_servers.push(McpServerEntry {
             name: MODULEX_MCP_NAME.to_string(),
+            enabled: true,
             transport: TransportKind::Stdio,
             command: Some("/opt/bin/modulex-mcp".to_string()),
             args: vec!["--config".to_string(), "/etc/modulex.toml".to_string()],
             env: std::collections::BTreeMap::new(),
             url: None,
             headers: std::collections::BTreeMap::new(),
+            request_timeout_secs: None,
+            trust: McpTrust::Trusted,
         });
         let composed = compose_hotseat_config(base, "oncall-triage");
 

@@ -2,7 +2,9 @@
 name = "gilamonster-agent"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
+# 1.75 -> 1.88: follows newt-agent's honest-floor bump (its current lock needs
+# 1.88 via darling 0.23 / instability 0.3.12 from the ratatui work).
+rust-version = "1.88"
 license = "Apache-2.0"
 description = "The Gilamonster agent matrix — inherits newt-agent's chat + agentic-coding airframe and extends it into a Hermes/Thoon-style multi-agent matrix."
 repository = "https://github.com/Gilamonster-Foundation/gilamonster-agent"
@@ -16,19 +18,18 @@ path = "src/main.rs"
 # --- Inherited from newt-agent (the "airframe") -------------------------------
 # gila is a PRIVATE binary, not a published library — so it consumes newt over a
 # GIT dependency pinned to a newt-agent main rev, NOT a crates.io version dep.
-# newt 0.6.x cannot publish `newt-core`/`newt-tui`/`newt-mcp-server` to crates.io
-# while the agent-bridle stub-shell `[patch.crates-io]` git patch stands (brush
-# git dep → crates.io forbids it; see reubeno/brush#1184 and newt-agent's
-# docs/decisions/agent_bridle_publishing.md). A binary never needs crates.io, so
-# the git-dep is the correct permanent shape, not a stopgap. For LOCAL dev a
-# git-ignored `.cargo/config.toml` overlays these onto the local newt checkout
-# (see .cargo/config.toml.template); CI uses the pinned `rev` below.
+# A binary never needs crates.io, so the git-dep is the correct *permanent*
+# shape, not a stopgap. For LOCAL dev a git-ignored `.cargo/config.toml`
+# overlays these onto the local newt checkout (see .cargo/config.toml.template);
+# CI uses the pinned `rev` below. The rev is newt-agent 0.7.5-line main
+# (2026-07-29); agent-bridle now resolves from crates.io (0.7.14, published) so
+# the old stub-shell `[patch.crates-io]` mirror is gone on both sides.
 #
 # newt-tui pulls the lean chat + agentic-coding TUI (and, transitively,
 # newt-core / newt-inference / newt-tools / newt-skills / newt-mcp-client).
 # gilamonster reuses it directly and will extend it; "inherits and extends" is a
 # git dependency on a sibling repo, not a fork.
-newt-tui = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev = "81488ef9a57394c724eeff5518b36fe4bbc4c08a" }
+newt-tui = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev = "edad1fbcb5b14a6994edad8f291275e234950390" }
 # The cowork foundation (newt PR #310 / issue #308): the redaction-gated
 # `ShellObservation` seam, the non-blocking `TurnDriver` (submit_observation /
 # submit / poll / cancel), and `transcript_lines`. `gila follow` consumes these
@@ -36,10 +37,10 @@ newt-tui = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev =
 # built once in newt-core, gila only feeds it. The attenuation-only `Caveats`
 # lattice (re-exported from newt-core) is what clamps follow to a read-only
 # posture. Same pinned rev as the rest of the airframe.
-newt-core = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev = "81488ef9a57394c724eeff5518b36fe4bbc4c08a" }
+newt-core = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev = "edad1fbcb5b14a6994edad8f291275e234950390" }
 # The object-capability identity layer — signed, attenuation-only AgentKey
 # caveats. Shared with newt so the whole matrix runs under one capability model.
-newt-identity = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev = "81488ef9a57394c724eeff5518b36fe4bbc4c08a" }
+newt-identity = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev = "edad1fbcb5b14a6994edad8f291275e234950390" }
 
 # --- Local ---------------------------------------------------------------------
 anyhow = "1"
@@ -48,7 +49,7 @@ tokio = { version = "1", features = ["full"] }
 # newt's MCP client — `gila capabilities check` connects to a capability's MCP
 # server over the SAME stdio JSON-RPC transport the inherited TUI uses, so the
 # check exercises the real path, not a re-implementation. Same pinned rev.
-newt-mcp-client = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev = "81488ef9a57394c724eeff5518b36fe4bbc4c08a" }
+newt-mcp-client = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev = "edad1fbcb5b14a6994edad8f291275e234950390" }
 # `gila capabilities check` builds tool-call arguments and reads MCP results.
 serde_json = "1"
 # The `~/.gila/capabilities.toml` selection manifest deserializes via serde
@@ -56,10 +57,11 @@ serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 # The object-capability leash. `gila capabilities run` spawns a manifest-confined
 # capability through `agent_bridle_core::spawn_confined_subprocess` (Landlock +
-# env-scrub, agent-bridle#56). Resolves via the `[patch.crates-io]` block below
-# to the same git rev newt builds. `async-trait` is needed only to implement the
-# trivial `Tool` that mints the spawn's `ToolContext` through the gate.
-agent-bridle-core = "0.1"
+# env-scrub, agent-bridle#56). Published on crates.io; pinned to the same 0.7.x
+# line newt-core resolves (0.7.14) so the two halves agree on the gate types.
+# `async-trait` is needed only to implement the trivial `Tool` that mints the
+# spawn's `ToolContext` through the gate.
+agent-bridle-core = "0.7"
 async-trait = "0.1"
 # `gila hotseat` serializes the composed session config (the operator's config
 # overlaid with the read-only-triage preset, the hotseat mode, and the modulex
@@ -113,32 +115,3 @@ proptest = "1"
 opt-level = 3
 lto = "thin"
 strip = true
-
-# ── Temporary patch: agent-bridle → crates.io transition ──────────────────────
-#
-# Mirrors newt-agent's top-level `[patch.crates-io]`. newt-tui transitively
-# depends on `agent-bridle = "0.1"` (a crates.io dep that is not yet published —
-# it lands only after agent-bridle PR #21 merges and brush#1184 unblocks the
-# real confined shell). newt satisfies that registry dep from the stub-shell
-# branch; because gila consumes newt over a git dep, gila's OWN dependency tree
-# must carry the identical patch or `agent-bridle 0.1` won't resolve.
-#
-# We pin a fixed `rev` (not the floating `feat/stub-shell` branch newt's block
-# uses) because gila's Cargo.lock is .gitignored: without a pinned rev, a fresh
-# clone / CI build would resolve whatever the branch tip is at build time and
-# could silently drift away from what newt's release builds. This rev is exactly
-# the one newt's main Cargo.lock resolves the stub-shell branch to, with an
-# intentional bump: as of 2026-06-26 this rev is PAST agent-bridle#56 so gila can
-# call `agent_bridle_core::spawn_confined_subprocess` (the confined-cap-spawn
-# path). #56 is purely additive (a new `spawn` module — no change to the crates
-# newt uses), so newt still builds against this rev. Re-sync whenever the newt
-# pin above advances and newt's lock moves agent-bridle; keep it >= the #56
-# merge. When newt deletes its patch
-# (post-brush#1184 + agent-bridle 0.1.0 on crates.io), delete this block too.
-# See: https://github.com/Gilamonster-Foundation/agent-bridle/issues/20
-
-[patch.crates-io]
-agent-bridle           = { git = "https://github.com/Gilamonster-Foundation/agent-bridle", rev = "f3382a8b29364f1ef949fc3d0d8c935748dba8a7" }
-agent-bridle-core      = { git = "https://github.com/Gilamonster-Foundation/agent-bridle", rev = "f3382a8b29364f1ef949fc3d0d8c935748dba8a7" }
-agent-bridle-tool-shell = { git = "https://github.com/Gilamonster-Foundation/agent-bridle", rev = "f3382a8b29364f1ef949fc3d0d8c935748dba8a7" }
-agent-bridle-tool-web  = { git = "https://github.com/Gilamonster-Foundation/agent-bridle", rev = "f3382a8b29364f1ef949fc3d0d8c935748dba8a7" }

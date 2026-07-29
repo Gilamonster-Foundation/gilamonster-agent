@@ -483,7 +483,7 @@ impl KeyDispatcher {
 
     fn on_prefix_key(&mut self, key: KeyCombo, now: Instant) -> KeyDisposition {
         if self.repeating {
-            let expired = self.repeat_deadline.map_or(true, |d| now > d);
+            let expired = self.repeat_deadline.is_none_or(|d| now > d);
             if expired {
                 // Lazy deadline: the repeat window closed before this key —
                 // it is an ordinary Root-table key.

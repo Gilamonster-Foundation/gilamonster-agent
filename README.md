@@ -19,11 +19,10 @@ multi-agent matrix.
 This is the v0.1 structure, and **it builds today.** gila is a **private
 binary**, not a published library, so it consumes newt over a **git
 dependency** pinned to a `newt-agent` `main` rev — *not* a crates.io version
-dep. (newt 0.6.x cannot publish `newt-core`/`newt-tui`/`newt-mcp-server` to
-crates.io while its agent-bridle stub-shell `[patch.crates-io]` git patch
-stands — see reubeno/brush#1184 and newt-agent's
-`docs/decisions/agent_bridle_publishing.md`. A binary never needs crates.io, so
-the git-dep is the correct *permanent* shape, not a stopgap.)
+dep. A binary never needs crates.io, so the git-dep is the correct *permanent*
+shape, not a stopgap. (agent-bridle resolves from crates.io — 0.7.x, published
+— so the old stub-shell `[patch.crates-io]` mirror is gone on both sides; see
+newt-agent's `docs/decisions/agent_bridle_publishing.md` for the history.)
 
 ```bash
 gila code            # the inherited newt chat + agentic-coding TUI (the airframe)
@@ -36,7 +35,7 @@ multi-agent layer lands.
 ## Build
 
 ```bash
-cargo build          # resolves the pinned newt git rev + the agent-bridle patch
+cargo build          # resolves the pinned newt git rev
 just check           # the gate: fmt + clippy -D warnings + test
 just cov-ci          # coverage gate (>= 80% line floor, inherited from newt)
 just install-hooks   # wire .githooks/pre-push (runs the gate before every push)
@@ -57,8 +56,8 @@ just overlay-off     # drop the overlay; back to the pinned git rev (CI-equivale
 
 `.cargo/config.toml` is in `.gitignore` and can never be committed, so CI is
 always reproducible from the pinned rev. Bump the rev in `Cargo.toml` to adopt
-a newer newt; keep gila's `[patch.crates-io]` agent-bridle block byte-for-byte
-in sync with newt's (delete both together once brush#1184 lands).
+a newer newt; keep gila's `agent-bridle-core` version line on the same 0.x
+line newt-core resolves, so the two halves agree on the gate types.
 
 ## What's inherited (the `newt-*` crates, over git-dep)
 

@@ -195,18 +195,35 @@ pub fn read_only_config(
 /// without the agent gaining any authority to act. `workspace` is the directory
 /// the (toolless) turn nominally runs against; for follow it is purely
 /// informational.
+///
+/// Errors when the backend declares no model: newt's #1128 made `model`
+/// optional ("the server dictates" — filled in by session-start probing), but
+/// follow has no probe step, so an unset model is a config the observer cannot
+/// honestly use. Same fail-loud shape as `newt solve`. An unset `kind` likewise
+/// means "probe at connect"; follow adopts newt's wire default (OpenAI) rather
+/// than growing its own probe.
 pub fn config_from_backend(
     backend: &newt_core::BackendConfig,
     workspace: impl Into<String>,
-) -> TurnDriverConfig {
+) -> anyhow::Result<TurnDriverConfig> {
+    let model = backend
+        .effective_model()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "backend `{}` has no model (set model = in the [[backends]] entry — \
+                 follow has no probe step to adopt one)",
+                backend.name
+            )
+        })?
+        .to_string();
     let mut config = read_only_config(
         backend.endpoint.clone(),
-        backend.model.clone(),
-        backend.kind,
+        model,
+        backend.kind.unwrap_or(BackendKind::Openai),
         workspace,
     );
     config.api_key = backend.resolve_api_key();
-    config
+    Ok(config)
 }
 
 /// The standing instruction `gila follow` gives the agent: it is a read-only
@@ -417,7 +434,12 @@ pub async fn drive_comment(
     channel.driver().submit(FOLLOW_COMMENT_NUDGE)?;
     for _ in 0..max_polls {
         match channel.driver().poll() {
-            TurnStatus::Completed(outcome) => return Ok(Some(outcome.reply)),
+            // An errored turn comes back `Completed` carrying `error: Some`
+            // (newt's partial-trajectory contract) — that is a failed comment,
+            // not a comment, so the follow loop just keeps watching.
+            TurnStatus::Completed(outcome) => {
+                return Ok(outcome.error.is_none().then_some(outcome.reply));
+            }
             TurnStatus::Failed(_) => return Ok(None),
             TurnStatus::Running => tokio::time::sleep(poll_interval).await,
             TurnStatus::Idle => return Ok(None),
@@ -616,13 +638,12 @@ mod tests {
         let backend = newt_core::BackendConfig {
             name: "local".into(),
             endpoint: "http://10.0.0.5:11434".into(),
-            model: "qwen2.5-coder".into(),
-            tiers: vec![],
-            kind: BackendKind::Ollama,
-            api_key_file: None,
-            api_key_env: None,
+            model: Some("qwen2.5-coder".into()),
+            kind: Some(BackendKind::Ollama),
+            ..Default::default()
         };
-        let cfg = config_from_backend(&backend, "/work");
+        let cfg = config_from_backend(&backend, "/work")
+            .expect("declared model + kind must thread through");
         // Endpoint/model/kind threaded through.
         assert_eq!(cfg.url, "http://10.0.0.5:11434");
         assert_eq!(cfg.model, "qwen2.5-coder");
@@ -632,6 +653,24 @@ mod tests {
         // And it is read-only.
         assert!(!cfg.caveats.permits_fs_write("/work/x"));
         assert!(!cfg.caveats.permits_exec("ls"));
+    }
+
+    /// Regression (newt #1128 re-pin): `BackendConfig.model` became optional
+    /// ("the server dictates", filled by session-start probing). follow has no
+    /// probe step, so an unset model must fail loud — never silently drive an
+    /// empty model name at the endpoint.
+    #[test]
+    fn config_from_backend_rejects_a_backend_with_no_model() {
+        let backend = newt_core::BackendConfig {
+            name: "probe-me".into(),
+            endpoint: "http://192.0.2.7:8080".into(),
+            model: None,
+            kind: Some(BackendKind::Openai),
+            ..Default::default()
+        };
+        let err = config_from_backend(&backend, "/work").unwrap_err();
+        assert!(err.to_string().contains("probe-me"), "names the backend");
+        assert!(err.to_string().contains("no model"), "says what is missing");
     }
 
     // --- drive_comment against a mock backend -------------------------------
@@ -701,6 +740,33 @@ mod tests {
             .await
             .expect("no driver error");
         assert!(got.is_none(), "a failed turn yields no comment");
+    }
+
+    /// Regression (newt re-pin): an errored turn now surfaces as
+    /// `TurnStatus::Completed` with `outcome.error: Some` (the partial-
+    /// trajectory contract) instead of `TurnStatus::Failed`. Before the fix,
+    /// `drive_comment` returned `Some("")` for a backend 500 — a phantom empty
+    /// comment. A mock 500 makes this deterministic (the dead-port test above
+    /// depends on retry backoff outrunning the poll budget).
+    #[tokio::test]
+    async fn drive_comment_returns_none_when_the_turn_completes_with_an_error() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let cfg = read_only_config(server.uri(), "test-model", BackendKind::Ollama, ".");
+        let mut ch = ObservationChannel::new(TurnDriver::new(cfg));
+        ch.feed(TYPESCRIPT_SOURCE_TAG, "$ echo hi\nhi\n");
+        let got = drive_comment(&mut ch, std::time::Duration::from_millis(5), 2000)
+            .await
+            .expect("no driver error");
+        assert!(got.is_none(), "an errored turn must not yield a comment");
     }
 
     // --- TypescriptTail (Tier A producer) -----------------------------------
