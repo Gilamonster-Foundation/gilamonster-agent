@@ -19,16 +19,20 @@
 # The patch URL MUST match the git dependency's URL in Cargo.toml verbatim,
 # and every newt-* crate the dependency tree pulls must be overridden, or
 # cargo resolves a mix of git + path and errors. The set below mirrors
-# newt-tui's transitive closure (newt-core/-inference/-tools/-skills/
-# -mcp-client) plus newt-identity.
+# newt-tui's transitive closure (newt-core/-git/-inference/-tools/-skills/
+# -mcp-client, plus newt-core's newt-tuner and newt-inference's
+# plugins-protocol) plus newt-identity.
 
 NEWT = "/home/hartsock/workspaces/newt-agent"
 
 [patch."https://github.com/Gilamonster-Foundation/newt-agent"]
-newt-tui        = { path = "/home/hartsock/workspaces/newt-agent/newt-tui" }
-newt-identity   = { path = "/home/hartsock/workspaces/newt-agent/newt-identity" }
-newt-core       = { path = "/home/hartsock/workspaces/newt-agent/newt-core" }
-newt-inference  = { path = "/home/hartsock/workspaces/newt-agent/newt-inference" }
-newt-tools      = { path = "/home/hartsock/workspaces/newt-agent/newt-tools" }
-newt-skills     = { path = "/home/hartsock/workspaces/newt-agent/newt-skills" }
-newt-mcp-client = { path = "/home/hartsock/workspaces/newt-agent/newt-mcp-client" }
+newt-tui         = { path = "/home/hartsock/workspaces/newt-agent/newt-tui" }
+newt-identity    = { path = "/home/hartsock/workspaces/newt-agent/newt-identity" }
+newt-core        = { path = "/home/hartsock/workspaces/newt-agent/newt-core" }
+newt-git         = { path = "/home/hartsock/workspaces/newt-agent/newt-git" }
+newt-inference   = { path = "/home/hartsock/workspaces/newt-agent/newt-inference" }
+newt-tools       = { path = "/home/hartsock/workspaces/newt-agent/newt-tools" }
+newt-skills      = { path = "/home/hartsock/workspaces/newt-agent/newt-skills" }
+newt-mcp-client  = { path = "/home/hartsock/workspaces/newt-agent/newt-mcp-client" }
+newt-tuner       = { path = "/home/hartsock/workspaces/newt-agent/crates/newt-tuner" }
+plugins-protocol = { path = "/home/hartsock/workspaces/newt-agent/plugins-protocol" }
