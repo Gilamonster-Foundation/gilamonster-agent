@@ -116,6 +116,11 @@ jobs:
 
       - name: Upload lcov.info
         if: always()
+        # Non-fatal: the coverage GATE is the step above; this upload is a
+        # convenience report. An org-wide artifact-storage-quota hit (seen
+        # 2026-07-29: "Failed to CreateArtifact: Artifact storage quota has
+        # been hit") must not fail a job whose gate already passed.
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: lcov-coverage
