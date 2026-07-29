@@ -20,6 +20,17 @@ the next epic.
 > (≡ v0.3.1) and **`v0.2.0`** (≡ v0.3.2) as historical facts; the live
 > `v0.3.N` tag series runs from `v0.3.3` (Layout) onward.
 
+> **Renumbering note (2026-07-29).** The `0.4.x` line opens **early**, ahead
+> of the pane-drive capstone: the newt airframe re-pin (0.7.5-line main,
+> +1,150 commits — the `[patch.crates-io]` era ended, MSRV 1.88, the
+> `Option`-shaped backend config, the partial-trajectory turn contract) plus
+> the `gila chain` LangChain surface are a bigger platform step than any
+> single cockpit milestone, and the manifest/tag drift (Cargo.toml pinned at
+> 0.1.0 through v0.3.3) needed a clean break. Tags v0.1.0/v0.2.0/v0.3.3 stand
+> as history; the **unshipped cockpit milestones (v0.3.4–v0.3.12 above)
+> continue unchanged inside `0.4.x`** — read "v0.3.N" below as "the Nth
+> milestone", now landing as 0.4.x patch/minor bumps.
+
 ## Baseline: newt-agent 0.8.0
 
 The line drives off the **newt-agent 0.8.0** airframe — the release carrying

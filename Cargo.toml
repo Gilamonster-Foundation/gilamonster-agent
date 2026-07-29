@@ -1,6 +1,9 @@
 [package]
 name = "gilamonster-agent"
-version = "0.1.0"
+# 0.4.0 opens the post-re-pin line (newt 0.7.5 airframe; ROADMAP.md
+# "Renumbering note, 2026-07-29"). Ends the drift where the manifest sat at
+# 0.1.0 while tags reached v0.3.3 — from here the manifest moves with the tag.
+version = "0.4.0"
 edition = "2021"
 # 1.75 -> 1.88: follows newt-agent's honest-floor bump (its current lock needs
 # 1.88 via darling 0.23 / instability 0.3.12 from the ratatui work).
