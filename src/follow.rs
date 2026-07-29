@@ -663,7 +663,7 @@ mod tests {
     fn config_from_backend_rejects_a_backend_with_no_model() {
         let backend = newt_core::BackendConfig {
             name: "probe-me".into(),
-            endpoint: "http://10.0.0.5:8080".into(),
+            endpoint: "http://192.0.2.7:8080".into(),
             model: None,
             kind: Some(BackendKind::Openai),
             ..Default::default()

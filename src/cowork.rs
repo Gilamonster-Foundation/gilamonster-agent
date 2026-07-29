@@ -516,7 +516,16 @@ impl CoworkApp {
                 }
             }
             TurnStatus::Running => self.status = TurnState::Running,
-            TurnStatus::Completed(_) => self.status = TurnState::Completed,
+            // An errored turn comes back `Completed` carrying `error: Some` —
+            // newt's partial-trajectory contract (an infrastructure failure
+            // must not erase what the agent already did). The cockpit's sticky
+            // state folds that back into `Failed` so the operator sees it.
+            TurnStatus::Completed(outcome) => {
+                self.status = match outcome.error {
+                    Some(why) => TurnState::Failed(why),
+                    None => TurnState::Completed,
+                }
+            }
             TurnStatus::Failed(why) => self.status = TurnState::Failed(why),
         }
         self.status.clone()

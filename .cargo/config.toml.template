@@ -22,17 +22,19 @@
 # newt-tui's transitive closure (newt-core/-git/-inference/-tools/-skills/
 # -mcp-client, plus newt-core's newt-tuner and newt-inference's
 # plugins-protocol) plus newt-identity.
-
-NEWT = "/home/hartsock/workspaces/newt-agent"
+#
+# Paths are RELATIVE to this repo's root (cargo resolves config paths against
+# the directory containing `.cargo/`): a newt-agent checkout as a sibling of
+# gilamonster-agent needs no editing. Point them elsewhere if yours differs.
 
 [patch."https://github.com/Gilamonster-Foundation/newt-agent"]
-newt-tui         = { path = "/home/hartsock/workspaces/newt-agent/newt-tui" }
-newt-identity    = { path = "/home/hartsock/workspaces/newt-agent/newt-identity" }
-newt-core        = { path = "/home/hartsock/workspaces/newt-agent/newt-core" }
-newt-git         = { path = "/home/hartsock/workspaces/newt-agent/newt-git" }
-newt-inference   = { path = "/home/hartsock/workspaces/newt-agent/newt-inference" }
-newt-tools       = { path = "/home/hartsock/workspaces/newt-agent/newt-tools" }
-newt-skills      = { path = "/home/hartsock/workspaces/newt-agent/newt-skills" }
-newt-mcp-client  = { path = "/home/hartsock/workspaces/newt-agent/newt-mcp-client" }
-newt-tuner       = { path = "/home/hartsock/workspaces/newt-agent/crates/newt-tuner" }
-plugins-protocol = { path = "/home/hartsock/workspaces/newt-agent/plugins-protocol" }
+newt-tui         = { path = "../newt-agent/newt-tui" }
+newt-identity    = { path = "../newt-agent/newt-identity" }
+newt-core        = { path = "../newt-agent/newt-core" }
+newt-git         = { path = "../newt-agent/newt-git" }
+newt-inference   = { path = "../newt-agent/newt-inference" }
+newt-tools       = { path = "../newt-agent/newt-tools" }
+newt-skills      = { path = "../newt-agent/newt-skills" }
+newt-mcp-client  = { path = "../newt-agent/newt-mcp-client" }
+newt-tuner       = { path = "../newt-agent/crates/newt-tuner" }
+plugins-protocol = { path = "../newt-agent/plugins-protocol" }

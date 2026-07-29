@@ -521,7 +521,7 @@ impl LayoutTree {
             };
             if adjacent {
                 let mru = self.focus_tick.get(p).copied().unwrap_or(0);
-                if best.map_or(true, |(_, b)| mru > b) {
+                if best.is_none_or(|(_, b)| mru > b) {
                     best = Some((*p, mru));
                 }
             }
