@@ -18,7 +18,7 @@ use std::process::Command;
 
 use agent_bridle_core::{Caveats, ConfinedCommand, Gate, Scope, Tool, ToolContext, ToolResult};
 use anyhow::{Context, Result};
-use newt_core::mcp::{McpServerEntry, TransportKind};
+use newt_core::mcp::{McpServerEntry, McpTrust, TransportKind};
 use newt_core::Config;
 use newt_mcp_client::{McpConnection, StdioTransport};
 use serde_json::json;
@@ -51,12 +51,16 @@ fn gilacap_global() -> GilacapCmd {
 fn entry_for_with(g: &GilacapCmd, name: &str) -> McpServerEntry {
     McpServerEntry {
         name: name.to_string(),
+        enabled: true,
         transport: TransportKind::Stdio,
         command: Some(g.program.clone()),
         args: g.argv(&["mcp", name]),
         env: Default::default(),
         url: None,
         headers: Default::default(),
+        request_timeout_secs: None,
+        // gila-owned wiring (the manifest the operator edited) — trusted config.
+        trust: McpTrust::Trusted,
     }
 }
 
@@ -240,7 +244,15 @@ pub async fn check(name: &str) -> Result<()> {
         "→ spawning `{} mcp {name}` and connecting via newt's MCP client …",
         g.program
     );
-    let transport = StdioTransport::spawn(&entry).with_context(|| {
+    // The leash the capability server is spawned under — the operator's own
+    // configured permissions (else newt's read-only default), exactly the
+    // confinement a live session applies. Mirrors `newt doctor` / `newt mcp
+    // probe` (Config::mcp_probe_caveats — never `top()` in a dispatch path).
+    let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let leash = Config::resolve()
+        .unwrap_or_default()
+        .mcp_probe_caveats(&workspace);
+    let transport = StdioTransport::spawn(&entry, &leash).with_context(|| {
         format!(
             "spawning `{} mcp {name}` — is the caps venv set up? \
              (try `~/.gila/caps-venv/bin/pip install gila-cap-{name}`)",
@@ -632,12 +644,15 @@ mod tests {
         // The operator already declared their own `confluence` server.
         base.mcp_servers.push(McpServerEntry {
             name: "confluence".to_string(),
+            enabled: true,
             transport: TransportKind::Stdio,
             command: Some("/opt/my-confluence".to_string()),
             args: Vec::new(),
             env: Default::default(),
             url: None,
             headers: Default::default(),
+            request_timeout_secs: None,
+            trust: McpTrust::Trusted,
         });
         let entries = vec![
             entry_for_with(&gilacap(), "confluence"),

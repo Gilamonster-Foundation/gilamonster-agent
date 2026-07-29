@@ -308,12 +308,12 @@ async fn run_follow(
     let workspace = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| ".".to_string());
-    let driver_config = config_from_backend(backend, workspace);
+    let driver_config = config_from_backend(backend, workspace)?;
 
     println!(
         "gila follow (read-only): watching {} via {} [{}]. The agent observes only — it never drives your shell. Ctrl-C to stop.",
         target.display(),
-        backend.model,
+        driver_config.model,
         backend.endpoint,
     );
 
@@ -391,8 +391,18 @@ fn run_cowork(path: Option<std::path::PathBuf>) -> anyhow::Result<()> {
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| ".".to_string()),
     };
-    let mut driver_config =
-        TurnDriverConfig::new(&backend.endpoint, &backend.model, backend.kind, workspace);
+    // newt #1128 made `model`/`kind` optional ("probe at session start");
+    // cowork has no probe step, so an unset model fails loud (same shape as
+    // `gila follow` / `newt solve`) and an unset kind adopts newt's OpenAI
+    // wire default.
+    let model = backend.effective_model().ok_or_else(|| {
+        anyhow::anyhow!(
+            "backend `{}` has no model (set model = in the [[backends]] entry)",
+            backend.name
+        )
+    })?;
+    let kind = backend.kind.unwrap_or(newt_core::BackendKind::Openai);
+    let mut driver_config = TurnDriverConfig::new(&backend.endpoint, model, kind, workspace);
     driver_config.api_key = backend.resolve_api_key();
 
     // Seed the cowork framing so the agent knows it shares a screen with the
@@ -572,7 +582,7 @@ fn run_hotseat(path: Option<std::path::PathBuf>, skill: Option<String>) -> anyho
 
     // Hand off to the inherited TUI exactly as `gila code` does; the operator
     // engages the read-only floor in-session with `/mode hotseat`.
-    newt_tui::run_code(code_path(&path), false, None)
+    newt_tui::run_code(code_path(&path), false, None, None, None, None)
 }
 
 /// `gila code` — the inherited TUI, with the **opted-in capabilities auto-mounted**
@@ -589,7 +599,7 @@ fn run_hotseat(path: Option<std::path::PathBuf>, skill: Option<String>) -> anyho
 fn run_code_with_caps(path: Option<std::path::PathBuf>) -> anyhow::Result<()> {
     let entries = capabilities::agent_mcp_entries();
     if entries.is_empty() {
-        return newt_tui::run_code(code_path(&path), false, None);
+        return newt_tui::run_code(code_path(&path), false, None, None, None, None);
     }
     let mounted = entries.len();
     let base = newt_core::Config::resolve()?;
@@ -602,5 +612,5 @@ fn run_code_with_caps(path: Option<std::path::PathBuf>) -> anyhow::Result<()> {
     })?;
     std::env::set_var("NEWT_CONFIG", &session_path);
     eprintln!("→ gila: mounted {mounted} capability MCP server(s) as agent tools");
-    newt_tui::run_code(code_path(&path), false, None)
+    newt_tui::run_code(code_path(&path), false, None, None, None, None)
 }
