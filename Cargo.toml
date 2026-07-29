@@ -90,6 +90,14 @@ crossterm = "0.28"
 # equivalent.
 portable-pty = "0.9"
 vt100 = "0.15"
+# --- LangChain experiment (`gila chain`) --------------------------------------
+# The Rust LangChain port: prompt templates + chains + LLM clients. `gila chain`
+# drives an LLMChain against the SAME newt backend config the rest of the
+# airframe uses (endpoint/model/api-key come from `Config::resolve`, never from
+# code). NOTE: upstream last published 2024-10 (4.6.0) — treat this as an
+# exploration surface, not a foundation; the seam is one module (`src/chain.rs`)
+# so it stays cheap to replace.
+langchain-rust = "4.6"
 
 [dev-dependencies]
 # CLI integration tests: run the real `gila` binary and assert on its output.
