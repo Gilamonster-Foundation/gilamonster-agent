@@ -124,6 +124,96 @@ async fn main() -> anyhow::Result<()> {
         // tend via profile steps that shell out to the git CLI (matching the
         // Python engine 1:1). Graduated out of the shell-delegate fallback.
         Command::Git { cmd } => run_git(cmd),
+        // Phase 3 Rust-native commands (batch 1): version/daily/ideas/todos/
+        // projects/board/cache. Logic lives in the `gila_*` lib modules
+        // (unit-tested); these arms own only HOME resolution + file effect.
+        Command::Version => {
+            println!("{}", gilamonster_agent::gila_version::version_report());
+            Ok(())
+        }
+        Command::Daily { date } => {
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+            let dir = gilamonster_agent::gila_daily::daily_dir(home.as_deref())?;
+            let date = date.unwrap_or_else(today);
+            let p = gilamonster_agent::gila_daily::ensure_daily_note(&dir, &date)?;
+            println!("{}", p.display());
+            Ok(())
+        }
+        Command::Ideas { idea, list } => {
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+            let path = gilamonster_agent::gila_ideas::ideas_path(home.as_deref())?;
+            if list {
+                match std::fs::read_to_string(&path) {
+                    Ok(body) => print!("{body}"),
+                    Err(_) => println!("no ideas captured yet"),
+                }
+                return Ok(());
+            }
+            let text = idea.join(" ");
+            if text.is_empty() {
+                anyhow::bail!("no idea given — pass text or `--list`");
+            }
+            gilamonster_agent::gila_ideas::append_idea(&path, &today(), &text)?;
+            println!("captured: {text}");
+            Ok(())
+        }
+        Command::Todos { text, list, done } => {
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+            let path = gilamonster_agent::gila_todos::todos_path(home.as_deref())?;
+            if let Some(n) = done {
+                let body = std::fs::read_to_string(&path).unwrap_or_default();
+                let out = gilamonster_agent::gila_todos::mark_done(&body, n)
+                    .ok_or_else(|| anyhow::anyhow!("no open todo #{n}"))?;
+                std::fs::write(&path, out)?;
+                println!("done: #{n}");
+                return Ok(());
+            }
+            if list {
+                let body = std::fs::read_to_string(&path).unwrap_or_default();
+                let open = gilamonster_agent::gila_todos::list_open(&body);
+                if open.is_empty() {
+                    println!("no open todos");
+                } else {
+                    for l in open {
+                        println!("{l}");
+                    }
+                }
+                return Ok(());
+            }
+            let t = text.join(" ");
+            if t.is_empty() {
+                anyhow::bail!("no todo given — pass text, `--list`, or `--done N`");
+            }
+            gilamonster_agent::gila_todos::add_todo(&path, &t)?;
+            println!("added: {t}");
+            Ok(())
+        }
+        Command::Projects => {
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+            let root = gilamonster_agent::gila_projects::workspace_root(home.as_deref())?;
+            let projs = gilamonster_agent::gila_projects::list_projects(&root);
+            print!("{}", gilamonster_agent::gila_projects::render_projects(&projs));
+            Ok(())
+        }
+        Command::Board => {
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+            let dir = gilamonster_agent::gila_board::board_dir(home.as_deref())?;
+            let files = gilamonster_agent::gila_board::list_board_files(&dir);
+            print!("{}", gilamonster_agent::gila_board::render_board(&files));
+            Ok(())
+        }
+        Command::Cache { clear } => {
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+            let dir = gilamonster_agent::gila_cache::cache_dir(home.as_deref())?;
+            if clear {
+                let n = gilamonster_agent::gila_cache::clear(&dir)?;
+                println!("cleared {n} entr(y/ies) from {}", dir.display());
+            } else {
+                let s = gilamonster_agent::gila_cache::status(&dir);
+                print!("{}", gilamonster_agent::gila_cache::render_status(&dir, &s));
+            }
+            Ok(())
+        },
         // Shell-delegate fallback: any subcommand not yet ported from gilabot
         // (Python). clap's external_subcommand catch-all captured the name +
         // args; re-exec the real gilabot binary so every gilabot command works
@@ -179,6 +269,19 @@ fn run_delegate(args: &[std::ffi::OsString]) -> anyhow::Result<()> {
         .args(delegate_args(args))
         .status()?;
     std::process::exit(status.code().unwrap_or(1));
+}
+
+/// Today's date as `YYYY-MM-DD`, via the `date` binary (avoids a chrono dep;
+/// the modules stay date-injected and hermetic, this is the effectful seam).
+fn today() -> String {
+    std::process::Command::new("date")
+        .arg("+%F")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown-date".to_string())
 }
 
 /// `gila git …` — the Rust-native Phase-1 slice (commit via libgit2, tend via

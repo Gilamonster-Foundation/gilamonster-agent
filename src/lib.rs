@@ -31,9 +31,16 @@ pub mod chain;
 pub mod cockpit;
 pub mod cowork;
 pub mod delegate;
+pub mod gila_board;
+pub mod gila_cache;
+pub mod gila_daily;
+pub mod gila_git;
+pub mod gila_ideas;
+pub mod gila_projects;
+pub mod gila_todos;
+pub mod gila_version;
 pub mod fleet;
 pub mod follow;
-pub mod gila_git;
 pub mod hotseat;
 pub mod keys;
 pub mod layout;
@@ -162,6 +169,43 @@ pub enum Command {
     Git {
         #[command(subcommand)]
         cmd: GitCmd,
+    },
+    /// Print the gilamonster-agent version + toolchain (Rust-native, Phase 3).
+    Version,
+    /// Create or open today's daily note (`YYYY-MM-DD-daily.md`).
+    Daily {
+        /// Date for the note (YYYY-MM-DD). Defaults to today.
+        #[arg(long)]
+        date: Option<String>,
+    },
+    /// Capture a one-line idea, or list captured ideas.
+    Ideas {
+        /// The idea text to capture. Omit (with `--list`) to list ideas.
+        idea: Vec<String>,
+        /// List captured ideas instead of appending.
+        #[arg(long)]
+        list: bool,
+    },
+    /// Manage the markdown todo list: add, list open, or mark done.
+    Todos {
+        /// Todo text to add. Omit (with `--list`) to list, or `--done N`.
+        text: Vec<String>,
+        /// List open todos instead of adding.
+        #[arg(long)]
+        list: bool,
+        /// Mark the nth open todo done.
+        #[arg(long)]
+        done: Option<usize>,
+    },
+    /// List active projects (git repos) under the workspace root.
+    Projects,
+    /// Show the board (task files under the board directory).
+    Board,
+    /// Manage the gilabot cache (`status` default, `clear` to empty).
+    Cache {
+        /// Empty the cache instead of reporting status.
+        #[arg(long)]
+        clear: bool,
     },
     /// Shell-delegate fallback: any subcommand gilamonster-agent has not yet
     /// ported from gilabot (Python). clap's `external_subcommand` catch-all
