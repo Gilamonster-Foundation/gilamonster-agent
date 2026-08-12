@@ -33,18 +33,24 @@ pub mod cowork;
 pub mod delegate;
 pub mod gila_board;
 pub mod gila_cache;
+pub mod gila_checkpoint;
 pub mod gila_commit_msg;
 pub mod gila_completion;
 pub mod gila_daily;
+pub mod gila_dev;
 pub mod gila_git;
 pub mod gila_ideas;
 pub mod gila_init;
+pub mod gila_insights;
 pub mod gila_logs;
+pub mod gila_meeting;
 pub mod gila_projects;
 pub mod gila_prompt;
+pub mod gila_status;
 pub mod gila_todos;
 pub mod gila_update;
 pub mod gila_version;
+pub mod gila_wsl;
 pub mod fleet;
 pub mod follow;
 pub mod hotseat;
@@ -247,6 +253,45 @@ pub enum Command {
         #[arg(long)]
         repo: Option<PathBuf>,
     },
+    /// Create a meeting note from a template (`YYYY-MM-DD-<slug>.md`).
+    Meeting {
+        /// Meeting title.
+        #[arg(long)]
+        title: String,
+        /// Date for the note (YYYY-MM-DD). Defaults to today.
+        #[arg(long)]
+        date: Option<String>,
+    },
+    /// Scaffold a Top-5 weekly-status document.
+    Top5 {
+        /// Date for the doc (YYYY-MM-DD). Defaults to today.
+        #[arg(long)]
+        date: Option<String>,
+    },
+    /// Scaffold a standup note (yesterday/today/blockers).
+    Standup {
+        /// Date for the note (YYYY-MM-DD). Defaults to today.
+        #[arg(long)]
+        date: Option<String>,
+    },
+    /// Snapshot/inspect workspace checkpoints.
+    Checkpoint {
+        #[command(subcommand)]
+        cmd: CheckpointCmd,
+    },
+    /// Git activity analytics for a repo (commits by author + day).
+    Insights {
+        /// Repo path. Defaults to the current directory.
+        #[arg(long)]
+        path: Option<PathBuf>,
+        /// Max commits to scan.
+        #[arg(long, default_value_t = 500)]
+        max: usize,
+    },
+    /// Check the dev environment (required tools on PATH).
+    Dev,
+    /// Report WSL (Windows Subsystem for Linux) status.
+    Wsl,
     /// Shell-delegate fallback: any subcommand gilamonster-agent has not yet
     /// ported from gilabot (Python). clap's `external_subcommand` catch-all
     /// captures the unrecognized subcommand name + its args and hands them to
@@ -296,6 +341,26 @@ pub enum PromptCmd {
     /// Scaffold a new prompt template.
     Create {
         /// Template name (file stem).
+        name: String,
+    },
+}
+
+/// `gila checkpoint` subcommands.
+#[derive(Subcommand, Debug, PartialEq, Eq)]
+pub enum CheckpointCmd {
+    /// Snapshot the repos under a root into a named checkpoint.
+    Create {
+        /// Checkpoint name.
+        name: String,
+        /// Workspace root to scan for repos. Defaults to the workspace root.
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
+    /// List checkpoints.
+    List,
+    /// Show a checkpoint's recorded snapshots.
+    Show {
+        /// Checkpoint name.
         name: String,
     },
 }

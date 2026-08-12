@@ -291,6 +291,98 @@ async fn main() -> anyhow::Result<()> {
             gilamonster_agent::gila_update::run_update(&repo)?;
             println!("updated {}", repo.display());
             Ok(())
+        }
+        Command::Meeting { title, date } => {
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+            let dir = gilamonster_agent::gila_meeting::meetings_dir(home.as_deref())?;
+            let date = date.unwrap_or_else(today);
+            let p = gilamonster_agent::gila_meeting::create_meeting(&dir, &date, &title)?;
+            println!("{}", p.display());
+            Ok(())
+        }
+        Command::Top5 { date } => {
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+            let dir = gilamonster_agent::gila_status::status_dir(home.as_deref())?;
+            let date = date.unwrap_or_else(today);
+            let p = gilamonster_agent::gila_status::create_status(&dir, "top5", &date)?;
+            println!("{}", p.display());
+            Ok(())
+        }
+        Command::Standup { date } => {
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+            let dir = gilamonster_agent::gila_status::status_dir(home.as_deref())?;
+            let date = date.unwrap_or_else(today);
+            let p = gilamonster_agent::gila_status::create_status(&dir, "standup", &date)?;
+            println!("{}", p.display());
+            Ok(())
+        }
+        Command::Checkpoint { cmd } => {
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+            let dir = gilamonster_agent::gila_checkpoint::checkpoints_dir(home.as_deref())?;
+            match cmd {
+                gilamonster_agent::CheckpointCmd::Create { name, root } => {
+                    let root = match root {
+                        Some(r) => r,
+                        None => gilamonster_agent::gila_projects::workspace_root(home.as_deref())?,
+                    };
+                    let repos = gilamonster_agent::gila_projects::list_projects(&root);
+                    let snaps: Vec<_> =
+                        repos.iter().map(|r| gilamonster_agent::gila_checkpoint::snapshot_repo(r)).collect();
+                    let cp = gilamonster_agent::gila_checkpoint::Checkpoint {
+                        name: name.clone(),
+                        created: today(),
+                        repos: snaps,
+                    };
+                    let p = gilamonster_agent::gila_checkpoint::save(&dir, &cp)?;
+                    println!("checkpoint `{}` ({} repos) -> {}", name, cp.repos.len(), p.display());
+                }
+                gilamonster_agent::CheckpointCmd::List => {
+                    let names = gilamonster_agent::gila_checkpoint::list(&dir);
+                    if names.is_empty() {
+                        println!("no checkpoints");
+                    } else {
+                        for n in names {
+                            println!("{n}");
+                        }
+                    }
+                }
+                gilamonster_agent::CheckpointCmd::Show { name } => {
+                    match gilamonster_agent::gila_checkpoint::load(&dir, &name) {
+                        Some(cp) => {
+                            println!("checkpoint `{}` ({})", cp.name, cp.created);
+                            for r in &cp.repos {
+                                println!(
+                                    "  {}: head={} dirty={}",
+                                    r.path.display(),
+                                    r.head.as_deref().unwrap_or("<none>"),
+                                    r.dirty.len()
+                                );
+                            }
+                        }
+                        None => anyhow::bail!("checkpoint `{name}` not found"),
+                    }
+                }
+            }
+            Ok(())
+        }
+        Command::Insights { path, max } => {
+            let path = path.unwrap_or_else(|| std::path::PathBuf::from("."));
+            let ins = gilamonster_agent::gila_insights::repo_insights(&path, max)?;
+            print!("{}", gilamonster_agent::gila_insights::render(&ins));
+            Ok(())
+        }
+        Command::Dev => {
+            let path_var = std::env::var_os("PATH").unwrap_or_default();
+            let dirs = gilamonster_agent::gila_dev::path_dirs(&path_var);
+            let results = gilamonster_agent::gila_dev::run_checks(&dirs);
+            print!("{}", gilamonster_agent::gila_dev::render(&results));
+            Ok(())
+        }
+        Command::Wsl => {
+            let proc_version = std::fs::read_to_string("/proc/version").unwrap_or_default();
+            let env_val = std::env::var("WSL_DISTRO_NAME").ok();
+            println!("{}", gilamonster_agent::gila_wsl::wsl_report(&proc_version, env_val.as_deref()));
+            Ok(())
         },
         // Shell-delegate fallback: any subcommand not yet ported from gilabot
         // (Python). clap's external_subcommand catch-all captured the name +
