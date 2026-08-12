@@ -120,7 +120,52 @@ async fn main() -> anyhow::Result<()> {
         Command::Scrybe { uri, doc_path } => {
             run_scrybe(&uri, doc_path.as_deref().and_then(|p| p.to_str()))
         }
+        // Shell-delegate fallback: any subcommand not yet ported from gilabot
+        // (Python). clap's external_subcommand catch-all captured the name +
+        // args; re-exec the real gilabot binary so every gilabot command works
+        // from day one (Phase 1 of the parity plan). Commands graduate out of
+        // this arm as they gain their own `Command` variant.
+        Command::External(args) => run_delegate(&args),
     }
+}
+
+/// `gila <unported>` — shell-delegate to the Python gilabot binary.
+///
+/// Resolves the *other* `gila` on `PATH` (never our own binary, so we don't
+/// recurse), warns that the command is delegated, and execs gilabot with the
+/// original arguments. The exec itself is the by-design-uncovered subprocess
+/// surface; the resolution + arg logic lives in [`gilamonster_agent::delegate`]
+/// and is unit-tested.
+fn run_delegate(args: &[std::ffi::OsString]) -> anyhow::Result<()> {
+    use gilamonster_agent::delegate::{delegate_args, path_dirs, resolve_gilabot};
+
+    let cmd_name = args
+        .first()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "<unknown>".to_string());
+
+    let path_var = std::env::var_os("PATH").unwrap_or_default();
+    let dirs = path_dirs(&path_var);
+    let own_exe = std::env::current_exe().ok();
+
+    let gilabot = resolve_gilabot(&dirs, own_exe.as_ref()).ok_or_else(|| {
+        anyhow::anyhow!(
+            "`gila {cmd_name}` is not yet implemented in gilamonster-agent, and no \
+             Python gilabot (`gila`) was found on PATH to delegate to. Install \
+             gilabot or file an issue to port `{cmd_name}`."
+        )
+    })?;
+
+    eprintln!(
+        "gila: `{cmd_name}` is delegated to Python gilabot ({}) — not yet \
+         Rust-native.",
+        gilabot.display()
+    );
+
+    let status = std::process::Command::new(gilabot)
+        .args(delegate_args(args))
+        .status()?;
+    std::process::exit(status.code().unwrap_or(1));
 }
 
 /// `gila chain` — run one question through the LangChain LLMChain.

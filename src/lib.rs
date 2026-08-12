@@ -20,6 +20,7 @@
 //! lifecycle, orchestration, and the rich settings/dashboard surfaces — lands
 //! on top in the cowork / hotseat issues (#8-#11).
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
@@ -29,6 +30,7 @@ pub mod capabilities;
 pub mod chain;
 pub mod cockpit;
 pub mod cowork;
+pub mod delegate;
 pub mod fleet;
 pub mod follow;
 pub mod hotseat;
@@ -152,6 +154,14 @@ pub enum Command {
         #[arg(long)]
         doc_path: Option<PathBuf>,
     },
+    /// Shell-delegate fallback: any subcommand gilamonster-agent has not yet
+    /// ported from gilabot (Python). clap's `external_subcommand` catch-all
+    /// captures the unrecognized subcommand name + its args and hands them to
+    /// [`delegate`], which re-execs the real gilabot binary so every gilabot
+    /// command works from day one. Commands graduate out of this fallback as
+    /// they gain their own `Command` variant (see the parity plan).
+    #[command(external_subcommand)]
+    External(Vec<OsString>),
 }
 
 /// `gila capabilities` subcommands.
