@@ -39,6 +39,7 @@ pub mod keys;
 pub mod layout;
 pub mod manifest;
 pub mod pty;
+pub mod python_bridge;
 pub mod scrybe;
 pub mod venv;
 

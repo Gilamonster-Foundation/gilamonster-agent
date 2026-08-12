@@ -148,6 +148,15 @@ fn run_delegate(args: &[std::ffi::OsString]) -> anyhow::Result<()> {
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "<unknown>".to_string());
 
+    // Phase 2: route the high-complexity Python-vendored commands in-process
+    // via pyo3 (no subprocess startup cost). Everything else falls through to
+    // the shell-delegate subprocess below. If the in-process import fails (venv
+    // not embedded), surface the error — don't silently double-fallback.
+    if gilamonster_agent::python_bridge::is_pyo3_routed(&cmd_name) {
+        let code = gilamonster_agent::python_bridge::run_python_command(&cmd_name, &args[1..])?;
+        std::process::exit(code);
+    }
+
     let path_var = std::env::var_os("PATH").unwrap_or_default();
     let dirs = path_dirs(&path_var);
     let own_exe = std::env::current_exe().ok();
