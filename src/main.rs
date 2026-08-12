@@ -120,6 +120,10 @@ async fn main() -> anyhow::Result<()> {
         Command::Scrybe { uri, doc_path } => {
             run_scrybe(&uri, doc_path.as_deref().and_then(|p| p.to_str()))
         }
+        // Rust-native git (Phase 1 of the parity plan): commit via libgit2,
+        // tend via profile steps that shell out to the git CLI (matching the
+        // Python engine 1:1). Graduated out of the shell-delegate fallback.
+        Command::Git { cmd } => run_git(cmd),
         // Shell-delegate fallback: any subcommand not yet ported from gilabot
         // (Python). clap's external_subcommand catch-all captured the name +
         // args; re-exec the real gilabot binary so every gilabot command works
@@ -166,6 +170,61 @@ fn run_delegate(args: &[std::ffi::OsString]) -> anyhow::Result<()> {
         .args(delegate_args(args))
         .status()?;
     std::process::exit(status.code().unwrap_or(1));
+}
+
+/// `gila git …` — the Rust-native Phase-1 slice (commit via libgit2, tend via
+/// git-CLI profile steps). The lib-side logic is unit-tested in
+/// [`gilamonster_agent::gila_git`]; this arm owns only argv → effect.
+fn run_git(cmd: gilamonster_agent::GitCmd) -> anyhow::Result<()> {
+    use gilamonster_agent::gila_git;
+    use gilamonster_agent::GitCmd;
+
+    match cmd {
+        GitCmd::Commit { message, path } => {
+            let path = path.unwrap_or_else(|| std::path::PathBuf::from("."));
+            match gila_git::commit_all(&path, &message)? {
+                Some(oid) => println!("{} committed {}", path.display(), &oid.to_string()[..7]),
+                None => println!("{}: nothing to commit", path.display()),
+            }
+            Ok(())
+        }
+        GitCmd::Tend {
+            config,
+            dry_run,
+            profile,
+        } => {
+            let config_path = match config {
+                Some(p) => p,
+                None => gila_git::default_config_path()?,
+            };
+            let cfg = gila_git::load_config(&config_path)?;
+            let mut failed = 0usize;
+            for repo in &cfg.repos {
+                if let Some(pf) = &profile {
+                    if !repo.profiles(&cfg.defaults).contains(pf) {
+                        continue;
+                    }
+                }
+                let report = gila_git::tend_repo(repo, &cfg, dry_run);
+                if dry_run {
+                    println!("{}: dry-run complete", report.path.display());
+                } else if report.success {
+                    println!("{}: ok", report.path.display());
+                } else {
+                    failed += 1;
+                    eprintln!(
+                        "{}: {}",
+                        report.path.display(),
+                        report.error.unwrap_or_else(|| "failed".to_string())
+                    );
+                }
+            }
+            if failed > 0 {
+                anyhow::bail!("{failed} repo(s) failed to tend");
+            }
+            Ok(())
+        }
+    }
 }
 
 /// `gila chain` — run one question through the LangChain LLMChain.
