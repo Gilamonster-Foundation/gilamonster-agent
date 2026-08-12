@@ -56,6 +56,29 @@ Deliberately deferred within Phase 1 scope:
 
 Definition-of-done status for Phase 1: all four boxes met *except* the `--help` snapshot-parity check (not yet captured — recommended as the first task of Phase 2).
 
+## Rust-native rewrites completion log (2026-08-12)
+
+Branch: `feat/gila-parity-phase-3` (4 commits, one per batch). **Pushed**; draft PR **#72** (base `main`, stacked on #70/#71). This is the implementation plan's **Phase 3: Rust-Native Rewrites** — it graduates the medium/low-complexity commands out of the shell-delegate fallback into pure-Rust `src/gila_*.rs` modules, cutting across the tracker's knowledge/external commands (the deterministic, non-networked ones).
+
+Shipped (22 commands, logic unit-tested in the library, thin `main.rs` arms own only HOME resolution + file/subprocess effect):
+
+- **Batch 1** — `version`, `daily`, `ideas`, `todos`, `projects`, `board`, `cache`.
+- **Batch 2** — `logs`, `prompt` (list/show/create), `commit-msg`, `completion`, `init`, `update`.
+- **Batch 3** — `meeting`, `top5`, `standup`, `checkpoint`, `insights`, `dev`, `wsl`.
+- **Batch 4** — `log` (`activity collect`, `prompt create`), `worktree` (list/add/remove).
+
+Design choices:
+
+- **git2 for reads** (`checkpoint`, `insights`, `log activity`) — no subprocess; **`git` CLI for worktree mutations** (add/remove) for behavior parity.
+- **`top5`/`standup`** ship the deterministic markdown scaffold only; the interactive interview stays in the assistant/pyo3 layer.
+- **No new heavy deps**: `completion` generates a static bash/zsh script (no `clap_complete`); date handling uses the `date` binary (no `chrono`).
+
+Test state: 338 lib tests pass (incl. 67 new `gila_*` unit tests across the batches); `tests/cli.rs` 17/18 pass — the one failure is the **pre-existing macOS Seatbelt sandbox flake** (`capabilities_run_engages_...`), reproduced at Phase-1 HEAD pre-pyo3, unrelated to this work. End-to-end smoke tests verified against a scratch `$HOME` (file effects), real git history (`insights`/`log activity`), and 21 real repos (`checkpoint`).
+
+Remaining from the implementation plan's Phase 3 list (deferred, still shell-delegate): `content` (the tracker maps it to Phase 2's content CRUD — has a networked/publication surface), and the `assistant`/`gemini`/`ollama`/`review`/`doc`/`confluence`/`jira`/`slack`/`pagerduty`/`calendar`/`mcp` high-complexity commands (Phase 2 pyo3-routed per #71, not Rust-native targets).
+
+Model: nvidia/moonshotai/eccn-kimi-k3-max-preview | Harness: newt-agent v0.8.0 | Operator: Shawn Hartsock | Time: 19:46 EDT | Date: 2026-08-12
+
 ---
 
 Model: nvidia/moonshotai/eccn-kimi-k3-max-preview | Harness: newt-agent v0.8.0 | Operator: Shawn Hartsock | Time: 18:30 EDT | Date: 2026-08-12
