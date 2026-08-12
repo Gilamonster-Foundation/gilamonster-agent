@@ -1,10 +1,43 @@
 # Changelog
 
-Gilamonster Agent follows the version line chartered in [ROADMAP.md](ROADMAP.md):
-one tagged version per ratchet milestone, **v0.3.1 → v0.3.12**, all under the
-`v0.3.x` cockpit line. Milestones 1 & 2 shipped before this scheme and keep
-their original git tags **`v0.1.0`** (≡ v0.3.1) and **`v0.2.0`** (≡ v0.3.2);
-the live `v0.3.N` tag series runs from `v0.3.3` onward.
+Gilamonster Agent follows the version line chartered in [ROADMAP.md](ROADMAP.md).
+The original charter was one tagged version per ratchet milestone,
+**v0.3.1 → v0.3.12**, under the `v0.3.x` cockpit line (milestones 1 & 2 keep
+their historical tags **`v0.1.0`** ≡ v0.3.1 and **`v0.2.0`** ≡ v0.3.2). As of
+2026-07-29 the **`0.4.x` line opens early** on the re-pinned newt-0.7.5
+airframe (see the v0.4.0 entry and ROADMAP's renumbering note); the unshipped
+cockpit milestones continue inside 0.4.x.
+
+## v0.4.0 — Re-pinned airframe + the LangChain surface (unreleased)
+
+The first release where `Cargo.toml`, the tag, and `gila --version` agree —
+v0.1.0–v0.3.3 were tagged with the manifest still reading 0.1.0.
+
+- **newt airframe re-pinned** to the 0.7.5-line main (`edad1fb`, +1,150
+  commits over the June 13 pin; PR #63). agent-bridle now resolves from
+  crates.io (0.7.14, published) — the stub-shell `[patch.crates-io]` mirror is
+  gone on both sides. MSRV 1.75 → 1.88, following newt's honest floor.
+- **Upstream drift adopted** (PR #63): `McpServerEntry` trust/enabled fields;
+  `NamedPermissionPreset.fs_read`; `gila capabilities check` spawns under the
+  operator's real confinement leash (`Config::mcp_probe_caveats`, never
+  `top()`); `BackendConfig.model`/`kind` are `Option` — follow/cowork fail
+  loud on an unset model instead of probing.
+- **Turn-contract fold** (PR #63): newt now reports an errored turn as
+  `Completed` carrying `outcome.error` (the partial trajectory survives).
+  cowork folds that into the sticky `Failed` the cockpit shows; follow treats
+  it as "no comment". Previously a backend 500 rendered as a successful turn.
+- **`gila chain <question…>`** (PR #64, landed via #66): a langchain-rust
+  `LLMChain` (system frame + human template) over the same newt backend seam
+  follow/cowork use — endpoint, model, and token from `Config::resolve()`,
+  nothing in code. The dependency is confined to `src/chain.rs` as an
+  exploration surface (upstream last published 2024-10) with a cheap exit.
+- **CI honesty repairs** (PR #65): the coverage job's lcov upload is
+  non-fatal (an org artifact-quota hit had been failing jobs whose gate
+  passed), and the scrybe parent-dir test uses `env::temp_dir()` so the
+  Windows job passes again.
+
+Release mechanics: tag `v0.4.0` on main after PRs #65/#66 merge; first
+GitHub Release of the repo.
 
 ## v0.3.3 — Layout (2026-07-11)
 
