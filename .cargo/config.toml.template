@@ -38,3 +38,17 @@ newt-skills      = { path = "../newt-agent/newt-skills" }
 newt-mcp-client  = { path = "../newt-agent/newt-mcp-client" }
 newt-tuner       = { path = "../newt-agent/crates/newt-tuner" }
 plugins-protocol = { path = "../newt-agent/plugins-protocol" }
+
+# --- gila-parity Phase 2: pyo3 interpreter pin --------------------------------
+# The in-process Python bridge (src/python_bridge.rs) embeds a Python
+# interpreter via pyo3. The gila-plugin-* packages are installed EDITABLE into
+# ~/venv from ~/workspaces/gilabot; the default `python3` (a pyenv shim) does
+# NOT have them importable. So pyo3 must embed ~/venv's interpreter. Pin it
+# here (cargo's [env] sets it for the build) — override per-machine if your
+# venv lives elsewhere. Without this, pyo3 links the shim and
+# `import gilabot` fails at runtime.
+#
+# Uncomment and adjust for your machine:
+# [env]
+# PYO3_PYTHON = { value = "../venv/bin/python", relative = false }
+
