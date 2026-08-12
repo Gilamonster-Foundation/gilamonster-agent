@@ -33,11 +33,17 @@ pub mod cowork;
 pub mod delegate;
 pub mod gila_board;
 pub mod gila_cache;
+pub mod gila_commit_msg;
+pub mod gila_completion;
 pub mod gila_daily;
 pub mod gila_git;
 pub mod gila_ideas;
+pub mod gila_init;
+pub mod gila_logs;
 pub mod gila_projects;
+pub mod gila_prompt;
 pub mod gila_todos;
+pub mod gila_update;
 pub mod gila_version;
 pub mod fleet;
 pub mod follow;
@@ -207,6 +213,40 @@ pub enum Command {
         #[arg(long)]
         clear: bool,
     },
+    /// View the newest gila logs (most-recent first).
+    Logs {
+        /// Max number of logs to show.
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+    },
+    /// Manage reusable prompt templates (`list` default, `show`/`create`).
+    #[command(name = "prompt")]
+    Prompt {
+        #[command(subcommand)]
+        cmd: PromptCmd,
+    },
+    /// Validate a commit message against the conventional-commit shape.
+    #[command(name = "commit-msg")]
+    CommitMsg {
+        /// The commit message to validate (or a path to a message file).
+        message: String,
+        /// Treat `message` as a path to a file containing the message.
+        #[arg(long)]
+        file: bool,
+    },
+    /// Emit a shell completion script for gila.
+    Completion {
+        /// The shell to generate for (bash, zsh).
+        shell: String,
+    },
+    /// Initialize the gila config directory (~/.gila + standard subdirs).
+    Init,
+    /// Self-update gilamonster-agent (git pull --ff-only + cargo build --release).
+    Update {
+        /// Repo path to update. Defaults to this build's manifest dir.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+    },
     /// Shell-delegate fallback: any subcommand gilamonster-agent has not yet
     /// ported from gilabot (Python). clap's `external_subcommand` catch-all
     /// captures the unrecognized subcommand name + its args and hands them to
@@ -240,6 +280,23 @@ pub enum GitCmd {
         /// Only tend repos that use this profile.
         #[arg(long)]
         profile: Option<String>,
+    },
+}
+
+/// `gila prompt` subcommands.
+#[derive(Subcommand, Debug, PartialEq, Eq)]
+pub enum PromptCmd {
+    /// List available prompt templates.
+    List,
+    /// Print a prompt template's body.
+    Show {
+        /// Template name (file stem).
+        name: String,
+    },
+    /// Scaffold a new prompt template.
+    Create {
+        /// Template name (file stem).
+        name: String,
     },
 }
 

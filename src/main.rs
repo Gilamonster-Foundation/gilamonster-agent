@@ -213,6 +213,84 @@ async fn main() -> anyhow::Result<()> {
                 print!("{}", gilamonster_agent::gila_cache::render_status(&dir, &s));
             }
             Ok(())
+        }
+        Command::Logs { limit } => {
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+            let dir = gilamonster_agent::gila_logs::logs_dir(home.as_deref())?;
+            let entries = gilamonster_agent::gila_logs::recent_logs(&dir, limit);
+            print!("{}", gilamonster_agent::gila_logs::render_logs(&entries));
+            Ok(())
+        }
+        Command::Prompt { cmd } => {
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+            let dir = gilamonster_agent::gila_prompt::prompts_dir(home.as_deref())?;
+            match cmd {
+                gilamonster_agent::PromptCmd::List => {
+                    let names = gilamonster_agent::gila_prompt::list_prompts(&dir);
+                    if names.is_empty() {
+                        println!("no prompts found");
+                    } else {
+                        for n in names {
+                            println!("{n}");
+                        }
+                    }
+                }
+                gilamonster_agent::PromptCmd::Show { name } => {
+                    let p = dir.join(format!("{name}.md"));
+                    match std::fs::read_to_string(&p) {
+                        Ok(body) => print!("{body}"),
+                        Err(_) => anyhow::bail!("prompt `{name}` not found at {}", p.display()),
+                    }
+                }
+                gilamonster_agent::PromptCmd::Create { name } => {
+                    let p = gilamonster_agent::gila_prompt::create_prompt(&dir, &name)?;
+                    println!("created {}", p.display());
+                }
+            }
+            Ok(())
+        }
+        Command::CommitMsg { message, file } => {
+            let msg = if file {
+                std::fs::read_to_string(&message)
+                    .map_err(|e| anyhow::anyhow!("reading message file {message}: {e}"))?
+            } else {
+                message
+            };
+            match gilamonster_agent::gila_commit_msg::validate(&msg) {
+                Ok(()) => {
+                    println!("commit message OK");
+                    Ok(())
+                }
+                Err(reason) => {
+                    eprintln!("invalid commit message: {reason}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Command::Completion { shell } => {
+            let sh = gilamonster_agent::gila_completion::Shell::parse(&shell).ok_or_else(|| {
+                anyhow::anyhow!("unsupported shell `{shell}` (supported: bash, zsh)")
+            })?;
+            print!("{}", gilamonster_agent::gila_completion::completion_script(sh));
+            Ok(())
+        }
+        Command::Init => {
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+            let created = gilamonster_agent::gila_init::init(home.as_deref())?;
+            if created.is_empty() {
+                println!("gila config already initialized");
+            } else {
+                for d in created {
+                    println!("created {}", d.display());
+                }
+            }
+            Ok(())
+        }
+        Command::Update { repo } => {
+            let repo = repo.unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+            gilamonster_agent::gila_update::run_update(&repo)?;
+            println!("updated {}", repo.display());
+            Ok(())
         },
         // Shell-delegate fallback: any subcommand not yet ported from gilabot
         // (Python). clap's external_subcommand catch-all captured the name +
