@@ -195,10 +195,13 @@ mod tests {
 
     #[test]
     fn validate_accepts_existing_parent() {
-        // Use /tmp as a known existing parent dir.
+        // Regression (Windows CI): this test hardcoded `/tmp/scrybe.md`, which
+        // has no existing parent on Windows, so `validate_config` rejected it
+        // and the suite was red on every PR. `env::temp_dir()` names a real,
+        // existing directory on every platform.
         let cfg = ScrybeConfig {
             server_uri: "http://localhost:3001".into(),
-            doc_path: PathBuf::from("/tmp/scrybe.md"),
+            doc_path: std::env::temp_dir().join("scrybe.md"),
         };
         assert!(validate_config(&cfg).is_ok());
     }
