@@ -43,6 +43,7 @@ pub mod gila_ideas;
 pub mod gila_init;
 pub mod gila_insights;
 pub mod gila_logs;
+pub mod gila_log;
 pub mod gila_meeting;
 pub mod gila_projects;
 pub mod gila_prompt;
@@ -50,6 +51,7 @@ pub mod gila_status;
 pub mod gila_todos;
 pub mod gila_update;
 pub mod gila_version;
+pub mod gila_worktree;
 pub mod gila_wsl;
 pub mod fleet;
 pub mod follow;
@@ -292,6 +294,16 @@ pub enum Command {
     Dev,
     /// Report WSL (Windows Subsystem for Linux) status.
     Wsl,
+    /// Session/activity logging (`activity collect`, `prompt create`).
+    Log {
+        #[command(subcommand)]
+        cmd: LogCmd,
+    },
+    /// Manage git worktrees for a repo (`list`/`add`/`remove`).
+    Worktree {
+        #[command(subcommand)]
+        cmd: WorktreeCmd,
+    },
     /// Shell-delegate fallback: any subcommand gilamonster-agent has not yet
     /// ported from gilabot (Python). clap's `external_subcommand` catch-all
     /// captures the unrecognized subcommand name + its args and hands them to
@@ -362,6 +374,85 @@ pub enum CheckpointCmd {
     Show {
         /// Checkpoint name.
         name: String,
+    },
+}
+
+/// `gila log` subcommands.
+#[derive(Subcommand, Debug, PartialEq, Eq)]
+pub enum LogCmd {
+    /// Collect the day's activity across workspace repos into a digest.
+    Activity {
+        #[command(subcommand)]
+        cmd: LogActivityCmd,
+    },
+    /// Session-prompt logging (`gila log prompt create`).
+    Prompt {
+        #[command(subcommand)]
+        cmd: LogPromptCmd,
+    },
+}
+
+/// `gila log activity` subcommands.
+#[derive(Subcommand, Debug, PartialEq, Eq)]
+pub enum LogActivityCmd {
+    /// Collect the day's activity across workspace repos into a digest.
+    Collect {
+        /// Date (YYYY-MM-DD). Defaults to today.
+        #[arg(long)]
+        date: Option<String>,
+        /// Workspace root to scan. Defaults to the workspace root.
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// Max commits to scan per repo.
+        #[arg(long, default_value_t = 200)]
+        max: usize,
+    },
+}
+
+/// `gila log prompt` subcommands.
+#[derive(Subcommand, Debug, PartialEq, Eq)]
+pub enum LogPromptCmd {
+    /// Scaffold a session-log entry.
+    Create {
+        /// Session description (slugified into the filename).
+        #[arg(short, long)]
+        message: String,
+        /// Session type (feature, bug, refactor, docs, test).
+        #[arg(long, default_value = "feature")]
+        log_type: String,
+        /// Session duration (e.g. "~2 hours").
+        #[arg(long, default_value = "")]
+        duration: String,
+        /// Date (YYYY-MM-DD). Defaults to today.
+        #[arg(short, long)]
+        date: Option<String>,
+    },
+}
+
+/// `gila worktree` subcommands.
+#[derive(Subcommand, Debug, PartialEq, Eq)]
+pub enum WorktreeCmd {
+    /// List worktrees for a repo.
+    List {
+        /// Repo path. Defaults to the current directory.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+    },
+    /// Add a worktree (new branch `<name>` at `<repo>.worktrees/<name>`).
+    Add {
+        /// Worktree/branch name.
+        name: String,
+        /// Repo path. Defaults to the current directory.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+    },
+    /// Remove a worktree.
+    Remove {
+        /// Worktree name.
+        name: String,
+        /// Repo path. Defaults to the current directory.
+        #[arg(long)]
+        repo: Option<PathBuf>,
     },
 }
 

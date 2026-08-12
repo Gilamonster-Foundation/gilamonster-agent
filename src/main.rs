@@ -383,6 +383,72 @@ async fn main() -> anyhow::Result<()> {
             let env_val = std::env::var("WSL_DISTRO_NAME").ok();
             println!("{}", gilamonster_agent::gila_wsl::wsl_report(&proc_version, env_val.as_deref()));
             Ok(())
+        }
+        Command::Log { cmd } => {
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+            match cmd {
+                gilamonster_agent::LogCmd::Activity {
+                    cmd: gilamonster_agent::LogActivityCmd::Collect { date, root, max },
+                } => {
+                    let date = date.unwrap_or_else(today);
+                    let root = match root {
+                        Some(r) => r,
+                        None => gilamonster_agent::gila_projects::workspace_root(home.as_deref())?,
+                    };
+                    let repos = gilamonster_agent::gila_projects::list_projects(&root);
+                    let acts: Vec<_> = repos
+                        .iter()
+                        .map(|r| gilamonster_agent::gila_log::repo_activity(r, &date, max))
+                        .collect();
+                    print!("{}", gilamonster_agent::gila_log::render_activity(&date, &acts));
+                }
+                gilamonster_agent::LogCmd::Prompt {
+                    cmd: gilamonster_agent::LogPromptCmd::Create { message, log_type, duration, date },
+                } => {
+                    let dir = gilamonster_agent::gila_log::prompt_log_dir(home.as_deref())?;
+                    let date = date.unwrap_or_else(today);
+                    let p = gilamonster_agent::gila_log::create_prompt_log(
+                        &dir, &date, &message, &log_type, &duration,
+                    )?;
+                    println!("{}", p.display());
+                }
+            }
+            Ok(())
+        }
+        Command::Worktree { cmd } => {
+            let cwd = std::path::PathBuf::from(".");
+            match cmd {
+                gilamonster_agent::WorktreeCmd::List { repo } => {
+                    let repo = repo.unwrap_or(cwd);
+                    let wts = gilamonster_agent::gila_worktree::list(&repo)?;
+                    if wts.is_empty() {
+                        println!("no worktrees");
+                    } else {
+                        for w in wts {
+                            println!("{}  [{}]", w.path.display(), w.branch);
+                        }
+                    }
+                }
+                gilamonster_agent::WorktreeCmd::Add { name, repo } => {
+                    let repo = repo.unwrap_or(cwd);
+                    let argv = gilamonster_agent::gila_worktree::add_argv(&repo, &name);
+                    let status = std::process::Command::new("git").args(&argv[1..]).status()?;
+                    if !status.success() {
+                        anyhow::bail!("git worktree add `{name}` failed");
+                    }
+                    println!("added worktree {}", gilamonster_agent::gila_worktree::worktree_path(&repo, &name).display());
+                }
+                gilamonster_agent::WorktreeCmd::Remove { name, repo } => {
+                    let repo = repo.unwrap_or(cwd);
+                    let argv = gilamonster_agent::gila_worktree::remove_argv(&repo, &name);
+                    let status = std::process::Command::new("git").args(&argv[1..]).status()?;
+                    if !status.success() {
+                        anyhow::bail!("git worktree remove `{name}` failed");
+                    }
+                    println!("removed worktree `{name}`");
+                }
+            }
+            Ok(())
         },
         // Shell-delegate fallback: any subcommand not yet ported from gilabot
         // (Python). clap's external_subcommand catch-all captured the name +
