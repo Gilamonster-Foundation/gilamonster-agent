@@ -36,8 +36,8 @@ pub fn aggregate<I: IntoIterator<Item = (String, String)>>(commits: I) -> Insigh
 /// Walk the repo's HEAD history (up to `max` commits) and aggregate activity.
 /// The day string comes from each commit's author timestamp (`date +%F` shape).
 pub fn repo_insights(path: &Path, max: usize) -> Result<Insights> {
-    let repo = git2::Repository::open(path)
-        .with_context(|| format!("opening repo {}", path.display()))?;
+    let repo =
+        git2::Repository::open(path).with_context(|| format!("opening repo {}", path.display()))?;
     let mut revwalk = repo.revwalk().context("creating revwalk")?;
     revwalk.push_head().context("pushing HEAD")?;
     let mut pairs = Vec::new();

@@ -84,7 +84,13 @@ mod tests {
     #[test]
     fn top5_template_has_all_sections() {
         let t = top5_template("2026-08-12");
-        for s in ["## OOTO", "## Top 5", "## Future Work", "## Projects", "| Project | Status |"] {
+        for s in [
+            "## OOTO",
+            "## Top 5",
+            "## Future Work",
+            "## Projects",
+            "| Project | Status |",
+        ] {
             assert!(t.contains(s), "missing {s}");
         }
     }

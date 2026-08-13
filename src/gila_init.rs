@@ -37,8 +37,7 @@ pub fn init(home: Option<&Path>) -> Result<Vec<PathBuf>> {
     let mut created = Vec::new();
     for d in init_dirs(home)? {
         if !d.exists() {
-            std::fs::create_dir_all(&d)
-                .with_context(|| format!("creating {}", d.display()))?;
+            std::fs::create_dir_all(&d).with_context(|| format!("creating {}", d.display()))?;
             created.push(d);
         }
     }

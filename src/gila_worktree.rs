@@ -28,7 +28,10 @@ pub fn parse_porcelain(out: &str) -> Vec<Worktree> {
     for line in out.lines() {
         if let Some(p) = line.strip_prefix("worktree ") {
             if let Some(prev) = path.take() {
-                worktrees.push(Worktree { path: prev, branch: branch.clone() });
+                worktrees.push(Worktree {
+                    path: prev,
+                    branch: branch.clone(),
+                });
             }
             path = Some(PathBuf::from(p));
             branch = "detached".to_string();
@@ -45,7 +48,13 @@ pub fn parse_porcelain(out: &str) -> Vec<Worktree> {
 /// List worktrees for the repo at `repo` (via `git worktree list --porcelain`).
 pub fn list(repo: &Path) -> Result<Vec<Worktree>> {
     let out = Command::new("git")
-        .args(["-C", &repo.display().to_string(), "worktree", "list", "--porcelain"])
+        .args([
+            "-C",
+            &repo.display().to_string(),
+            "worktree",
+            "list",
+            "--porcelain",
+        ])
         .output()
         .context("running git worktree list")?;
     if !out.status.success() {
@@ -58,7 +67,10 @@ pub fn list(repo: &Path) -> Result<Vec<Worktree>> {
 /// the repo, not inside it (so the repo's own status stays clean).
 pub fn worktree_path(repo: &Path, name: &str) -> PathBuf {
     let parent = repo.parent().unwrap_or_else(|| Path::new("."));
-    let base = repo.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let base = repo
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     parent.join(format!("{base}.worktrees")).join(name)
 }
 
@@ -125,7 +137,14 @@ mod tests {
         let add = add_argv(Path::new("/repo"), "feat");
         assert!(add.contains(&"add".to_string()));
         assert!(add.contains(&"-b".to_string()));
-        assert!(add.iter().any(|a| a.ends_with("/repo.worktrees/feat")));
+        // Windows joins path components with '\', so match the platform-
+        // specific joined suffix rather than a hardcoded '/' separator.
+        let want = Path::new("repo.worktrees").join("feat");
+        assert!(
+            add.iter()
+                .any(|a| a.ends_with(want.to_string_lossy().as_ref())),
+            "add argv contains the worktree path; got {add:?}"
+        );
         let rm = remove_argv(Path::new("/repo"), "feat");
         assert!(rm.contains(&"remove".to_string()));
     }

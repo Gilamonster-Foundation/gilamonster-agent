@@ -192,7 +192,10 @@ async fn main() -> anyhow::Result<()> {
             let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
             let root = gilamonster_agent::gila_projects::workspace_root(home.as_deref())?;
             let projs = gilamonster_agent::gila_projects::list_projects(&root);
-            print!("{}", gilamonster_agent::gila_projects::render_projects(&projs));
+            print!(
+                "{}",
+                gilamonster_agent::gila_projects::render_projects(&projs)
+            );
             Ok(())
         }
         Command::Board => {
@@ -271,7 +274,10 @@ async fn main() -> anyhow::Result<()> {
             let sh = gilamonster_agent::gila_completion::Shell::parse(&shell).ok_or_else(|| {
                 anyhow::anyhow!("unsupported shell `{shell}` (supported: bash, zsh)")
             })?;
-            print!("{}", gilamonster_agent::gila_completion::completion_script(sh));
+            print!(
+                "{}",
+                gilamonster_agent::gila_completion::completion_script(sh)
+            );
             Ok(())
         }
         Command::Init => {
@@ -326,15 +332,22 @@ async fn main() -> anyhow::Result<()> {
                         None => gilamonster_agent::gila_projects::workspace_root(home.as_deref())?,
                     };
                     let repos = gilamonster_agent::gila_projects::list_projects(&root);
-                    let snaps: Vec<_> =
-                        repos.iter().map(|r| gilamonster_agent::gila_checkpoint::snapshot_repo(r)).collect();
+                    let snaps: Vec<_> = repos
+                        .iter()
+                        .map(|r| gilamonster_agent::gila_checkpoint::snapshot_repo(r))
+                        .collect();
                     let cp = gilamonster_agent::gila_checkpoint::Checkpoint {
                         name: name.clone(),
                         created: today(),
                         repos: snaps,
                     };
                     let p = gilamonster_agent::gila_checkpoint::save(&dir, &cp)?;
-                    println!("checkpoint `{}` ({} repos) -> {}", name, cp.repos.len(), p.display());
+                    println!(
+                        "checkpoint `{}` ({} repos) -> {}",
+                        name,
+                        cp.repos.len(),
+                        p.display()
+                    );
                 }
                 gilamonster_agent::CheckpointCmd::List => {
                     let names = gilamonster_agent::gila_checkpoint::list(&dir);
@@ -381,7 +394,10 @@ async fn main() -> anyhow::Result<()> {
         Command::Wsl => {
             let proc_version = std::fs::read_to_string("/proc/version").unwrap_or_default();
             let env_val = std::env::var("WSL_DISTRO_NAME").ok();
-            println!("{}", gilamonster_agent::gila_wsl::wsl_report(&proc_version, env_val.as_deref()));
+            println!(
+                "{}",
+                gilamonster_agent::gila_wsl::wsl_report(&proc_version, env_val.as_deref())
+            );
             Ok(())
         }
         Command::Log { cmd } => {
@@ -400,10 +416,19 @@ async fn main() -> anyhow::Result<()> {
                         .iter()
                         .map(|r| gilamonster_agent::gila_log::repo_activity(r, &date, max))
                         .collect();
-                    print!("{}", gilamonster_agent::gila_log::render_activity(&date, &acts));
+                    print!(
+                        "{}",
+                        gilamonster_agent::gila_log::render_activity(&date, &acts)
+                    );
                 }
                 gilamonster_agent::LogCmd::Prompt {
-                    cmd: gilamonster_agent::LogPromptCmd::Create { message, log_type, duration, date },
+                    cmd:
+                        gilamonster_agent::LogPromptCmd::Create {
+                            message,
+                            log_type,
+                            duration,
+                            date,
+                        },
                 } => {
                     let dir = gilamonster_agent::gila_log::prompt_log_dir(home.as_deref())?;
                     let date = date.unwrap_or_else(today);
@@ -432,16 +457,23 @@ async fn main() -> anyhow::Result<()> {
                 gilamonster_agent::WorktreeCmd::Add { name, repo } => {
                     let repo = repo.unwrap_or(cwd);
                     let argv = gilamonster_agent::gila_worktree::add_argv(&repo, &name);
-                    let status = std::process::Command::new("git").args(&argv[1..]).status()?;
+                    let status = std::process::Command::new("git")
+                        .args(&argv[1..])
+                        .status()?;
                     if !status.success() {
                         anyhow::bail!("git worktree add `{name}` failed");
                     }
-                    println!("added worktree {}", gilamonster_agent::gila_worktree::worktree_path(&repo, &name).display());
+                    println!(
+                        "added worktree {}",
+                        gilamonster_agent::gila_worktree::worktree_path(&repo, &name).display()
+                    );
                 }
                 gilamonster_agent::WorktreeCmd::Remove { name, repo } => {
                     let repo = repo.unwrap_or(cwd);
                     let argv = gilamonster_agent::gila_worktree::remove_argv(&repo, &name);
-                    let status = std::process::Command::new("git").args(&argv[1..]).status()?;
+                    let status = std::process::Command::new("git")
+                        .args(&argv[1..])
+                        .status()?;
                     if !status.success() {
                         anyhow::bail!("git worktree remove `{name}` failed");
                     }
@@ -449,7 +481,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
             Ok(())
-        },
+        }
         // Shell-delegate fallback: any subcommand not yet ported from gilabot
         // (Python). clap's external_subcommand catch-all captured the name +
         // args; re-exec the real gilabot binary so every gilabot command works

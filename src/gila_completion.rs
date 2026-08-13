@@ -28,9 +28,29 @@ impl Shell {
 /// The top-level subcommands the completion offers. Kept in sync with the
 /// `Command` enum in `lib.rs` (a drift guard test asserts the list).
 pub const SUBCOMMANDS: &[&str] = &[
-    "code", "follow", "cowork", "hotseat", "capabilities", "matrix", "cockpit", "chain", "scrybe",
-    "git", "version", "daily", "ideas", "todos", "projects", "board", "cache", "logs", "prompt",
-    "commit-msg", "completion", "init", "update",
+    "code",
+    "follow",
+    "cowork",
+    "hotseat",
+    "capabilities",
+    "matrix",
+    "cockpit",
+    "chain",
+    "scrybe",
+    "git",
+    "version",
+    "daily",
+    "ideas",
+    "todos",
+    "projects",
+    "board",
+    "cache",
+    "logs",
+    "prompt",
+    "commit-msg",
+    "completion",
+    "init",
+    "update",
 ];
 
 /// Generate the completion script for `shell`.

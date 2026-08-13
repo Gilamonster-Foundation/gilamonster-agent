@@ -50,7 +50,10 @@ mod tests {
 
     #[test]
     fn line_is_date_prefixed_bullet() {
-        assert_eq!(idea_line("2026-08-12", "ship it"), "- [2026-08-12] ship it\n");
+        assert_eq!(
+            idea_line("2026-08-12", "ship it"),
+            "- [2026-08-12] ship it\n"
+        );
     }
 
     #[test]

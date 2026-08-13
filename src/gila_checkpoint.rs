@@ -68,7 +68,11 @@ pub fn snapshot_repo(path: &Path) -> RepoSnapshot {
         }
         Err(_) => (None, Vec::new()),
     };
-    RepoSnapshot { path: path.to_path_buf(), head, dirty }
+    RepoSnapshot {
+        path: path.to_path_buf(),
+        head,
+        dirty,
+    }
 }
 
 /// Serialize a checkpoint to TOML (the on-disk format).
@@ -138,7 +142,11 @@ mod tests {
     fn save_list_load_roundtrip() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("cps");
-        let cp = Checkpoint { name: "cp1".into(), created: "2026-08-12".into(), repos: vec![] };
+        let cp = Checkpoint {
+            name: "cp1".into(),
+            created: "2026-08-12".into(),
+            repos: vec![],
+        };
         save(&dir, &cp).unwrap();
         assert_eq!(list(&dir), vec!["cp1"]);
         assert_eq!(load(&dir, "cp1").unwrap().name, "cp1");

@@ -41,7 +41,10 @@ pub fn render_board(files: &[PathBuf]) -> String {
     }
     let mut out = String::new();
     for f in files {
-        let name = f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let name = f
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         out.push_str(&name);
         out.push('\n');
     }

@@ -14,8 +14,19 @@ use anyhow::{Context, Result};
 pub fn update_steps(repo: &Path) -> Vec<(String, Vec<String>)> {
     let r = repo.display().to_string();
     vec![
-        ("git".into(), vec!["-C".into(), r.clone(), "pull".into(), "--ff-only".into()]),
-        ("cargo".into(), vec!["build".into(), "--release".into(), "--manifest-path".into(), repo.join("Cargo.toml").display().to_string()]),
+        (
+            "git".into(),
+            vec!["-C".into(), r.clone(), "pull".into(), "--ff-only".into()],
+        ),
+        (
+            "cargo".into(),
+            vec![
+                "build".into(),
+                "--release".into(),
+                "--manifest-path".into(),
+                repo.join("Cargo.toml").display().to_string(),
+            ],
+        ),
     ]
 }
 

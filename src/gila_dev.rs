@@ -18,11 +18,26 @@ pub struct ToolCheck {
 
 /// The default set of dev tools `gila dev` checks.
 pub const DEFAULT_CHECKS: &[ToolCheck] = &[
-    ToolCheck { name: "git", bin: "git" },
-    ToolCheck { name: "cargo", bin: "cargo" },
-    ToolCheck { name: "python", bin: "python3" },
-    ToolCheck { name: "gh", bin: "gh" },
-    ToolCheck { name: "mmdc", bin: "mmdc" },
+    ToolCheck {
+        name: "git",
+        bin: "git",
+    },
+    ToolCheck {
+        name: "cargo",
+        bin: "cargo",
+    },
+    ToolCheck {
+        name: "python",
+        bin: "python3",
+    },
+    ToolCheck {
+        name: "gh",
+        bin: "gh",
+    },
+    ToolCheck {
+        name: "mmdc",
+        bin: "mmdc",
+    },
 ];
 
 /// The outcome of one check: where the binary resolved, or `None` if missing.
@@ -45,7 +60,9 @@ pub fn find_on_path(dirs: &[PathBuf], bin: &str) -> Option<PathBuf> {
 #[cfg(unix)]
 fn is_executable(p: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
-    p.metadata().map(|m| m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+    p.metadata()
+        .map(|m| m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
 }
 
 #[cfg(not(unix))]
@@ -57,7 +74,10 @@ fn is_executable(p: &Path) -> bool {
 pub fn run_checks(dirs: &[PathBuf]) -> Vec<CheckResult> {
     DEFAULT_CHECKS
         .iter()
-        .map(|&check| CheckResult { check, found: find_on_path(dirs, check.bin) })
+        .map(|&check| CheckResult {
+            check,
+            found: find_on_path(dirs, check.bin),
+        })
         .collect()
 }
 
@@ -102,8 +122,14 @@ mod tests {
     #[test]
     fn render_marks_missing() {
         let results = vec![
-            CheckResult { check: DEFAULT_CHECKS[0], found: Some(PathBuf::from("/usr/bin/git")) },
-            CheckResult { check: DEFAULT_CHECKS[3], found: None },
+            CheckResult {
+                check: DEFAULT_CHECKS[0],
+                found: Some(PathBuf::from("/usr/bin/git")),
+            },
+            CheckResult {
+                check: DEFAULT_CHECKS[3],
+                found: None,
+            },
         ];
         let r = render(&results);
         assert!(r.contains("git: /usr/bin/git"));

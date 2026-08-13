@@ -51,7 +51,12 @@ pub fn status(dir: &Path) -> CacheStatus {
 
 /// Render a status snapshot as a display line.
 pub fn render_status(dir: &Path, s: &CacheStatus) -> String {
-    format!("{}: {} file(s), {} byte(s)\n", dir.display(), s.files, s.bytes)
+    format!(
+        "{}: {} file(s), {} byte(s)\n",
+        dir.display(),
+        s.files,
+        s.bytes
+    )
 }
 
 /// Empty the cache dir (remove all contents, keep the dir). Returns the count

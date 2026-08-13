@@ -81,7 +81,9 @@ mod tests {
         let dir = tmp.path().join("prompts");
         let p = create_prompt(&dir, "standup").unwrap();
         assert!(p.exists());
-        assert!(std::fs::read_to_string(&p).unwrap().contains("# Prompt: standup"));
+        assert!(std::fs::read_to_string(&p)
+            .unwrap()
+            .contains("# Prompt: standup"));
         assert!(create_prompt(&dir, "standup").is_err());
     }
 }

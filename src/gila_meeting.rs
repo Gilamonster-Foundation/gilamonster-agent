@@ -83,8 +83,14 @@ mod tests {
 
     #[test]
     fn filename_uses_slug_or_fallback() {
-        assert_eq!(meeting_filename("2026-08-12", "Weekly Sync"), "2026-08-12-weekly-sync.md");
-        assert_eq!(meeting_filename("2026-08-12", "!!!"), "2026-08-12-meeting.md");
+        assert_eq!(
+            meeting_filename("2026-08-12", "Weekly Sync"),
+            "2026-08-12-weekly-sync.md"
+        );
+        assert_eq!(
+            meeting_filename("2026-08-12", "!!!"),
+            "2026-08-12-meeting.md"
+        );
     }
 
     #[test]

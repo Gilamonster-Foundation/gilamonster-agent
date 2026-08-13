@@ -74,7 +74,10 @@ pub fn repo_activity(path: &Path, date: &str, max: usize) -> RepoActivity {
             }
         }
     }
-    RepoActivity { repo: repo_name, commits }
+    RepoActivity {
+        repo: repo_name,
+        commits,
+    }
 }
 
 /// The session-log filename for a date + description slug.
@@ -88,7 +91,12 @@ pub fn prompt_log_filename(date: &str, description: &str) -> String {
 }
 
 /// The session-log template.
-pub fn prompt_log_template(date: &str, description: &str, log_type: &str, duration: &str) -> String {
+pub fn prompt_log_template(
+    date: &str,
+    description: &str,
+    log_type: &str,
+    duration: &str,
+) -> String {
     format!(
         "# {description}\n\n**Date:** {date}\n**Type:** {log_type}\n**Duration:** {duration}\n\n## Summary\n\n- \n\n## Changes\n\n- \n\n## Follow-ups\n\n- [ ] \n"
     )
@@ -106,8 +114,11 @@ pub fn create_prompt_log(
         .with_context(|| format!("creating prompt-log dir {}", dir.display()))?;
     let path = dir.join(prompt_log_filename(date, description));
     if !path.exists() {
-        std::fs::write(&path, prompt_log_template(date, description, log_type, duration))
-            .with_context(|| format!("writing prompt log {}", path.display()))?;
+        std::fs::write(
+            &path,
+            prompt_log_template(date, description, log_type, duration),
+        )
+        .with_context(|| format!("writing prompt log {}", path.display()))?;
     }
     Ok(path)
 }
@@ -135,21 +146,36 @@ mod tests {
     #[test]
     fn render_activity_groups_by_repo_and_handles_empty() {
         let acts = vec![
-            RepoActivity { repo: "alpha".into(), commits: vec!["feat: x".into()] },
-            RepoActivity { repo: "empty".into(), commits: vec![] },
+            RepoActivity {
+                repo: "alpha".into(),
+                commits: vec!["feat: x".into()],
+            },
+            RepoActivity {
+                repo: "empty".into(),
+                commits: vec![],
+            },
         ];
         let r = render_activity("2026-08-12", &acts);
         assert!(r.contains("# Activity — 2026-08-12"));
         assert!(r.contains("## alpha"));
         assert!(r.contains("- feat: x"));
         assert!(!r.contains("## empty"));
-        assert_eq!(render_activity("2026-08-12", &[]), "# Activity — 2026-08-12\n\nno commits today\n");
+        assert_eq!(
+            render_activity("2026-08-12", &[]),
+            "# Activity — 2026-08-12\n\nno commits today\n"
+        );
     }
 
     #[test]
     fn prompt_log_filename_slugifies() {
-        assert_eq!(prompt_log_filename("2026-08-12", "Fix the bug"), "2026-08-12-fix-the-bug.md");
-        assert_eq!(prompt_log_filename("2026-08-12", "!!!"), "2026-08-12-session.md");
+        assert_eq!(
+            prompt_log_filename("2026-08-12", "Fix the bug"),
+            "2026-08-12-fix-the-bug.md"
+        );
+        assert_eq!(
+            prompt_log_filename("2026-08-12", "!!!"),
+            "2026-08-12-session.md"
+        );
     }
 
     #[test]

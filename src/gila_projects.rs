@@ -46,7 +46,10 @@ pub fn render_projects(projects: &[PathBuf]) -> String {
     }
     let mut out = String::new();
     for p in projects {
-        let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let name = p
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         out.push_str(&name);
         out.push('\n');
     }

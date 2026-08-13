@@ -26,7 +26,10 @@ pub fn wsl_report(proc_version: &str, env_val: Option<&str>) -> String {
         }
         (true, false) => "WSL kernel detected (no WSL_DISTRO_NAME set)".to_string(),
         (false, true) => {
-            format!("WSL env present (distro: {}) but kernel string is not WSL", env_val.unwrap_or("unknown"))
+            format!(
+                "WSL env present (distro: {}) but kernel string is not WSL",
+                env_val.unwrap_or("unknown")
+            )
         }
         (false, false) => "not running under WSL".to_string(),
     }

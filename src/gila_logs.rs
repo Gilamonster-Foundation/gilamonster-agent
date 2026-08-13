@@ -45,12 +45,15 @@ pub fn recent_logs(dir: &Path, limit: usize) -> Vec<LogEntry> {
                         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                         .map(|d| d.as_secs())
                         .unwrap_or(0);
-                    LogEntry { path: p, mtime_secs }
+                    LogEntry {
+                        path: p,
+                        mtime_secs,
+                    }
                 })
                 .collect()
         })
         .unwrap_or_default();
-    entries.sort_by(|a, b| b.mtime_secs.cmp(&a.mtime_secs));
+    entries.sort_by_key(|e| std::cmp::Reverse(e.mtime_secs));
     entries.truncate(limit);
     entries
 }
@@ -62,7 +65,11 @@ pub fn render_logs(entries: &[LogEntry]) -> String {
     }
     let mut out = String::new();
     for e in entries {
-        let name = e.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let name = e
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         out.push_str(&name);
         out.push('\n');
     }
