@@ -247,3 +247,143 @@ fn cap_enable_prints_the_mcp_servers_snippet() {
         .stdout(predicate::str::contains("[[mcp_servers]]"))
         .stdout(predicate::str::contains("confluence"));
 }
+
+// --- gila-parity Phase 1: Rust-native `gila git` integration tests ----------
+//
+// These run the real binary against real temp git repos and assert on both the
+// CLI output and the resulting git state (HEAD subject + clean tree), which is
+// the true end-to-end contract of `commit` and `tend`.
+
+/// Initialize a git repo in a fresh tempdir with one empty `init` commit.
+/// Returns the TempDir guard (the repo lives at its root).
+fn git_repo() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("repo tempdir");
+    let run = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir.path())
+            .output()
+            .expect("git runs")
+    };
+    assert!(run(&["init", "-q"]).status.success());
+    // Persist identity in the repo config (not just `-c` on one command) so
+    // git2::Repository::signature() resolves on CI runners with no global git
+    // identity configured.
+    assert!(run(&["config", "user.email", "t@t.t"]).status.success());
+    assert!(run(&["config", "user.name", "t"]).status.success());
+    assert!(run(&["commit", "-q", "--allow-empty", "-m", "init"])
+        .status
+        .success());
+    dir
+}
+
+/// The subject of HEAD in `repo`.
+fn head_subject(repo: &std::path::Path) -> String {
+    let out = std::process::Command::new("git")
+        .args(["log", "-1", "--format=%s"])
+        .current_dir(repo)
+        .output()
+        .expect("git log runs");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// True when `repo`'s working tree has no staged/unstaged/untracked changes.
+fn is_clean(repo: &std::path::Path) -> bool {
+    let out = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(repo)
+        .output()
+        .expect("git status runs");
+    String::from_utf8_lossy(&out.stdout).trim().is_empty()
+}
+
+#[test]
+fn git_commit_stages_all_and_writes_a_commit() {
+    let repo = git_repo();
+    std::fs::write(repo.path().join("a.txt"), "hello").expect("write a.txt");
+
+    gila()
+        .args(["git", "commit", "-m", "add a.txt", "--path"])
+        .arg(repo.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("committed"));
+
+    assert_eq!(head_subject(repo.path()), "add a.txt");
+    assert!(is_clean(repo.path()), "tree clean after commit");
+}
+
+#[test]
+fn git_commit_on_clean_tree_is_a_noop_not_an_error() {
+    let repo = git_repo(); // already clean
+
+    gila()
+        .args(["git", "commit", "-m", "noop", "--path"])
+        .arg(repo.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("nothing to commit"));
+
+    assert_eq!(head_subject(repo.path()), "init", "no new commit created");
+}
+
+#[test]
+fn git_tend_runs_the_backup_profile_end_to_end() {
+    let repo = git_repo();
+    std::fs::write(repo.path().join("b.txt"), "change").expect("write b.txt");
+
+    let cfg = tempfile::NamedTempFile::new().expect("config");
+    std::fs::write(
+        cfg.path(),
+        format!(
+            "defaults:\n  on_conflict: halt\n  commit_message: \"tend: backup {{timestamp}}\"\n\
+             profiles:\n  backup:\n    - git add -A\n    - git commit -m \"{{commit_message}}\"\n\
+             repos:\n  - path: {}\n",
+            repo.path().display()
+        ),
+    )
+    .expect("write config");
+
+    // Dry-run: reports, but does NOT commit.
+    gila()
+        .args(["git", "tend", "--config"])
+        .arg(cfg.path())
+        .arg("--dry-run")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("dry-run"));
+    assert_eq!(head_subject(repo.path()), "init", "dry-run must not commit");
+
+    // Real run: the substituted commit message lands and the tree goes clean.
+    gila()
+        .args(["git", "tend", "--config"])
+        .arg(cfg.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ok"));
+    assert!(
+        head_subject(repo.path()).starts_with("tend: backup "),
+        "backup commit landed, got: {}",
+        head_subject(repo.path())
+    );
+    assert!(is_clean(repo.path()), "tree clean after tend");
+
+    // Second run on the now-clean tree: commit step is skipped, still ok.
+    gila()
+        .args(["git", "tend", "--config"])
+        .arg(cfg.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ok"));
+}
+
+#[test]
+fn git_tend_missing_config_fails_with_guidance() {
+    let missing = tempfile::tempdir().expect("dir").path().join("nope.yaml");
+    gila()
+        .args(["git", "tend", "--config"])
+        .arg(&missing)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("git-tend config not found"));
+}

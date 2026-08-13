@@ -20,6 +20,7 @@
 //! lifecycle, orchestration, and the rich settings/dashboard surfaces — lands
 //! on top in the cowork / hotseat issues (#8-#11).
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
@@ -29,8 +30,10 @@ pub mod capabilities;
 pub mod chain;
 pub mod cockpit;
 pub mod cowork;
+pub mod delegate;
 pub mod fleet;
 pub mod follow;
+pub mod gila_git;
 pub mod hotseat;
 pub mod keys;
 pub mod layout;
@@ -151,6 +154,47 @@ pub enum Command {
         /// `./scrybe.md`.
         #[arg(long)]
         doc_path: Option<PathBuf>,
+    },
+    /// Rust-native git operations (Phase 1 of the gila-parity plan). Graduates
+    /// `commit` and `tend` out of the shell-delegate fallback; every other
+    /// `gila git …` still delegates to Python gilabot.
+    Git {
+        #[command(subcommand)]
+        cmd: GitCmd,
+    },
+    /// Shell-delegate fallback: any subcommand gilamonster-agent has not yet
+    /// ported from gilabot (Python). clap's `external_subcommand` catch-all
+    /// captures the unrecognized subcommand name + its args and hands them to
+    /// [`delegate`], which re-execs the real gilabot binary so every gilabot
+    /// command works from day one. Commands graduate out of this fallback as
+    /// they gain their own `Command` variant (see the parity plan).
+    #[command(external_subcommand)]
+    External(Vec<OsString>),
+}
+
+/// `gila git` subcommands (the Rust-native Phase-1 slice).
+#[derive(Subcommand, Debug, PartialEq, Eq)]
+pub enum GitCmd {
+    /// Stage all changes (`git add -A`) and commit with a message (libgit2).
+    Commit {
+        /// Commit message.
+        #[arg(short, long)]
+        message: String,
+        /// Repository path. Defaults to the current directory.
+        #[arg(long)]
+        path: Option<PathBuf>,
+    },
+    /// Run git-tend profiles across the configured repos (`git-tend.yaml`).
+    Tend {
+        /// Path to the config file. Defaults to `~/.gila/git-tend.yaml`.
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// Preview what would run without executing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Only tend repos that use this profile.
+        #[arg(long)]
+        profile: Option<String>,
     },
 }
 
