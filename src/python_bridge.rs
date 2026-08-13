@@ -29,8 +29,8 @@
 //! prepare `sys.path`, set `sys.argv = [<cmd>, <args>…]`, call
 //! `gilabot.main()`, and map its return / `SystemExit` to an exit code. The
 //! pure, testable logic is [`build_argv`] and [`site_packages_dirs`]; the GIL
-//! + import + call seam is intentionally thin (it needs a real interpreter, so
-//! it is covered by integration tests, not unit tests).
+//! and import and call seam is intentionally thin (it needs a real interpreter,
+//! so it is covered by integration tests, not unit tests).
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -83,7 +83,11 @@ pub fn build_argv(cmd: &str, args: &[OsString]) -> Vec<String> {
 /// unit-testable. `venv_root` is the venv directory (the one containing
 /// `bin/python`). We emit both the versioned form we can compute and the
 /// editable-install source roots the plugins live in.
-pub fn site_packages_dirs(venv_root: &std::path::Path, py_major: u32, py_minor: u32) -> Vec<PathBuf> {
+pub fn site_packages_dirs(
+    venv_root: &std::path::Path,
+    py_major: u32,
+    py_minor: u32,
+) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     // Standard POSIX venv layout: lib/pythonX.Y/site-packages
     dirs.push(
@@ -284,17 +288,23 @@ mod tests {
         if std::env::var_os("GILA_AGENT_VENV").is_none()
             && std::env::var_os("VIRTUAL_ENV").is_none()
         {
-            assert_eq!(venv_root_from_env(home), Some(PathBuf::from("/home/u/venv")));
+            assert_eq!(
+                venv_root_from_env(home),
+                Some(PathBuf::from("/home/u/venv"))
+            );
         }
-        assert_eq!(venv_root_from_env(None), None.or_else(|| {
-            // home None with no env → None
-            if std::env::var_os("GILA_AGENT_VENV").is_none()
-                && std::env::var_os("VIRTUAL_ENV").is_none()
-            {
-                None
-            } else {
-                venv_root_from_env(None)
-            }
-        }));
+        assert_eq!(
+            venv_root_from_env(None),
+            None.or_else(|| {
+                // home None with no env → None
+                if std::env::var_os("GILA_AGENT_VENV").is_none()
+                    && std::env::var_os("VIRTUAL_ENV").is_none()
+                {
+                    None
+                } else {
+                    venv_root_from_env(None)
+                }
+            })
+        );
     }
 }
