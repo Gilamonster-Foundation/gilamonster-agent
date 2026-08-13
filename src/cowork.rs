@@ -57,6 +57,7 @@
 //! carve-out `gila follow` uses for its live tail loop.
 
 use std::io::{self, Write};
+use std::path::Path;
 
 use crossterm::event::{KeyCode as XKeyCode, KeyModifiers};
 use crossterm::{
@@ -85,6 +86,20 @@ pub const SHELL_PLACEHOLDER: &str = "shell pane (PTY lands in #10)";
 pub const COWORK_SYSTEM_PROMPT: &str =
     "We are pair-programming in a split screen: your chat is on top, my live \
      shell is below. Be concise and practical.";
+
+/// Returns the configured authority for the cowork agent driver.
+#[must_use]
+pub fn driver_caveats(config: &newt_core::Config, workspace: &str) -> newt_core::Caveats {
+    use newt_core::Scope;
+
+    let mut caveats = config.mcp_probe_caveats(Path::new(workspace));
+    let deliberately_unbounded =
+        matches!(caveats.fs_read, Scope::All) && matches!(caveats.fs_write, Scope::All);
+    if !deliberately_unbounded {
+        newt_core::caveats::apply_cli_fs_grants(&mut caveats, workspace);
+    }
+    caveats
+}
 
 /// Which pane currently has keyboard focus. Keystrokes route to the focused
 /// pane; the focus-swap hotkey toggles between the two. In Tier B/1 only the
@@ -937,6 +952,33 @@ mod tests {
         let cfg =
             TurnDriverConfig::new("http://127.0.0.1:1", "test-model", BackendKind::Ollama, ".");
         ObservationChannel::new(TurnDriver::new(cfg))
+    }
+
+    #[test]
+    fn cowork_default_is_read_only_and_workspace_fenced() {
+        let caveats = driver_caveats(&newt_core::Config::default(), "/work");
+        assert_eq!(
+            caveats.fs_read,
+            newt_core::Scope::only(["/work".to_string()])
+        );
+        assert_eq!(caveats.fs_write, newt_core::Scope::none());
+        assert_eq!(caveats.exec, newt_core::Scope::none());
+        assert_eq!(caveats.net, newt_core::Scope::none());
+    }
+
+    #[test]
+    fn cowork_honors_an_explicit_full_access_config() {
+        let config = newt_core::Config {
+            tui: Some(newt_core::TuiConfig {
+                permissions: newt_core::ToolPermissions {
+                    preset: newt_core::PermissionPreset::FullAccess,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(driver_caveats(&config, "/work"), newt_core::Caveats::top());
     }
 
     fn app() -> CoworkApp {

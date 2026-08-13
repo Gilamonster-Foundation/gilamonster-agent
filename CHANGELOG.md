@@ -4,7 +4,7 @@ Gilamonster Agent follows the version line chartered in [ROADMAP.md](ROADMAP.md)
 The original charter was one tagged version per ratchet milestone,
 **v0.3.1 → v0.3.12**, under the `v0.3.x` cockpit line (milestones 1 & 2 keep
 their historical tags **`v0.1.0`** ≡ v0.3.1 and **`v0.2.0`** ≡ v0.3.2). As of
-2026-07-29 the **`0.4.x` line opens early** on the re-pinned newt-0.7.5
+2026-07-29 the **`0.4.x` line opens early** on the re-pinned newt-0.8.0
 airframe (see the v0.4.0 entry and ROADMAP's renumbering note); the unshipped
 cockpit milestones continue inside 0.4.x.
 
@@ -13,10 +13,21 @@ cockpit milestones continue inside 0.4.x.
 The first release where `Cargo.toml`, the tag, and `gila --version` agree —
 v0.1.0–v0.3.3 were tagged with the manifest still reading 0.1.0.
 
-- **newt airframe re-pinned** to the 0.7.5-line main (`edad1fb`, +1,150
-  commits over the June 13 pin; PR #63). agent-bridle now resolves from
-  crates.io (0.7.14, published) — the stub-shell `[patch.crates-io]` mirror is
-  gone on both sides. MSRV 1.75 → 1.88, following newt's honest floor.
+- **Ambient-first launch contract:** bare `gila` and `gila code` start with full
+  filesystem/network/exec authority and native host-shell dispatch. Global
+  `--ocap` restores newt's configured confinement; cowork, follow, hotseat,
+  cockpit/companion, utility, and delegated commands remain confined. Ambient
+  actions retain newt's append-only shadow-OCAP recorder.
+- **Exact build identity:** `gila --version` and `gila version` append Gila's
+  12-character Git commit to the package version, matching newt's
+  `0.4.0 (<commit>[-dirty])` provenance shape.
+- **PATH-safe Python fallback:** installing Rust Gila ahead of a pyenv shim no
+  longer permits a Rust → shim → Rust delegation loop. Each hop carries a
+  recursion guard and continues to the real Python gilabot later on PATH;
+  `GILABOT_BIN` selects an exact fallback when older Rust builds coexist.
+- **newt airframe re-pinned** to the 0.8.0-line main (`8cde29f`, 2026-08-13).
+  The four direct newt dependencies move atomically; Gila also adopts newt's
+  typed MCP admission witness and frozen startup-authority contract.
 - **Upstream drift adopted** (PR #63): `McpServerEntry` trust/enabled fields;
   `NamedPermissionPreset.fs_read`; `gila capabilities check` spawns under the
   operator's real confinement leash (`Config::mcp_probe_caveats`, never
@@ -108,3 +119,8 @@ dispatcher, plus the roadmap-as-code foundation.
 Versioning discipline from here: tag `v0.3.N` when milestone _N_'s last PR
 merges. Next: **v0.3.2 — Kill the leak** (dispatcher wired into cowork before
 `encode_key`; closes part of #10).
+
+---
+
+<!-- markdownlint-disable-next-line MD013 -->
+Model: OpenAI GPT-5 | Harness: Codex | Operator: Shawn Hartsock | Time: 10:11 EDT | Date: 2026-08-14

@@ -4,17 +4,16 @@
 
 # gilamonster-agent
 
-**The Gilamonster agent matrix.** It *inherits* [newt-agent](https://github.com/Gilamonster-Foundation/newt-agent)'s
-airframe — the lean chat + agentic-coding TUI, the object-capability identity
-(signed, attenuation-only `AgentKey` caveats), the ACP worker, and the coder —
-from the published `newt-*` crates, and *extends* it into a Hermes/Thoon-style
-multi-agent matrix.
+**The full-ambient Gilamonster agent matrix.** It *inherits*
+[newt-agent](https://github.com/Gilamonster-Foundation/newt-agent)'s airframe —
+chat, agentic coding, identity, tools, and optional object-capability
+confinement — and *extends* it into a Hermes/Thoon-style multi-agent matrix.
 
 > newt is the cell; gilamonster-agent is the organism. The extension point is a
 > **separate binary**, not a plugin slot — which is why newt stays *opinionated,
 > not extensible*.
 
-## Status: v0.1 scaffold — builds against newt over a git dependency
+## Status: v0.4 development — ambient-first on the newt 0.8 airframe
 
 This is the v0.1 structure, and **it builds today.** gila is a **private
 binary**, not a published library, so it consumes newt over a **git
@@ -25,12 +24,25 @@ shape, not a stopgap. (agent-bridle resolves from crates.io — 0.7.x, published
 newt-agent's `docs/decisions/agent_bridle_publishing.md` for the history.)
 
 ```bash
-gila code            # the inherited newt chat + agentic-coding TUI (the airframe)
-gila matrix          # the extension layer — surfaces the inherited ocap identity (stub)
+gila                 # full ambient authority + native host command execution
+gila code ./project  # the same coder, rooted at a project
+gila --ocap          # opt into newt's configured OCAP confinement
+gila matrix          # the extension layer / fleet surface
 ```
 
-`gila code` hands off to `newt_tui::run_code`; `gila matrix` is where the
-multi-agent layer lands.
+`gila code` hands off to `newt_tui::run_code`. Gila deliberately inverts
+newt's launch default: newt remains confined, while Gila's coder starts with
+full filesystem, network, and execution authority and uses the native host
+command path. Common shell reads are not rewritten to built-ins. The global
+`--ocap` flag removes inherited widening switches and restores the configured
+newt confinement posture for that invocation.
+
+Cowork, observer, and triage surfaces (`cowork`, `follow`, `hotseat`, and
+companion/cockpit panes) remain confined. Cowork's human-owned PTY keeps the
+ordinary user environment but strips Newt authority controls and secrets so a
+nested agent must make a fresh launch decision. Agent-facing MCP capabilities
+remain opt-in; ambient shell authority does not auto-mount them. See the
+[ambient-first decision and rollout plan](docs/decisions/ambient_native_shell_default.md).
 
 ## Build
 
@@ -38,6 +50,7 @@ multi-agent layer lands.
 cargo build          # resolves the pinned newt git rev
 just check           # the gate: fmt + clippy -D warnings + test
 just cov-ci          # coverage gate (>= 80% line floor, inherited from newt)
+just install         # gila + OCAP net guard -> ~/bin (or another PATH dir)
 just install-hooks   # wire .githooks/pre-push (runs the gate before every push)
 ```
 
@@ -98,3 +111,8 @@ standard sizes under `docs/logos/` (`gilly-16.png` … `gilly-512.png`).
 ## License
 
 Apache-2.0.
+
+---
+
+<!-- markdownlint-disable-next-line MD013 -->
+Model: OpenAI GPT-5 | Harness: Codex | Operator: Shawn Hartsock | Time: 19:34 EDT | Date: 2026-08-13
