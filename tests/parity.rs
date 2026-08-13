@@ -170,8 +170,7 @@ fn parity_resolver_does_not_self_match() {
         .unwrap_or_else(|_| assert_cmd::cargo::cargo_bin("gila"));
     if let Some(found) = python_gilabot() {
         assert_ne!(
-            found,
-            own,
+            found, own,
             "resolver picked the Rust binary under test as the Python reference"
         );
     }
