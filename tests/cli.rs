@@ -266,7 +266,12 @@ fn git_repo() -> tempfile::TempDir {
             .expect("git runs")
     };
     assert!(run(&["init", "-q"]).status.success());
-    assert!(run(&["-c", "user.email=t@t.t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"])
+    // Persist identity in the repo config (not just `-c` on one command) so
+    // git2::Repository::signature() resolves on CI runners with no global git
+    // identity configured.
+    assert!(run(&["config", "user.email", "t@t.t"]).status.success());
+    assert!(run(&["config", "user.name", "t"]).status.success());
+    assert!(run(&["commit", "-q", "--allow-empty", "-m", "init"])
         .status
         .success());
     dir

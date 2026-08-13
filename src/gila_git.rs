@@ -164,8 +164,8 @@ pub fn substitute(template: &str, vars: &HashMap<String, String>) -> String {
 /// This is the pure-libgit2 slice: it opens the repo, stages the working tree,
 /// writes the tree + commit object, and updates HEAD — no subprocess.
 pub fn commit_all(path: &Path, message: &str) -> Result<Option<git2::Oid>> {
-    let repo =
-        git2::Repository::open(path).with_context(|| format!("not a git repo: {}", path.display()))?;
+    let repo = git2::Repository::open(path)
+        .with_context(|| format!("not a git repo: {}", path.display()))?;
 
     // `git add -A`: stage modified, new, and deleted paths.
     let mut index = repo.index()?;
@@ -187,7 +187,9 @@ pub fn commit_all(path: &Path, message: &str) -> Result<Option<git2::Oid>> {
         return Ok(None);
     }
 
-    let sig = repo.signature().context("no git user.name/user.email configured")?;
+    let sig = repo
+        .signature()
+        .context("no git user.name/user.email configured")?;
 
     let oid = match &head_commit {
         Some(parent) => repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &[parent])?,
@@ -282,7 +284,11 @@ pub enum StepOutcome {
 ///
 /// `dry_run` reports `Ok` without executing (preview mode).
 pub fn run_step(repo: &Path, step: &str, dry_run: bool) -> (StepOutcome, String) {
-    let cmd = step.strip_prefix("git ").map(str::trim_start).unwrap_or(step).trim();
+    let cmd = step
+        .strip_prefix("git ")
+        .map(str::trim_start)
+        .unwrap_or(step)
+        .trim();
     if cmd.is_empty() {
         return (StepOutcome::Skipped, String::new());
     }
@@ -335,15 +341,17 @@ pub fn tend_repo(repo: &RepoConfig, config: &TendConfig, dry_run: bool) -> RepoR
         ("timestamp".to_string(), timestamp_now()),
         (
             "commit_message".to_string(),
-            substitute(&config.defaults.commit_message, &HashMap::from([(
-                "timestamp".to_string(),
-                timestamp_now(),
-            )])),
+            substitute(
+                &config.defaults.commit_message,
+                &HashMap::from([("timestamp".to_string(), timestamp_now())]),
+            ),
         ),
     ]);
 
     for profile in repo.profiles(&config.defaults) {
-        let Some(steps) = config.profiles.get(profile) else { continue };
+        let Some(steps) = config.profiles.get(profile) else {
+            continue;
+        };
         for step_tmpl in steps {
             let step = substitute(step_tmpl, &vars);
             let (outcome, err) = run_step(&path, &step, dry_run);
@@ -372,19 +380,23 @@ fn handle_conflict(path: &Path, strategy: ConflictStrategy, dry_run: bool) -> bo
     match strategy {
         ConflictStrategy::Halt => false,
         ConflictStrategy::Skip => true,
-        ConflictStrategy::Stash => git_ok(path, &["stash", "push", "-m", "git-tend: stashed during tend"]),
+        ConflictStrategy::Stash => git_ok(
+            path,
+            &["stash", "push", "-m", "git-tend: stashed during tend"],
+        ),
         ConflictStrategy::Branch => {
-            let name = format!("tend/{}", timestamp_now().replace([':', '-'], "").replace('T', "-"));
+            let name = format!(
+                "tend/{}",
+                timestamp_now().replace([':', '-'], "").replace('T', "-")
+            );
             git_ok(path, &["branch", &name])
             // Reset-to-tracking intentionally omitted in Phase 1: branch is the
             // safe escape hatch; the repo stops tending either way.
         }
-        ConflictStrategy::Overwrite => {
-            match tracking_branch(path) {
-                Some(track) => git_ok(path, &["fetch"]) && git_ok(path, &["reset", "--hard", &track]),
-                None => false,
-            }
-        }
+        ConflictStrategy::Overwrite => match tracking_branch(path) {
+            Some(track) => git_ok(path, &["fetch"]) && git_ok(path, &["reset", "--hard", &track]),
+            None => false,
+        },
     }
 }
 
@@ -461,7 +473,10 @@ repos:
         );
         assert_eq!(
             cfg.profiles["backup"],
-            vec!["git add -A".to_string(), "git commit -m \"{commit_message}\"".to_string()]
+            vec![
+                "git add -A".to_string(),
+                "git commit -m \"{commit_message}\"".to_string()
+            ]
         );
     }
 
@@ -475,7 +490,10 @@ repos:
             extra: HashMap::new(),
         };
         assert_eq!(repo.profiles(&cfg.defaults), &["backup".to_string()]);
-        assert_eq!(repo.conflict_strategy(&cfg.defaults), ConflictStrategy::Halt);
+        assert_eq!(
+            repo.conflict_strategy(&cfg.defaults),
+            ConflictStrategy::Halt
+        );
     }
 
     #[test]
@@ -500,8 +518,10 @@ repos:
     #[test]
     fn strips_git_prefix() {
         // A real git command that always succeeds outside a repo check:
-        // `git --version` never fails, prefix-stripped or not.
-        let (outcome, _) = run_step(Path::new("/tmp"), "git --version", false);
+        // `git --version` never fails, prefix-stripped or not. Use a tempdir
+        // that exists on every platform ("/tmp" does not exist on Windows).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (outcome, _) = run_step(dir.path(), "git --version", false);
         assert_eq!(outcome, StepOutcome::Ok);
     }
 
