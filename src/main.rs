@@ -124,6 +124,364 @@ async fn main() -> anyhow::Result<()> {
         // tend via profile steps that shell out to the git CLI (matching the
         // Python engine 1:1). Graduated out of the shell-delegate fallback.
         Command::Git { cmd } => run_git(cmd),
+        // Phase 3 Rust-native commands (batch 1): version/daily/ideas/todos/
+        // projects/board/cache. Logic lives in the `gila_*` lib modules
+        // (unit-tested); these arms own only HOME resolution + file effect.
+        Command::Version => {
+            println!("{}", gilamonster_agent::gila_version::version_report());
+            Ok(())
+        }
+        Command::Daily { date } => {
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+            let dir = gilamonster_agent::gila_daily::daily_dir(home.as_deref())?;
+            let date = date.unwrap_or_else(today);
+            let p = gilamonster_agent::gila_daily::ensure_daily_note(&dir, &date)?;
+            println!("{}", p.display());
+            Ok(())
+        }
+        Command::Ideas { idea, list } => {
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+            let path = gilamonster_agent::gila_ideas::ideas_path(home.as_deref())?;
+            if list {
+                match std::fs::read_to_string(&path) {
+                    Ok(body) => print!("{body}"),
+                    Err(_) => println!("no ideas captured yet"),
+                }
+                return Ok(());
+            }
+            let text = idea.join(" ");
+            if text.is_empty() {
+                anyhow::bail!("no idea given — pass text or `--list`");
+            }
+            gilamonster_agent::gila_ideas::append_idea(&path, &today(), &text)?;
+            println!("captured: {text}");
+            Ok(())
+        }
+        Command::Todos { text, list, done } => {
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+            let path = gilamonster_agent::gila_todos::todos_path(home.as_deref())?;
+            if let Some(n) = done {
+                let body = std::fs::read_to_string(&path).unwrap_or_default();
+                let out = gilamonster_agent::gila_todos::mark_done(&body, n)
+                    .ok_or_else(|| anyhow::anyhow!("no open todo #{n}"))?;
+                std::fs::write(&path, out)?;
+                println!("done: #{n}");
+                return Ok(());
+            }
+            if list {
+                let body = std::fs::read_to_string(&path).unwrap_or_default();
+                let open = gilamonster_agent::gila_todos::list_open(&body);
+                if open.is_empty() {
+                    println!("no open todos");
+                } else {
+                    for l in open {
+                        println!("{l}");
+                    }
+                }
+                return Ok(());
+            }
+            let t = text.join(" ");
+            if t.is_empty() {
+                anyhow::bail!("no todo given — pass text, `--list`, or `--done N`");
+            }
+            gilamonster_agent::gila_todos::add_todo(&path, &t)?;
+            println!("added: {t}");
+            Ok(())
+        }
+        Command::Projects => {
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+            let root = gilamonster_agent::gila_projects::workspace_root(home.as_deref())?;
+            let projs = gilamonster_agent::gila_projects::list_projects(&root);
+            print!(
+                "{}",
+                gilamonster_agent::gila_projects::render_projects(&projs)
+            );
+            Ok(())
+        }
+        Command::Board => {
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+            let dir = gilamonster_agent::gila_board::board_dir(home.as_deref())?;
+            let files = gilamonster_agent::gila_board::list_board_files(&dir);
+            print!("{}", gilamonster_agent::gila_board::render_board(&files));
+            Ok(())
+        }
+        Command::Cache { clear } => {
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+            let dir = gilamonster_agent::gila_cache::cache_dir(home.as_deref())?;
+            if clear {
+                let n = gilamonster_agent::gila_cache::clear(&dir)?;
+                println!("cleared {n} entr(y/ies) from {}", dir.display());
+            } else {
+                let s = gilamonster_agent::gila_cache::status(&dir);
+                print!("{}", gilamonster_agent::gila_cache::render_status(&dir, &s));
+            }
+            Ok(())
+        }
+        Command::Logs { limit } => {
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+            let dir = gilamonster_agent::gila_logs::logs_dir(home.as_deref())?;
+            let entries = gilamonster_agent::gila_logs::recent_logs(&dir, limit);
+            print!("{}", gilamonster_agent::gila_logs::render_logs(&entries));
+            Ok(())
+        }
+        Command::Prompt { cmd } => {
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+            let dir = gilamonster_agent::gila_prompt::prompts_dir(home.as_deref())?;
+            match cmd {
+                gilamonster_agent::PromptCmd::List => {
+                    let names = gilamonster_agent::gila_prompt::list_prompts(&dir);
+                    if names.is_empty() {
+                        println!("no prompts found");
+                    } else {
+                        for n in names {
+                            println!("{n}");
+                        }
+                    }
+                }
+                gilamonster_agent::PromptCmd::Show { name } => {
+                    let p = dir.join(format!("{name}.md"));
+                    match std::fs::read_to_string(&p) {
+                        Ok(body) => print!("{body}"),
+                        Err(_) => anyhow::bail!("prompt `{name}` not found at {}", p.display()),
+                    }
+                }
+                gilamonster_agent::PromptCmd::Create { name } => {
+                    let p = gilamonster_agent::gila_prompt::create_prompt(&dir, &name)?;
+                    println!("created {}", p.display());
+                }
+            }
+            Ok(())
+        }
+        Command::CommitMsg { message, file } => {
+            let msg = if file {
+                std::fs::read_to_string(&message)
+                    .map_err(|e| anyhow::anyhow!("reading message file {message}: {e}"))?
+            } else {
+                message
+            };
+            match gilamonster_agent::gila_commit_msg::validate(&msg) {
+                Ok(()) => {
+                    println!("commit message OK");
+                    Ok(())
+                }
+                Err(reason) => {
+                    eprintln!("invalid commit message: {reason}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Command::Completion { shell } => {
+            let sh = gilamonster_agent::gila_completion::Shell::parse(&shell).ok_or_else(|| {
+                anyhow::anyhow!("unsupported shell `{shell}` (supported: bash, zsh)")
+            })?;
+            print!(
+                "{}",
+                gilamonster_agent::gila_completion::completion_script(sh)
+            );
+            Ok(())
+        }
+        Command::Init => {
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+            let created = gilamonster_agent::gila_init::init(home.as_deref())?;
+            if created.is_empty() {
+                println!("gila config already initialized");
+            } else {
+                for d in created {
+                    println!("created {}", d.display());
+                }
+            }
+            Ok(())
+        }
+        Command::Update { repo } => {
+            let repo = repo.unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+            gilamonster_agent::gila_update::run_update(&repo)?;
+            println!("updated {}", repo.display());
+            Ok(())
+        }
+        Command::Meeting { title, date } => {
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+            let dir = gilamonster_agent::gila_meeting::meetings_dir(home.as_deref())?;
+            let date = date.unwrap_or_else(today);
+            let p = gilamonster_agent::gila_meeting::create_meeting(&dir, &date, &title)?;
+            println!("{}", p.display());
+            Ok(())
+        }
+        Command::Top5 { date } => {
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+            let dir = gilamonster_agent::gila_status::status_dir(home.as_deref())?;
+            let date = date.unwrap_or_else(today);
+            let p = gilamonster_agent::gila_status::create_status(&dir, "top5", &date)?;
+            println!("{}", p.display());
+            Ok(())
+        }
+        Command::Standup { date } => {
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+            let dir = gilamonster_agent::gila_status::status_dir(home.as_deref())?;
+            let date = date.unwrap_or_else(today);
+            let p = gilamonster_agent::gila_status::create_status(&dir, "standup", &date)?;
+            println!("{}", p.display());
+            Ok(())
+        }
+        Command::Checkpoint { cmd } => {
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+            let dir = gilamonster_agent::gila_checkpoint::checkpoints_dir(home.as_deref())?;
+            match cmd {
+                gilamonster_agent::CheckpointCmd::Create { name, root } => {
+                    let root = match root {
+                        Some(r) => r,
+                        None => gilamonster_agent::gila_projects::workspace_root(home.as_deref())?,
+                    };
+                    let repos = gilamonster_agent::gila_projects::list_projects(&root);
+                    let snaps: Vec<_> = repos
+                        .iter()
+                        .map(|r| gilamonster_agent::gila_checkpoint::snapshot_repo(r))
+                        .collect();
+                    let cp = gilamonster_agent::gila_checkpoint::Checkpoint {
+                        name: name.clone(),
+                        created: today(),
+                        repos: snaps,
+                    };
+                    let p = gilamonster_agent::gila_checkpoint::save(&dir, &cp)?;
+                    println!(
+                        "checkpoint `{}` ({} repos) -> {}",
+                        name,
+                        cp.repos.len(),
+                        p.display()
+                    );
+                }
+                gilamonster_agent::CheckpointCmd::List => {
+                    let names = gilamonster_agent::gila_checkpoint::list(&dir);
+                    if names.is_empty() {
+                        println!("no checkpoints");
+                    } else {
+                        for n in names {
+                            println!("{n}");
+                        }
+                    }
+                }
+                gilamonster_agent::CheckpointCmd::Show { name } => {
+                    match gilamonster_agent::gila_checkpoint::load(&dir, &name) {
+                        Some(cp) => {
+                            println!("checkpoint `{}` ({})", cp.name, cp.created);
+                            for r in &cp.repos {
+                                println!(
+                                    "  {}: head={} dirty={}",
+                                    r.path.display(),
+                                    r.head.as_deref().unwrap_or("<none>"),
+                                    r.dirty.len()
+                                );
+                            }
+                        }
+                        None => anyhow::bail!("checkpoint `{name}` not found"),
+                    }
+                }
+            }
+            Ok(())
+        }
+        Command::Insights { path, max } => {
+            let path = path.unwrap_or_else(|| std::path::PathBuf::from("."));
+            let ins = gilamonster_agent::gila_insights::repo_insights(&path, max)?;
+            print!("{}", gilamonster_agent::gila_insights::render(&ins));
+            Ok(())
+        }
+        Command::Dev => {
+            let path_var = std::env::var_os("PATH").unwrap_or_default();
+            let dirs = gilamonster_agent::gila_dev::path_dirs(&path_var);
+            let results = gilamonster_agent::gila_dev::run_checks(&dirs);
+            print!("{}", gilamonster_agent::gila_dev::render(&results));
+            Ok(())
+        }
+        Command::Wsl => {
+            let proc_version = std::fs::read_to_string("/proc/version").unwrap_or_default();
+            let env_val = std::env::var("WSL_DISTRO_NAME").ok();
+            println!(
+                "{}",
+                gilamonster_agent::gila_wsl::wsl_report(&proc_version, env_val.as_deref())
+            );
+            Ok(())
+        }
+        Command::Log { cmd } => {
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+            match cmd {
+                gilamonster_agent::LogCmd::Activity {
+                    cmd: gilamonster_agent::LogActivityCmd::Collect { date, root, max },
+                } => {
+                    let date = date.unwrap_or_else(today);
+                    let root = match root {
+                        Some(r) => r,
+                        None => gilamonster_agent::gila_projects::workspace_root(home.as_deref())?,
+                    };
+                    let repos = gilamonster_agent::gila_projects::list_projects(&root);
+                    let acts: Vec<_> = repos
+                        .iter()
+                        .map(|r| gilamonster_agent::gila_log::repo_activity(r, &date, max))
+                        .collect();
+                    print!(
+                        "{}",
+                        gilamonster_agent::gila_log::render_activity(&date, &acts)
+                    );
+                }
+                gilamonster_agent::LogCmd::Prompt {
+                    cmd:
+                        gilamonster_agent::LogPromptCmd::Create {
+                            message,
+                            log_type,
+                            duration,
+                            date,
+                        },
+                } => {
+                    let dir = gilamonster_agent::gila_log::prompt_log_dir(home.as_deref())?;
+                    let date = date.unwrap_or_else(today);
+                    let p = gilamonster_agent::gila_log::create_prompt_log(
+                        &dir, &date, &message, &log_type, &duration,
+                    )?;
+                    println!("{}", p.display());
+                }
+            }
+            Ok(())
+        }
+        Command::Worktree { cmd } => {
+            let cwd = std::path::PathBuf::from(".");
+            match cmd {
+                gilamonster_agent::WorktreeCmd::List { repo } => {
+                    let repo = repo.unwrap_or(cwd);
+                    let wts = gilamonster_agent::gila_worktree::list(&repo)?;
+                    if wts.is_empty() {
+                        println!("no worktrees");
+                    } else {
+                        for w in wts {
+                            println!("{}  [{}]", w.path.display(), w.branch);
+                        }
+                    }
+                }
+                gilamonster_agent::WorktreeCmd::Add { name, repo } => {
+                    let repo = repo.unwrap_or(cwd);
+                    let argv = gilamonster_agent::gila_worktree::add_argv(&repo, &name);
+                    let status = std::process::Command::new("git")
+                        .args(&argv[1..])
+                        .status()?;
+                    if !status.success() {
+                        anyhow::bail!("git worktree add `{name}` failed");
+                    }
+                    println!(
+                        "added worktree {}",
+                        gilamonster_agent::gila_worktree::worktree_path(&repo, &name).display()
+                    );
+                }
+                gilamonster_agent::WorktreeCmd::Remove { name, repo } => {
+                    let repo = repo.unwrap_or(cwd);
+                    let argv = gilamonster_agent::gila_worktree::remove_argv(&repo, &name);
+                    let status = std::process::Command::new("git")
+                        .args(&argv[1..])
+                        .status()?;
+                    if !status.success() {
+                        anyhow::bail!("git worktree remove `{name}` failed");
+                    }
+                    println!("removed worktree `{name}`");
+                }
+            }
+            Ok(())
+        }
         // Shell-delegate fallback: any subcommand not yet ported from gilabot
         // (Python). clap's external_subcommand catch-all captured the name +
         // args; re-exec the real gilabot binary so every gilabot command works
@@ -179,6 +537,19 @@ fn run_delegate(args: &[std::ffi::OsString]) -> anyhow::Result<()> {
         .args(delegate_args(args))
         .status()?;
     std::process::exit(status.code().unwrap_or(1));
+}
+
+/// Today's date as `YYYY-MM-DD`, via the `date` binary (avoids a chrono dep;
+/// the modules stay date-injected and hermetic, this is the effectful seam).
+fn today() -> String {
+    std::process::Command::new("date")
+        .arg("+%F")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown-date".to_string())
 }
 
 /// `gila git …` — the Rust-native Phase-1 slice (commit via libgit2, tend via

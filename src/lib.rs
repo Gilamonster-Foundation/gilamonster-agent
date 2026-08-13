@@ -33,7 +33,28 @@ pub mod cowork;
 pub mod delegate;
 pub mod fleet;
 pub mod follow;
+pub mod gila_board;
+pub mod gila_cache;
+pub mod gila_checkpoint;
+pub mod gila_commit_msg;
+pub mod gila_completion;
+pub mod gila_daily;
+pub mod gila_dev;
 pub mod gila_git;
+pub mod gila_ideas;
+pub mod gila_init;
+pub mod gila_insights;
+pub mod gila_log;
+pub mod gila_logs;
+pub mod gila_meeting;
+pub mod gila_projects;
+pub mod gila_prompt;
+pub mod gila_status;
+pub mod gila_todos;
+pub mod gila_update;
+pub mod gila_version;
+pub mod gila_worktree;
+pub mod gila_wsl;
 pub mod hotseat;
 pub mod keys;
 pub mod layout;
@@ -163,6 +184,126 @@ pub enum Command {
         #[command(subcommand)]
         cmd: GitCmd,
     },
+    /// Print the gilamonster-agent version + toolchain (Rust-native, Phase 3).
+    Version,
+    /// Create or open today's daily note (`YYYY-MM-DD-daily.md`).
+    Daily {
+        /// Date for the note (YYYY-MM-DD). Defaults to today.
+        #[arg(long)]
+        date: Option<String>,
+    },
+    /// Capture a one-line idea, or list captured ideas.
+    Ideas {
+        /// The idea text to capture. Omit (with `--list`) to list ideas.
+        idea: Vec<String>,
+        /// List captured ideas instead of appending.
+        #[arg(long)]
+        list: bool,
+    },
+    /// Manage the markdown todo list: add, list open, or mark done.
+    Todos {
+        /// Todo text to add. Omit (with `--list`) to list, or `--done N`.
+        text: Vec<String>,
+        /// List open todos instead of adding.
+        #[arg(long)]
+        list: bool,
+        /// Mark the nth open todo done.
+        #[arg(long)]
+        done: Option<usize>,
+    },
+    /// List active projects (git repos) under the workspace root.
+    Projects,
+    /// Show the board (task files under the board directory).
+    Board,
+    /// Manage the gilabot cache (`status` default, `clear` to empty).
+    Cache {
+        /// Empty the cache instead of reporting status.
+        #[arg(long)]
+        clear: bool,
+    },
+    /// View the newest gila logs (most-recent first).
+    Logs {
+        /// Max number of logs to show.
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+    },
+    /// Manage reusable prompt templates (`list` default, `show`/`create`).
+    #[command(name = "prompt")]
+    Prompt {
+        #[command(subcommand)]
+        cmd: PromptCmd,
+    },
+    /// Validate a commit message against the conventional-commit shape.
+    #[command(name = "commit-msg")]
+    CommitMsg {
+        /// The commit message to validate (or a path to a message file).
+        message: String,
+        /// Treat `message` as a path to a file containing the message.
+        #[arg(long)]
+        file: bool,
+    },
+    /// Emit a shell completion script for gila.
+    Completion {
+        /// The shell to generate for (bash, zsh).
+        shell: String,
+    },
+    /// Initialize the gila config directory (~/.gila + standard subdirs).
+    Init,
+    /// Self-update gilamonster-agent (git pull --ff-only + cargo build --release).
+    Update {
+        /// Repo path to update. Defaults to this build's manifest dir.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+    },
+    /// Create a meeting note from a template (`YYYY-MM-DD-<slug>.md`).
+    Meeting {
+        /// Meeting title.
+        #[arg(long)]
+        title: String,
+        /// Date for the note (YYYY-MM-DD). Defaults to today.
+        #[arg(long)]
+        date: Option<String>,
+    },
+    /// Scaffold a Top-5 weekly-status document.
+    Top5 {
+        /// Date for the doc (YYYY-MM-DD). Defaults to today.
+        #[arg(long)]
+        date: Option<String>,
+    },
+    /// Scaffold a standup note (yesterday/today/blockers).
+    Standup {
+        /// Date for the note (YYYY-MM-DD). Defaults to today.
+        #[arg(long)]
+        date: Option<String>,
+    },
+    /// Snapshot/inspect workspace checkpoints.
+    Checkpoint {
+        #[command(subcommand)]
+        cmd: CheckpointCmd,
+    },
+    /// Git activity analytics for a repo (commits by author + day).
+    Insights {
+        /// Repo path. Defaults to the current directory.
+        #[arg(long)]
+        path: Option<PathBuf>,
+        /// Max commits to scan.
+        #[arg(long, default_value_t = 500)]
+        max: usize,
+    },
+    /// Check the dev environment (required tools on PATH).
+    Dev,
+    /// Report WSL (Windows Subsystem for Linux) status.
+    Wsl,
+    /// Session/activity logging (`activity collect`, `prompt create`).
+    Log {
+        #[command(subcommand)]
+        cmd: LogCmd,
+    },
+    /// Manage git worktrees for a repo (`list`/`add`/`remove`).
+    Worktree {
+        #[command(subcommand)]
+        cmd: WorktreeCmd,
+    },
     /// Shell-delegate fallback: any subcommand gilamonster-agent has not yet
     /// ported from gilabot (Python). clap's `external_subcommand` catch-all
     /// captures the unrecognized subcommand name + its args and hands them to
@@ -196,6 +337,122 @@ pub enum GitCmd {
         /// Only tend repos that use this profile.
         #[arg(long)]
         profile: Option<String>,
+    },
+}
+
+/// `gila prompt` subcommands.
+#[derive(Subcommand, Debug, PartialEq, Eq)]
+pub enum PromptCmd {
+    /// List available prompt templates.
+    List,
+    /// Print a prompt template's body.
+    Show {
+        /// Template name (file stem).
+        name: String,
+    },
+    /// Scaffold a new prompt template.
+    Create {
+        /// Template name (file stem).
+        name: String,
+    },
+}
+
+/// `gila checkpoint` subcommands.
+#[derive(Subcommand, Debug, PartialEq, Eq)]
+pub enum CheckpointCmd {
+    /// Snapshot the repos under a root into a named checkpoint.
+    Create {
+        /// Checkpoint name.
+        name: String,
+        /// Workspace root to scan for repos. Defaults to the workspace root.
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
+    /// List checkpoints.
+    List,
+    /// Show a checkpoint's recorded snapshots.
+    Show {
+        /// Checkpoint name.
+        name: String,
+    },
+}
+
+/// `gila log` subcommands.
+#[derive(Subcommand, Debug, PartialEq, Eq)]
+pub enum LogCmd {
+    /// Collect the day's activity across workspace repos into a digest.
+    Activity {
+        #[command(subcommand)]
+        cmd: LogActivityCmd,
+    },
+    /// Session-prompt logging (`gila log prompt create`).
+    Prompt {
+        #[command(subcommand)]
+        cmd: LogPromptCmd,
+    },
+}
+
+/// `gila log activity` subcommands.
+#[derive(Subcommand, Debug, PartialEq, Eq)]
+pub enum LogActivityCmd {
+    /// Collect the day's activity across workspace repos into a digest.
+    Collect {
+        /// Date (YYYY-MM-DD). Defaults to today.
+        #[arg(long)]
+        date: Option<String>,
+        /// Workspace root to scan. Defaults to the workspace root.
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// Max commits to scan per repo.
+        #[arg(long, default_value_t = 200)]
+        max: usize,
+    },
+}
+
+/// `gila log prompt` subcommands.
+#[derive(Subcommand, Debug, PartialEq, Eq)]
+pub enum LogPromptCmd {
+    /// Scaffold a session-log entry.
+    Create {
+        /// Session description (slugified into the filename).
+        #[arg(short, long)]
+        message: String,
+        /// Session type (feature, bug, refactor, docs, test).
+        #[arg(long, default_value = "feature")]
+        log_type: String,
+        /// Session duration (e.g. "~2 hours").
+        #[arg(long, default_value = "")]
+        duration: String,
+        /// Date (YYYY-MM-DD). Defaults to today.
+        #[arg(short, long)]
+        date: Option<String>,
+    },
+}
+
+/// `gila worktree` subcommands.
+#[derive(Subcommand, Debug, PartialEq, Eq)]
+pub enum WorktreeCmd {
+    /// List worktrees for a repo.
+    List {
+        /// Repo path. Defaults to the current directory.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+    },
+    /// Add a worktree (new branch `<name>` at `<repo>.worktrees/<name>`).
+    Add {
+        /// Worktree/branch name.
+        name: String,
+        /// Repo path. Defaults to the current directory.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+    },
+    /// Remove a worktree.
+    Remove {
+        /// Worktree name.
+        name: String,
+        /// Repo path. Defaults to the current directory.
+        #[arg(long)]
+        repo: Option<PathBuf>,
     },
 }
 
