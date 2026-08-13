@@ -19,6 +19,10 @@ on:
 env:
   RUST_BACKTRACE: 1
   CARGO_TERM_COLOR: always
+  # pyo3 links an interpreter at build time (Phase 2 in-process bridge). CI
+  # has no operator venv, so point pyo3 at the setup-python interpreter; the
+  # bridge tests self-skip when gilabot isn't importable from it.
+  PYO3_PYTHON: ${{ github.workspace }}/ci-python/bin/python
 
 jobs:
   lint:
@@ -26,6 +30,15 @@ jobs:
     runs-on: ${{ vars.GMF_LINUX_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: provide PYO3_PYTHON target
+        # pyo3 needs a real interpreter path; a bare python3 works for
+        # building/linking (the bridge is runtime-gated, not build-gated).
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/ci-python/bin"
+          ln -sf "$(command -v python3)" "$GITHUB_WORKSPACE/ci-python/bin/python"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -56,6 +69,13 @@ jobs:
     runs-on: ${{ vars.GMF_LINUX_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: provide PYO3_PYTHON target
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/ci-python/bin"
+          ln -sf "$(command -v python3)" "$GITHUB_WORKSPACE/ci-python/bin/python"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: cargo test
@@ -68,6 +88,13 @@ jobs:
     runs-on: ${{ vars.GMF_LINUX_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: provide PYO3_PYTHON target
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/ci-python/bin"
+          ln -sf "$(command -v python3)" "$GITHUB_WORKSPACE/ci-python/bin/python"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
@@ -132,8 +159,20 @@ jobs:
     name: Windows build + test
     runs-on: windows-latest
     # CI-ONLY job — not mirrored by .githooks/pre-push (no local Windows box).
+    env:
+      # Windows pyo3: point at setup-python's python.exe (no bin/ dir there).
+      PYO3_PYTHON: ${{ github.workspace }}/ci-python/python.exe
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: provide PYO3_PYTHON target
+        run: |
+          mkdir "$env:GITHUB_WORKSPACE/ci-python" -Force | Out-Null
+          $py = (Get-Command python).Source
+          Copy-Item $py "$env:GITHUB_WORKSPACE/ci-python/python.exe" -Force
+        shell: pwsh
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy

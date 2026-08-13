@@ -112,6 +112,16 @@ git2 = "0.20"
 # Python gilabot's gila-plugin-git-tend parses) — serde_yaml deserializes it so
 # the Rust port is config-compatible with the deployed config on day one.
 serde_yaml = "0.9"
+# --- gila-parity Phase 2: in-process Python bridge (pyo3) ---------------------
+# Operator decision (2026-08-12): pyo3 in-process embedding, NOT a vendored-venv
+# subprocess. The high-complexity gilabot commands (confluence, jira, slack,
+# mcp, assistant, doc, calendar, review, pagerduty) stay in Python and run
+# *inside* this process — `gilabot.main()` reads sys.argv, so a vendored call
+# is: prepare sys.path, set sys.argv=[cmd, args…], call main(). `auto-initialize`
+# boots the interpreter on first GIL acquisition. BUILD-TIME: set
+# PYO3_PYTHON=/Users/shartsock/venv/bin/python so pyo3 embeds the venv
+# interpreter (the default `python3` pyenv shim lacks the gila-plugin-* pkgs).
+pyo3 = { version = "0.22", features = ["auto-initialize"] }
 
 [dev-dependencies]
 # CLI integration tests: run the real `gila` binary and assert on its output.
