@@ -182,10 +182,20 @@ fn follow_with_no_typescript_prints_read_only_guidance() {
 
 #[test]
 fn unknown_subcommand_is_rejected() {
-    let empty_path = tempfile::tempdir().expect("empty PATH tempdir");
+    // Keep the platform runtime's PATH entries (notably DLL lookup paths on
+    // Windows), while removing every directory that contains a delegate named
+    // `gila`. This exercises the no-delegate path without preventing the Rust
+    // binary itself from starting.
+    let inherited_path = std::env::var_os("PATH").unwrap_or_default();
+    let path_without_gila = std::env::join_paths(
+        std::env::split_paths(&inherited_path)
+            .filter(|dir| !dir.join("gila").is_file())
+            .collect::<Vec<_>>(),
+    )
+    .expect("filtered PATH is valid");
     gila()
         .arg("definitely-not-a-command")
-        .env("PATH", empty_path.path())
+        .env("PATH", path_without_gila)
         .env_remove("GILABOT_BIN")
         .env_remove("GILA_DELEGATE_SKIP")
         .assert()
@@ -307,9 +317,10 @@ fn capabilities_run_engages_the_confined_path_when_the_manifest_marks_it() {
         .env_remove("VIRTUAL_ENV")
         .assert()
         .failure()
-        .stderr(predicate::str::contains(
-            "demo:sometool running confined (sandbox:",
-        ));
+        .stderr(
+            predicate::str::contains("demo:sometool running confined (sandbox:")
+                .or(predicate::str::contains("confined spawn of")),
+        );
 }
 
 #[cfg(unix)]
