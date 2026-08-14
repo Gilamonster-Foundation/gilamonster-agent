@@ -78,12 +78,34 @@ fn matrix_identity_line_resolves_when_home_set() {
 }
 
 #[test]
-fn version_flag_reports_a_version() {
+fn version_surfaces_report_package_and_source_commit() {
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let git = std::process::Command::new("git")
+        .args(["rev-parse", "--short=12", "HEAD"])
+        .current_dir(repo)
+        .output()
+        .expect("git rev-parse runs");
+    assert!(git.status.success(), "git rev-parse failed: {git:?}");
+    let commit = String::from_utf8(git.stdout).expect("commit is UTF-8");
+    let commit = commit.trim();
+    let build_version = gilamonster_agent::build_info::VERSION_WITH_COMMIT;
+    assert!(
+        build_version.contains(commit),
+        "build version {build_version:?} does not identify checked-out commit {commit}"
+    );
+
     gila()
         .arg("--version")
         .assert()
         .success()
-        .stdout(predicate::str::contains("gila"));
+        .stdout(format!("gila {build_version}\n"));
+    gila()
+        .arg("version")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "gila (gilamonster-agent) {build_version}"
+        )));
 }
 
 #[test]
@@ -92,6 +114,8 @@ fn help_flag_lists_subcommands() {
         .arg("--help")
         .assert()
         .success()
+        .stdout(predicate::str::contains("--ocap"))
+        .stdout(predicate::str::contains("full ambient"))
         .stdout(predicate::str::contains("code"))
         .stdout(predicate::str::contains("follow"))
         .stdout(predicate::str::contains("cowork"))
@@ -158,7 +182,99 @@ fn follow_with_no_typescript_prints_read_only_guidance() {
 
 #[test]
 fn unknown_subcommand_is_rejected() {
-    gila().arg("definitely-not-a-command").assert().failure();
+    // Keep the platform runtime's PATH entries (notably DLL lookup paths on
+    // Windows), while removing every directory that contains a delegate named
+    // `gila`. This exercises the no-delegate path without preventing the Rust
+    // binary itself from starting.
+    let inherited_path = std::env::var_os("PATH").unwrap_or_default();
+    let path_without_gila = std::env::join_paths(
+        std::env::split_paths(&inherited_path)
+            .filter(|dir| !dir.join("gila").is_file())
+            .collect::<Vec<_>>(),
+    )
+    .expect("filtered PATH is valid");
+    gila()
+        .arg("definitely-not-a-command")
+        .env("PATH", path_without_gila)
+        .env_remove("GILABOT_BIN")
+        .env_remove("GILA_DELEGATE_SKIP")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no Python gilabot"));
+}
+
+#[cfg(unix)]
+#[test]
+fn delegated_shim_that_reenters_rust_advances_to_python() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let shim_dir = tempfile::tempdir().expect("shim tempdir");
+    let python_dir = tempfile::tempdir().expect("python tempdir");
+    let rust_gila = assert_cmd::cargo::cargo_bin("gila");
+
+    let shim = shim_dir.path().join("gila");
+    std::fs::write(&shim, "#!/bin/sh\nexec \"$RUST_GILA\" \"$@\"\n").expect("write shim");
+    let python = python_dir.path().join("gila");
+    std::fs::write(&python, "#!/bin/sh\necho python-delegate\nexit 7\n")
+        .expect("write Python stand-in");
+    for path in [&shim, &python] {
+        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).unwrap();
+    }
+
+    let path = std::env::join_paths([shim_dir.path(), python_dir.path()]).unwrap();
+    gila()
+        .arg("delegated-command")
+        .env("PATH", path)
+        .env("RUST_GILA", rust_gila)
+        .env_remove("GILABOT_BIN")
+        .env_remove("GILA_DELEGATE_SKIP")
+        .assert()
+        .code(7)
+        .stdout("python-delegate\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn explicit_python_delegate_bypasses_stale_rust_on_path() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let stale_dir = tempfile::tempdir().expect("stale Rust tempdir");
+    let python_dir = tempfile::tempdir().expect("Python tempdir");
+    let stale = stale_dir.path().join("gila");
+    std::fs::write(&stale, "#!/bin/sh\necho stale-rust >&2\nexit 99\n")
+        .expect("write stale stand-in");
+    let python = python_dir.path().join("gila");
+    std::fs::write(&python, "#!/bin/sh\necho exact-python\nexit 7\n")
+        .expect("write Python stand-in");
+    for path in [&stale, &python] {
+        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).unwrap();
+    }
+
+    gila()
+        .arg("delegated-command")
+        .env("PATH", stale_dir.path())
+        .env("GILABOT_BIN", &python)
+        .env_remove("GILA_DELEGATE_SKIP")
+        .assert()
+        .code(7)
+        .stdout("exact-python\n")
+        .stderr(predicate::str::contains("stale-rust").not());
+}
+
+#[test]
+fn explicit_python_delegate_rejects_current_rust_binary() {
+    let rust_gila = assert_cmd::cargo::cargo_bin("gila");
+    gila()
+        .arg("delegated-command")
+        .env("GILABOT_BIN", rust_gila)
+        .env_remove("GILA_DELEGATE_SKIP")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid GILABOT_BIN"));
 }
 
 #[test]
@@ -182,8 +298,8 @@ fn capabilities_run_engages_the_confined_path_when_the_manifest_marks_it() {
     // A manifest entry with `confined = true` routes `run` through the agent-bridle
     // confined spawn (caveats mint + ConfinedCommand) instead of the bare spawn.
     // The venv is bogus so the spawn fails fast — the point is to prove the
-    // *confined* code path executes, which surfaces a "confined spawn" error
-    // (or a fail-closed refusal on a kernel without Landlock — both wrapped here).
+    // *confined* code path executes, which announces the resolved sandbox
+    // (or fails closed on a host without an enforceable backend).
     let home = tempfile::tempdir().expect("tempdir");
     let gdir = home.path().join(".gila");
     std::fs::create_dir_all(&gdir).expect("mkdir .gila");
@@ -201,7 +317,10 @@ fn capabilities_run_engages_the_confined_path_when_the_manifest_marks_it() {
         .env_remove("VIRTUAL_ENV")
         .assert()
         .failure()
-        .stderr(predicate::str::contains("confined spawn"));
+        .stderr(
+            predicate::str::contains("demo:sometool running confined (sandbox:")
+                .or(predicate::str::contains("confined spawn of")),
+        );
 }
 
 #[cfg(unix)]

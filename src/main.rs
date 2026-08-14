@@ -57,10 +57,30 @@ fn set_brand_defaults() {
     set("NEWT_BRAND_TAGLINE", "the agent matrix");
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    // Agent Bridle's carried-coreutils shim may re-exec this same binary. Its
+    // dispatch must happen before clap, branding, or the async runtime.
+    if let Some(code) = newt_core::maybe_dispatch() {
+        std::process::exit(code);
+    }
+
     set_brand_defaults();
-    match Cli::parse().effective_command() {
+    let cli = Cli::parse();
+    let launch_posture = cli.command.as_ref().map_or_else(
+        || cli.launch_posture_for(&Command::Code { path: None }),
+        |command| cli.launch_posture_for(command),
+    );
+    let command = cli.effective_command();
+    launch_posture.apply_and_freeze();
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run(command))
+}
+
+async fn run(command: Command) -> anyhow::Result<()> {
+    match command {
         // Inherit: hand off to newt-agent's TUI directly. gilamonster's own
         // surfaces will wrap/extend this rather than reimplement it. `persona =
         // None` → newt's default persona; gila's personas land with the matrix
@@ -499,7 +519,10 @@ async fn main() -> anyhow::Result<()> {
 /// surface; the resolution + arg logic lives in [`gilamonster_agent::delegate`]
 /// and is unit-tested.
 fn run_delegate(args: &[std::ffi::OsString]) -> anyhow::Result<()> {
-    use gilamonster_agent::delegate::{delegate_args, path_dirs, resolve_gilabot};
+    use gilamonster_agent::delegate::{
+        delegate_args, explicit_gilabot, path_dirs, resolve_gilabot, GILABOT_BIN_ENV,
+        GILA_DELEGATE_SKIP,
+    };
 
     let cmd_name = args
         .first()
@@ -518,14 +541,26 @@ fn run_delegate(args: &[std::ffi::OsString]) -> anyhow::Result<()> {
     let path_var = std::env::var_os("PATH").unwrap_or_default();
     let dirs = path_dirs(&path_var);
     let own_exe = std::env::current_exe().ok();
+    let mut excluded = std::env::var_os(GILA_DELEGATE_SKIP)
+        .map(|paths| path_dirs(&paths))
+        .unwrap_or_default();
 
-    let gilabot = resolve_gilabot(&dirs, own_exe.as_ref()).ok_or_else(|| {
-        anyhow::anyhow!(
-            "`gila {cmd_name}` is not yet implemented in gilamonster-agent, and no \
-             Python gilabot (`gila`) was found on PATH to delegate to. Install \
-             gilabot or file an issue to port `{cmd_name}`."
+    let gilabot = if let Some(explicit) = std::env::var_os(GILABOT_BIN_ENV) {
+        explicit_gilabot(
+            std::path::PathBuf::from(explicit),
+            own_exe.as_ref(),
+            &excluded,
         )
-    })?;
+        .map_err(|error| anyhow::anyhow!("invalid {GILABOT_BIN_ENV}: {error}"))?
+    } else {
+        resolve_gilabot(&dirs, own_exe.as_ref(), &excluded).ok_or_else(|| {
+            anyhow::anyhow!(
+                "`gila {cmd_name}` is not yet implemented in gilamonster-agent, and no \
+                 Python gilabot (`gila`) was found on PATH to delegate to. Install \
+                 gilabot, set {GILABOT_BIN_ENV}, or file an issue to port `{cmd_name}`."
+            )
+        })?
+    };
 
     eprintln!(
         "gila: `{cmd_name}` is delegated to Python gilabot ({}) — not yet \
@@ -533,9 +568,16 @@ fn run_delegate(args: &[std::ffi::OsString]) -> anyhow::Result<()> {
         gilabot.display()
     );
 
-    let status = std::process::Command::new(gilabot)
-        .args(delegate_args(args))
-        .status()?;
+    if let Some(own_exe) = own_exe {
+        excluded.push(own_exe);
+    }
+    excluded.push(gilabot.clone());
+    let mut command = std::process::Command::new(gilabot);
+    command.args(delegate_args(args));
+    let skip = std::env::join_paths(excluded)
+        .map_err(|error| anyhow::anyhow!("cannot encode delegate recursion guard: {error}"))?;
+    command.env(GILA_DELEGATE_SKIP, skip);
+    let status = command.status()?;
     std::process::exit(status.code().unwrap_or(1));
 }
 
@@ -914,8 +956,10 @@ fn run_cowork(path: Option<std::path::PathBuf>) -> anyhow::Result<()> {
         )
     })?;
     let kind = backend.kind.unwrap_or(newt_core::BackendKind::Openai);
+    let caveats = gilamonster_agent::cowork::driver_caveats(&cfg, &workspace);
     let mut driver_config = TurnDriverConfig::new(&backend.endpoint, model, kind, workspace);
     driver_config.api_key = backend.resolve_api_key();
+    driver_config.caveats = caveats;
 
     // Seed the cowork framing so the agent knows it shares a screen with the
     // human's shell.

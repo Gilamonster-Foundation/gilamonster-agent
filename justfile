@@ -32,15 +32,22 @@ build:
 release:
     cargo build --release
 
-# Install the `gila` release binary to DEST (default: ~/bin).
+# Install `gila` and its Linux OCAP net guard to DEST (default: ~/bin).
 # Override: just install /usr/local/bin
 [unix]
 install dest=`echo $HOME/bin`:
-    cargo build --release --bin gila
+    cargo build --release --bin gila --bin newt-net-guard
     mkdir -p {{dest}}
+    # Remove first so an old symlink is never followed and a running macOS
+    # executable is replaced with a fresh inode rather than overwritten.
+    rm -f {{dest}}/gila
+    rm -f {{dest}}/newt-net-guard
     cp target/release/gila {{dest}}/gila
+    cp target/release/newt-net-guard {{dest}}/newt-net-guard
+    @if command -v codesign >/dev/null 2>&1; then codesign --force --sign - {{dest}}/gila >/dev/null; codesign --force --sign - {{dest}}/newt-net-guard >/dev/null; echo "re-signed ad-hoc (macOS AMFI)"; fi
     @echo "Installed: {{dest}}/gila"
-    @case ":$PATH:" in *":{{dest}}:"*) ;; *) echo "Note: {{dest}} is not in PATH — add:  export PATH={{dest}}:\$PATH" ;; esac
+    @echo "Installed: {{dest}}/newt-net-guard"
+    @found=$(command -v gila 2>/dev/null || true); if [ "$found" != "{{dest}}/gila" ]; then echo "WARNING: gila resolves to ${found:-<not found>}, not {{dest}}/gila."; echo "         Install into an earlier PATH directory or reorder PATH."; fi
 
 # Remove all Cargo build artefacts.
 clean:

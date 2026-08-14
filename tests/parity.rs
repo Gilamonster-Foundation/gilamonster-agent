@@ -58,8 +58,9 @@ struct Run {
     stderr: String,
 }
 
-fn run(bin: &Path, args: &[&str]) -> Run {
-    let out = Command::new(bin)
+fn run(bin: &Path, args: &[&str], delegate: Option<&Path>) -> Run {
+    let mut command = Command::new(bin);
+    command
         .args(args)
         // Isolate from the operator's real config/state so runs are
         // reproducible and side-effect-free.
@@ -67,6 +68,12 @@ fn run(bin: &Path, args: &[&str]) -> Run {
         .env_remove("VIRTUAL_ENV")
         .env_remove("GILA_CAP_VENV")
         .env_remove("GILA_CAP_PYTHON")
+        .env_remove("GILABOT_BIN")
+        .env_remove("GILA_DELEGATE_SKIP");
+    if let Some(delegate) = delegate {
+        command.env("GILABOT_BIN", delegate);
+    }
+    let out = command
         .output()
         .unwrap_or_else(|e| panic!("spawn {} {:?}: {}", bin.display(), args, e));
     Run {
@@ -76,11 +83,24 @@ fn run(bin: &Path, args: &[&str]) -> Run {
     }
 }
 
+/// Identify any installed Rust Gila, including a different build than the
+/// binary under test. The Rust-native `version` report has a stable marker the
+/// Python CLI does not implement; probing it also resolves pyenv shims that
+/// would otherwise bounce back to Rust after a local install.
+fn is_rust_gila(bin: &Path) -> bool {
+    Command::new(bin)
+        .arg("version")
+        .output()
+        .is_ok_and(|output| {
+            String::from_utf8_lossy(&output.stdout).contains("gila (gilamonster-agent)")
+        })
+}
+
 /// Resolve the Python reference CLI, or None when unavailable.
 fn python_gilabot() -> Option<PathBuf> {
     if let Ok(explicit) = std::env::var("GILABOT_BIN") {
         let p = PathBuf::from(explicit);
-        return p.exists().then_some(p);
+        return (p.exists() && !is_rust_gila(&p)).then_some(p);
     }
     // The Rust binary under test is typically *the* `gila` on PATH, so plain
     // `gila` is only accepted when it is NOT our own compiled binary.
@@ -88,10 +108,12 @@ fn python_gilabot() -> Option<PathBuf> {
         .canonicalize()
         .unwrap_or_else(|_| assert_cmd::cargo::cargo_bin("gila"));
     for name in ["gila-py", "gilabot", "gila"] {
-        if let Ok(paths) = which::which(name) {
-            let canon = paths.canonicalize().unwrap_or(paths);
-            if canon != own {
-                return Some(canon);
+        if let Ok(paths) = which::which_all(name) {
+            for path in paths {
+                let canon = path.canonicalize().unwrap_or(path);
+                if canon != own && !is_rust_gila(&canon) {
+                    return Some(canon);
+                }
             }
         }
     }
@@ -112,8 +134,8 @@ fn parity_suite_matches_python_reference() {
 
     let mut failures = Vec::new();
     for case in SAFE_CASES {
-        let py = run(&python, case.args);
-        let rs = run(&rust, case.args);
+        let py = run(&python, case.args, None);
+        let rs = run(&rust, case.args, Some(&python));
 
         if py.code != rs.code {
             failures.push(format!(
@@ -172,6 +194,11 @@ fn parity_resolver_does_not_self_match() {
         assert_ne!(
             found, own,
             "resolver picked the Rust binary under test as the Python reference"
+        );
+        assert!(
+            !is_rust_gila(&found),
+            "resolver picked another Rust Gila as the Python reference: {}",
+            found.display()
         );
     }
 }

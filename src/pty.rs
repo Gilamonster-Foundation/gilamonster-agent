@@ -71,6 +71,30 @@ pub const PTY_SOURCE_TAG: &str = "pty";
 /// The default shell when `$SHELL` is unset or empty.
 pub const DEFAULT_SHELL: &str = "/bin/bash";
 
+/// Newt control-plane variables removed from the human-owned PTY environment.
+pub const CHILD_STRIPPED_CONTROL_ENV: &[&str] = &[
+    "NEWT_DISABLE_OCAP",
+    "NEWT_FULL_ACCESS",
+    "NEWT_UNSAFE_HOST_EXEC",
+    "NEWT_BENCH_OCAP",
+    "NEWT_SHELL_ENGINE",
+    "NEWT_SHELL_ENV_PASSTHROUGH",
+    "NEWT_WRITE_PATHS",
+    "NEWT_READ_PATHS",
+    "NEWT_EXEC_PATHS",
+    "NEWT_VENV",
+    "NEWT_NO_ROUTE",
+    "NEWT_AGENT_KEY",
+    "NEWT_OPERATOR_KEY",
+    "NEWT_TOKEN_PASSPHRASE",
+];
+
+fn scrub_child_control_env(cmd: &mut portable_pty::CommandBuilder) {
+    for key in CHILD_STRIPPED_CONTROL_ENV {
+        cmd.env_remove(key);
+    }
+}
+
 /// Resolve the program to host in the shell pane: the human's `$SHELL`, falling
 /// back to [`DEFAULT_SHELL`] when it is unset or empty.
 ///
@@ -474,9 +498,11 @@ impl PtyShell {
     /// reader thread that mirrors its output into the shared screen.
     ///
     /// `cwd` is where the shell starts (the cowork workspace). The child inherits
-    /// the parent environment and gets `TERM=xterm-256color` so colour-aware
-    /// programs behave; the pty is given a controlling tty so job control and
-    /// full-screen programs (`vim`, `less`, `ssh`) work natively.
+    /// the ordinary parent environment, but Newt's authority controls and
+    /// harness-owned secrets are removed so nested agents must make a fresh
+    /// launch decision. It gets `TERM=xterm-256color` so colour-aware programs
+    /// behave; the pty is given a controlling tty so job control and full-screen
+    /// programs (`vim`, `less`, `ssh`) work natively.
     pub fn spawn(
         program: &str,
         size: PtySize,
@@ -486,6 +512,7 @@ impl PtyShell {
         let pair = pty_system.openpty(size)?;
 
         let mut cmd = portable_pty::CommandBuilder::new(program);
+        scrub_child_control_env(&mut cmd);
         cmd.env("TERM", "xterm-256color");
         if let Some(dir) = cwd {
             cmd.cwd(dir);
@@ -1069,5 +1096,37 @@ mod tests {
         // Dropping the shell must reap the child and join the reader without
         // hanging — no orphaned process.
         drop(shell);
+    }
+
+    #[test]
+    fn human_pty_strips_agent_authority_and_secrets() {
+        let mut command = portable_pty::CommandBuilder::new(DEFAULT_SHELL);
+        for key in [
+            "NEWT_DISABLE_OCAP",
+            "NEWT_FULL_ACCESS",
+            "NEWT_UNSAFE_HOST_EXEC",
+            "NEWT_SHELL_ENGINE",
+            "NEWT_SHELL_ENV_PASSTHROUGH",
+            "NEWT_NO_ROUTE",
+            "NEWT_AGENT_KEY",
+            "NEWT_OPERATOR_KEY",
+            "NEWT_TOKEN_PASSPHRASE",
+        ] {
+            command.env(key, "must-not-leak");
+            assert!(
+                CHILD_STRIPPED_CONTROL_ENV.contains(&key),
+                "missing child control-plane scrub for {key}"
+            );
+        }
+        command.env("PATH", "/operator/bin");
+        scrub_child_control_env(&mut command);
+        for key in CHILD_STRIPPED_CONTROL_ENV {
+            assert_eq!(command.get_env(key), None, "{key} survived child scrub");
+        }
+        assert!(!CHILD_STRIPPED_CONTROL_ENV.contains(&"PATH"));
+        assert_eq!(
+            command.get_env("PATH"),
+            Some(std::ffi::OsStr::new("/operator/bin"))
+        );
     }
 }
