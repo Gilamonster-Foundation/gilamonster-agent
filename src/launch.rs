@@ -81,6 +81,14 @@ impl LaunchPosture {
     /// This must run on the single-threaded startup path, before the Tokio
     /// runtime or any inherited newt component is initialized.
     pub fn apply_and_freeze(self) {
+        self.apply_and_freeze_with_config(None);
+    }
+
+    /// Applies this posture using one already-resolved configuration.
+    ///
+    /// Headless runs resolve their explicit profile before launch so shell
+    /// posture and inference cannot read different configurations.
+    pub fn apply_and_freeze_with_config(self, config: Option<&newt_core::Config>) {
         for edit in self.environment_edits() {
             match edit.value {
                 Some(value) => std::env::set_var(edit.key, value),
@@ -88,9 +96,12 @@ impl LaunchPosture {
             }
         }
 
-        let shell = newt_core::Config::resolve()
-            .ok()
-            .and_then(|config| config.shell);
+        let shell = match config {
+            Some(config) => config.shell.clone(),
+            None => newt_core::Config::resolve()
+                .ok()
+                .and_then(|config| config.shell),
+        };
         if let Some(engine) = shell_engine(self, shell.as_ref()) {
             std::env::set_var("NEWT_SHELL_ENGINE", engine.as_str());
         }

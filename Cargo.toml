@@ -14,9 +14,19 @@ description = "The Gilamonster agent matrix — inherits newt-agent's chat + age
 repository = "https://github.com/Gilamonster-Foundation/gilamonster-agent"
 keywords = ["gilamonster", "agent", "matrix", "ocap", "coding-agent"]
 
+[features]
+default = ["langchain", "native-git", "python-bridge"]
+langchain = ["dep:langchain-rust"]
+native-git = ["dep:git2"]
+python-bridge = ["dep:pyo3"]
+
 [[bin]]
 name = "gila"
 path = "src/main.rs"
+
+[[bin]]
+name = "gila-headless"
+path = "src/bin/gila-headless.rs"
 
 [[bin]]
 name = "newt-net-guard"
@@ -60,6 +70,7 @@ tokio = { version = "1", features = ["full"] }
 newt-mcp-client = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev = "8cde29f0b16cab9206fb76d94925b1ea49ee68bc" }
 # `gila capabilities check` builds tool-call arguments and reads MCP results.
 serde_json = "1"
+sha2 = "0.10"
 # The `~/.gila/capabilities.toml` selection manifest deserializes via serde
 # derive (see `src/manifest.rs`); `toml` (below) is the format.
 serde = { version = "1", features = ["derive"] }
@@ -105,14 +116,14 @@ vt100 = "0.15"
 # code). NOTE: upstream last published 2024-10 (4.6.0) — treat this as an
 # exploration surface, not a foundation; the seam is one module (`src/chain.rs`)
 # so it stays cheap to replace.
-langchain-rust = "4.6"
+langchain-rust = { version = "4.6", optional = true }
 # --- gila-parity Phase 1: Rust-native `gila git` ------------------------------
 # `git2` (libgit2) backs the Rust-native `gila git commit` — staging the index
 # and writing the commit object are pure-libgit2 operations with no subprocess.
 # Profile *steps* in `gila git tend` still shell out to the `git` CLI exactly
 # like the Python engine (git_service.py) does, so behavior matches gilabot
 # 1:1 rather than re-implementing fetch/pull/push semantics in libgit2.
-git2 = "0.20"
+git2 = { version = "0.20", optional = true }
 # `gila git tend` reads the operator's existing `git-tend.yaml` (the same file
 # Python gilabot's gila-plugin-git-tend parses) — serde_yaml deserializes it so
 # the Rust port is config-compatible with the deployed config on day one.
@@ -126,7 +137,7 @@ serde_yaml = "0.9"
 # boots the interpreter on first GIL acquisition. BUILD-TIME: set
 # PYO3_PYTHON=/Users/shartsock/venv/bin/python so pyo3 embeds the venv
 # interpreter (the default `python3` pyenv shim lacks the gila-plugin-* pkgs).
-pyo3 = { version = "0.22", features = ["auto-initialize"] }
+pyo3 = { version = "0.22", features = ["auto-initialize"], optional = true }
 
 [dev-dependencies]
 # CLI integration tests: run the real `gila` binary and assert on its output.
