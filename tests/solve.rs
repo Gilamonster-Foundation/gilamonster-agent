@@ -106,7 +106,7 @@ fn command(temp: &TempDir) -> Command {
     command
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_solve_emits_one_gila_contract() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -158,7 +158,7 @@ async fn native_solve_emits_one_gila_contract() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_solve_executes_a_workspace_write() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -201,7 +201,7 @@ async fn native_solve_executes_a_workspace_write() {
         .is_some_and(|events| events.iter().any(|event| event["tool"] == "write_file")));
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn model_mismatch_fails_before_inference_or_trace() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
