@@ -123,6 +123,12 @@ class InstallTests(unittest.IsolatedAsyncioTestCase):
             await agent.install(environment)
 
             self.assertEqual(agent.version(), VERSION)
+            self.assertEqual(
+                agent._adapter_sha256,
+                hashlib.sha256(
+                    Path(__file__).with_name("gila_agent.py").read_bytes()
+                ).hexdigest(),
+            )
             self.assertEqual(environment.upload_file.await_count, 3)
             root_commands = [
                 call.kwargs["command"] for call in agent.exec_as_root.await_args_list
@@ -131,6 +137,55 @@ class InstallTests(unittest.IsolatedAsyncioTestCase):
             agent.exec_as_agent.assert_awaited_once_with(
                 environment, command="/usr/local/bin/gila --version"
             )
+
+    async def test_run_records_loaded_adapter_digest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binary = root / "gila"
+            profile = root / "bench.toml"
+            binary.write_bytes(b"portable-gila")
+            profile.write_text("profile")
+            agent = GilaAgent(
+                logs_dir=root / "logs",
+                model_name=f"gila/{MODEL}",
+                extra_env={
+                    "GILA_BENCH_BIN": str(binary),
+                    "GILA_BENCH_PROFILE": str(profile),
+                    "GILA_BENCH_LANE": "yolo",
+                    "GILA_BENCH_MODEL_DIGESTS": json.dumps({MODEL: DIGEST}),
+                },
+            )
+            agent._installed_settings = agent._settings()
+            agent._version = VERSION
+            agent._binary_sha256 = hashlib.sha256(binary.read_bytes()).hexdigest()
+            agent._profile_sha256 = hashlib.sha256(profile.read_bytes()).hexdigest()
+            agent._adapter_sha256 = hashlib.sha256(
+                Path(__file__).with_name("gila_agent.py").read_bytes()
+            ).hexdigest()
+
+            async def download_trace(_remote_path, local_path):
+                Path(local_path).write_text(
+                    json.dumps(
+                        record(
+                            profile_sha256=agent._profile_sha256,
+                            timing={"gen_tokens": 7},
+                        )
+                    )
+                )
+
+            environment = SimpleNamespace(
+                upload_file=AsyncMock(),
+                download_file=AsyncMock(side_effect=download_trace),
+            )
+            agent.exec_as_agent = AsyncMock(return_value=SimpleNamespace(stdout=""))
+            context = AgentContext()
+
+            await agent.run("task", environment, context)
+
+            self.assertEqual(
+                context.metadata["gila_adapter_sha256"], agent._adapter_sha256
+            )
+            self.assertEqual(context.n_output_tokens, 7)
 
     async def test_run_rejects_missing_contract_after_process_failure(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -153,6 +208,9 @@ class InstallTests(unittest.IsolatedAsyncioTestCase):
             agent._version = VERSION
             agent._binary_sha256 = hashlib.sha256(binary.read_bytes()).hexdigest()
             agent._profile_sha256 = hashlib.sha256(profile.read_bytes()).hexdigest()
+            agent._adapter_sha256 = hashlib.sha256(
+                Path(__file__).with_name("gila_agent.py").read_bytes()
+            ).hexdigest()
             environment = SimpleNamespace(
                 upload_file=AsyncMock(),
                 download_file=AsyncMock(side_effect=FileNotFoundError("no trace")),

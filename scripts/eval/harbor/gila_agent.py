@@ -212,6 +212,7 @@ class GilaAgent(BaseInstalledAgent):
         settings, _, _ = self._preflight()
         binary_digest = _file_sha256(settings.binary)
         profile_digest = _file_sha256(settings.profile)
+        adapter_digest = _file_sha256(Path(__file__).resolve())
         await self.exec_as_root(environment, command="mkdir -p /etc/gila")
         await environment.upload_file(settings.binary, "/usr/local/bin/gila")
         await environment.upload_file(settings.profile, "/etc/gila/bench.toml")
@@ -257,6 +258,7 @@ class GilaAgent(BaseInstalledAgent):
         self._installed_settings = settings
         self._binary_sha256 = binary_digest
         self._profile_sha256 = profile_digest
+        self._adapter_sha256 = adapter_digest
 
     @override
     @with_prompt_template
@@ -269,6 +271,8 @@ class GilaAgent(BaseInstalledAgent):
         settings, model, digest = self._preflight()
         if getattr(self, "_installed_settings", None) != settings:
             raise RuntimeError("Gila benchmark settings changed after installation")
+        if _file_sha256(Path(__file__).resolve()) != self._adapter_sha256:
+            raise RuntimeError("Gila Harbor adapter changed after installation")
         agent_version = self.version()
         if agent_version is None:
             raise RuntimeError("Gila build identity was not established during installation")
@@ -358,6 +362,7 @@ class GilaAgent(BaseInstalledAgent):
             context.n_output_tokens = timing["gen_tokens"]
         context.metadata = {
             "gila_contract": record,
+            "gila_adapter_sha256": self._adapter_sha256,
             "gila_binary_sha256": self._binary_sha256,
             "gila_profile_sha256": self._profile_sha256,
         }
