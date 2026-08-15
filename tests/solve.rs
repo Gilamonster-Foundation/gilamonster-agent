@@ -99,10 +99,26 @@ fn fixture(server: &MockServer) -> (TempDir, Vec<String>) {
 
 fn command(temp: &TempDir) -> Command {
     let mut command = Command::cargo_bin("gila-headless").expect("headless binary");
-    command.env_clear().env("HOME", temp.path()).env(
+    #[cfg(not(windows))]
+    command.env_clear();
+    #[cfg(windows)]
+    for key in [
         "GILA_CAPABILITIES_MANIFEST",
-        temp.path().join("capabilities.toml"),
-    );
+        "NEWT_PROVIDER",
+        "NEWT_SELF_VERIFY",
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+    ] {
+        command.env_remove(key);
+    }
+    command
+        .env("HOME", temp.path())
+        .env("NO_PROXY", "127.0.0.1,localhost")
+        .env("no_proxy", "127.0.0.1,localhost")
+        .env(
+            "GILA_CAPABILITIES_MANIFEST",
+            temp.path().join("capabilities.toml"),
+        );
     command
 }
 
