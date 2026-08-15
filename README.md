@@ -4,115 +4,92 @@
 
 # gilamonster-agent
 
-**The full-ambient Gilamonster agent matrix.** It *inherits*
-[newt-agent](https://github.com/Gilamonster-Foundation/newt-agent)'s airframe —
-chat, agentic coding, identity, tools, and optional object-capability
-confinement — and *extends* it into a Hermes/Thoon-style multi-agent matrix.
+> Experimental Rust agent cockpit built on [newt-agent](https://github.com/Gilamonster-Foundation/newt-agent).
 
-> newt is the cell; gilamonster-agent is the organism. The extension point is a
-> **separate binary**, not a plugin slot — which is why newt stays *opinionated,
-> not extensible*.
+`gila` embeds pinned Newt crates; it is not a Newt plugin. It adds a
+human-owned PTY, read-only observation, capability packages, and
+`cockpit`/FleetView previews. `gila` starts its coder with host filesystem,
+network, and command authority. `--ocap` uses Newt's configured OCAP posture.
+`cowork`, `follow`, `hotseat`, and companion panes do not inherit the ambient
+default. See the
+[authority policy](docs/decisions/ambient_native_shell_default.md).
 
-## Status: v0.4 development — ambient-first on the newt 0.8 airframe
+## Terminal-Bench
 
-This is the v0.1 structure, and **it builds today.** gila is a **private
-binary**, not a published library, so it consumes newt over a **git
-dependency** pinned to a `newt-agent` `main` rev — *not* a crates.io version
-dep. A binary never needs crates.io, so the git-dep is the correct *permanent*
-shape, not a stopgap. (agent-bridle resolves from crates.io — 0.7.x, published
-— so the old stub-shell `[patch.crates-io]` mirror is gone on both sides; see
-newt-agent's `docs/decisions/agent_bridle_publishing.md` for the history.)
+No `gila` result is published in
+[`gilamonster-bench@44f49eb`](https://github.com/Gilamonster-Foundation/gilamonster-bench/tree/44f49eb504db05ca234b91e1595f175b528a0686).
+The table reproduces the
+[`newt-agent@5ddc969`](https://github.com/Gilamonster-Foundation/newt-agent/blob/5ddc9693aff8d0230d70bfbebdacbedf772eb423/README.md#terminal-bench)
+scoreboard; these are Newt results.
 
-```bash
-gila                 # full ambient authority + native host command execution
-gila code ./project  # the same coder, rooted at a project
-gila --ocap          # opt into newt's configured OCAP confinement
-gila matrix          # the extension layer / fleet surface
-```
+_Best recorded Newt run per model and lane. Measured rows use
+[Terminal-Bench](https://github.com/harbor-framework/terminal-bench) `tb-30` at
+context 65,536. OCAP off/on means unconfined/confined. Metadata is shown per
+lane because the two maxima may come from different releases._
 
-`gila code` hands off to `newt_tui::run_code`. Gila deliberately inverts
-newt's launch default: newt remains confined, while Gila's coder starts with
-full filesystem, network, and execution authority and uses the native host
-command path. Common shell reads are not rewritten to built-ins. The global
-`--ocap` flag removes inherited widening switches and restores the configured
-newt confinement posture for that invocation.
+| Model | OCAP off | OCAP on |
+|-------|----------|---------|
+| `deepseek-v4-pro`<br><sub>deepseek</sub> | 56.7% (17/30)<br><sub>v0.8.0 · 2026-08-06</sub> | 50.0% (15/30)<br><sub>v0.8.0 · 2026-08-06</sub> |
+| `nemotron-3-super`<br><sub>nemotron</sub> | 36.7% (11/30)<br><sub>v0.8.0 · 2026-08-05</sub> | 26.7% (8/30)<br><sub>v0.8.0 · 2026-08-05</sub> |
+| `ornith-1.0-35b-q8`<br><sub>ornith</sub> | _pending_ | 36.7% (11/30)<br><sub>v0.7.6 · 2026-07-29</sub> |
+| `qwen3.6_35b`<br><sub>qwen</sub> | 20.0% (6/30)<br><sub>v0.7.5 · 2026-07-28</sub> | 26.7% (8/30)<br><sub>v0.7.6 · 2026-07-29</sub> |
+| `o4-mini`<br><sub>openai</sub> | 13.3% (4/30)<br><sub>v0.8.0 · 2026-08-05</sub> | 16.7% (5/30)<br><sub>v0.8.0 · 2026-08-05</sub> |
+| `qwen3-coder_30b`<br><sub>qwen</sub> | 10.0% (3/30)<br><sub>v0.7.5 · 2026-07-28</sub> | 13.3% (4/30)<br><sub>v0.7.6 · 2026-07-29</sub> |
+| `gpt-oss_120b`<br><sub>openai</sub> | 10.0% (3/30)<br><sub>v0.8.0 · 2026-08-05</sub> | 10.0% (3/30)<br><sub>v0.8.0 · 2026-08-05</sub> |
+| `kimi-linear_48b`<br><sub>kimi</sub> | _pending_ | 10.0% (3/30)<br><sub>v0.7.6 · 2026-07-31</sub> |
+| `nemotron-3-nano_30b`<br><sub>nemotron</sub> | 6.7% (2/30)<br><sub>v0.7.5 · 2026-07-29</sub> | _pending_ |
+| `glm-4.7-flash`<br><sub>glm</sub> | _pending_ | 3.3% (1/30)<br><sub>v0.7.6 · 2026-07-31</sub> |
+| `gpt-4.1-mini`<br><sub>openai</sub> | 0.0% (0/30)<br><sub>v0.8.0 · 2026-08-05</sub> | 3.3% (1/30)<br><sub>v0.8.0 · 2026-08-05</sub> |
+| `kimi-k2.7-code`<br><sub>kimi</sub> | _queued_ | _queued_ |
+| `nemotron-3-ultra`<br><sub>nemotron</sub> | _queued_ | _queued_ |
+| `ornith-1.0-397b-iq1_m`<br><sub>ornith</sub> | _queued_ | _queued_ |
 
-Cowork, observer, and triage surfaces (`cowork`, `follow`, `hotseat`, and
-companion/cockpit panes) remain confined. Cowork's human-owned PTY keeps the
-ordinary user environment but strips Newt authority controls and secrets so a
-nested agent must make a fresh launch decision. Agent-facing MCP capabilities
-remain opt-in; ambient shell authority does not auto-mount them. See the
-[ambient-first decision and rollout plan](docs/decisions/ambient_native_shell_default.md).
+[Score records](https://github.com/Gilamonster-Foundation/newt-agent/blob/5ddc9693aff8d0230d70bfbebdacbedf772eb423/scripts/eval/bench-results.jsonl)
+and [July survey notes](https://github.com/Gilamonster-Foundation/newt-agent/blob/5ddc9693aff8d0230d70bfbebdacbedf772eb423/docs/findings/2026-07-29-dgx-spark-terminal-bench-survey.md)
+are pinned to the same Newt revision.
 
-## Build
+## Install
 
-```bash
-cargo build          # resolves the pinned newt git rev
-just check           # the gate: fmt + clippy -D warnings + test
-just cov-ci          # coverage gate (>= 80% line floor, inherited from newt)
-just install         # gila + OCAP net guard -> ~/bin (or another PATH dir)
-just install-hooks   # wire .githooks/pre-push (runs the gate before every push)
-```
-
-### Local dev against an in-flight newt checkout (the overlay)
-
-CI builds against the pinned `rev` in `Cargo.toml`. To iterate against a local
-`newt-agent` working tree instead, use the **git-ignored** `.cargo/config.toml`
-overlay — it `[patch]`-overrides the `newt-*` crates onto local paths:
+Builds require Rust 1.88+ and Python 3. The Unix recipe also requires
+[`just`](https://github.com/casey/just).
 
 ```bash
-just overlay-on      # cp .cargo/config.toml.template -> .cargo/config.toml
-# edit the paths in .cargo/config.toml if your newt-agent lives elsewhere
-cargo build          # now builds against the local newt tree
-just overlay-off     # drop the overlay; back to the pinned git rev (CI-equivalent)
+git clone https://github.com/Gilamonster-Foundation/gilamonster-agent
+cd gilamonster-agent
+PYO3_PYTHON="$(command -v python3)" just install "$HOME/.local/bin"
+export PATH="$HOME/.local/bin:$PATH"
+gila --help
 ```
 
-`.cargo/config.toml` is in `.gitignore` and can never be committed, so CI is
-always reproducible from the pinned rev. Bump the rev in `Cargo.toml` to adopt
-a newer newt; keep gila's `agent-bridle-core` version line on the same 0.x
-line newt-core resolves, so the two halves agree on the gate types.
+On Windows, set `PYO3_PYTHON` to `python.exe` and run `cargo install --path .`.
 
-## What's inherited (the `newt-*` crates, over git-dep)
+## Use
 
-- `newt-tui` — the chat + agentic-coding TUI (and, transitively, `newt-core`,
-  `newt-inference`, `newt-tools`, `newt-skills`, `newt-mcp-client`).
-- `newt-identity` — the per-user `UserKey` → session `AgentKey` → attenuated
-  operating-key chain. The whole matrix runs under one capability model.
+```bash
+gila                       # ambient coder in the current directory
+gila code ./project        # ambient coder in a project
+gila --ocap code ./project # Newt's configured OCAP posture
+gila cowork ./project      # agent chat above a PTY shell
+gila follow session.log    # read-only shell observer
+gila cap --help            # optional capability packages
+gila cockpit               # multiplexer preview
+gila matrix --mock         # FleetView preview
+```
 
-## What gets extended (the matrix — not yet built)
+See `gila --help` for all commands.
 
-- Many newt airframes composed over the **agent-mesh** airspace.
-- **drake** lifecycle + orchestration.
-- The rich settings / dashboard surfaces (ported from newt's git history, where
-  the settings TUI was deliberately removed to keep newt lean).
+## Develop
 
-## The split, recorded
+```bash
+cargo build
+just check                 # format, clippy, tests
+just cov-ci                # coverage gate
+just install-hooks
+```
 
-newt-agent is deliberately scoped to chat + agentic coding (Codex/Claude-Code
-spirit, lean). **Additional features go here.** See `newt-agent#89`.
-
-## Contributing
-
-This project follows the Gilamonster
-[Centaur Developer](https://github.com/Gilamonster-Foundation/agents) style:
-human/agent teams contributing as a single unit, with a human always in the
-loop and agent contributions credited in the git record.
-
-- Rules template: [`rules/AGENTS.md`](https://github.com/Gilamonster-Foundation/agents/blob/main/rules/AGENTS.md)
-- Skills: [`rust-tdd`](https://github.com/Gilamonster-Foundation/agents/blob/main/skills/rust-tdd/SKILL.md),
-  [`pyo3-wrapping`](https://github.com/Gilamonster-Foundation/agents/blob/main/skills/pyo3-wrapping/SKILL.md)
-
-## Logos
-
-Meet **Gilly**, the Gilamonster mascot — mirrored here from the
-[agents](https://github.com/Gilamonster-Foundation/agents) repository at
-standard sizes under `docs/logos/` (`gilly-16.png` … `gilly-512.png`).
+For local Newt changes, run `just overlay-on`, edit the generated
+`.cargo/config.toml`, then run `just overlay-off` to restore the pinned build.
 
 ## License
 
-Apache-2.0.
-
----
-
-<!-- markdownlint-disable-next-line MD013 -->
-Model: OpenAI GPT-5 | Harness: Codex | Operator: Shawn Hartsock | Time: 19:34 EDT | Date: 2026-08-13
+[Apache-2.0](LICENSE).
