@@ -24,7 +24,7 @@ use gilamonster_agent::follow::{
 };
 use gilamonster_agent::hotseat::{compose_hotseat_config, hotseat_notice, triage_skill_name};
 use gilamonster_agent::{
-    capabilities, code_path, follow_no_target_report, follow_target, matrix_report,
+    capabilities, code_path, follow_no_target_report, follow_target, matrix_report, solve,
     CapabilitiesCmd, Cli, Command,
 };
 use newt_core::agentic::{TurnDriver, TurnDriverConfig};
@@ -71,21 +71,59 @@ fn main() -> anyhow::Result<()> {
         |command| cli.launch_posture_for(command),
     );
     let command = cli.effective_command();
-    launch_posture.apply_and_freeze();
+    let prepared_solve = match &command {
+        Command::Solve { config, .. } => Some(solve::prepare(config)?),
+        _ => None,
+    };
+    launch_posture
+        .apply_and_freeze_with_config(prepared_solve.as_ref().map(solve::PreparedSolve::config));
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(run(command))
+        .block_on(run(command, prepared_solve))
 }
 
-async fn run(command: Command) -> anyhow::Result<()> {
+async fn run(command: Command, prepared_solve: Option<solve::PreparedSolve>) -> anyhow::Result<()> {
     match command {
         // Inherit: hand off to newt-agent's TUI directly. gilamonster's own
         // surfaces will wrap/extend this rather than reimplement it. `persona =
         // None` → newt's default persona; gila's personas land with the matrix
         // layer (#8-#11).
         Command::Code { path } => run_code_with_caps(path),
+        Command::Solve {
+            cwd,
+            instruction_file,
+            config: _,
+            model,
+            unsafe_host_exec,
+            events,
+            max_rounds,
+            context_window,
+            model_digest,
+        } => {
+            let prepared = prepared_solve
+                .ok_or_else(|| anyhow::anyhow!("solve configuration was not prepared"))?;
+            let clean = solve::run(
+                prepared,
+                solve::SolveArgs {
+                    cwd,
+                    instruction_file,
+                    model,
+                    unsafe_host_exec,
+                    events,
+                    max_rounds,
+                    context_window,
+                    model_digest,
+                },
+            )
+            .await?;
+            if clean {
+                Ok(())
+            } else {
+                anyhow::bail!("Gila solve did not complete cleanly")
+            }
+        }
         // Read-only "follow me": tail the human's `script -F` typescript, feed
         // each burst of shell activity into the shared observation channel, and
         // let the agent comment. The agent NEVER drives the human's shell.
@@ -132,7 +170,10 @@ async fn run(command: Command) -> anyhow::Result<()> {
         // configured newt backend. All logic is in `chain.rs` (unit + mocked
         // end-to-end tests); this arm owns only the config resolve + print,
         // the same by-design-uncovered carve-out as the other run_* arms.
+        #[cfg(feature = "langchain")]
         Command::Chain { question } => run_chain(question).await,
+        #[cfg(not(feature = "langchain"))]
+        Command::Chain { .. } => anyhow::bail!("gila was built without the langchain feature"),
         // Scrybe: a live Markdown session against a scrybe MCP peer — gila is
         // the client, scrybe owns the doc, edits flow both ways (see `scrybe`
         // and docs/design/scrybe-markdown-surface.md). Phase 1 prints the
@@ -143,7 +184,10 @@ async fn run(command: Command) -> anyhow::Result<()> {
         // Rust-native git (Phase 1 of the parity plan): commit via libgit2,
         // tend via profile steps that shell out to the git CLI (matching the
         // Python engine 1:1). Graduated out of the shell-delegate fallback.
+        #[cfg(feature = "native-git")]
         Command::Git { cmd } => run_git(cmd),
+        #[cfg(not(feature = "native-git"))]
+        Command::Git { .. } => anyhow::bail!("gila was built without the native-git feature"),
         // Phase 3 Rust-native commands (batch 1): version/daily/ideas/todos/
         // projects/board/cache. Logic lives in the `gila_*` lib modules
         // (unit-tested); these arms own only HOME resolution + file effect.
@@ -342,6 +386,7 @@ async fn run(command: Command) -> anyhow::Result<()> {
             println!("{}", p.display());
             Ok(())
         }
+        #[cfg(feature = "native-git")]
         Command::Checkpoint { cmd } => {
             let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
             let dir = gilamonster_agent::gila_checkpoint::checkpoints_dir(home.as_deref())?;
@@ -398,11 +443,20 @@ async fn run(command: Command) -> anyhow::Result<()> {
             }
             Ok(())
         }
+        #[cfg(not(feature = "native-git"))]
+        Command::Checkpoint { .. } => {
+            anyhow::bail!("gila was built without the native-git feature")
+        }
+        #[cfg(feature = "native-git")]
         Command::Insights { path, max } => {
             let path = path.unwrap_or_else(|| std::path::PathBuf::from("."));
             let ins = gilamonster_agent::gila_insights::repo_insights(&path, max)?;
             print!("{}", gilamonster_agent::gila_insights::render(&ins));
             Ok(())
+        }
+        #[cfg(not(feature = "native-git"))]
+        Command::Insights { .. } => {
+            anyhow::bail!("gila was built without the native-git feature")
         }
         Command::Dev => {
             let path_var = std::env::var_os("PATH").unwrap_or_default();
@@ -420,6 +474,7 @@ async fn run(command: Command) -> anyhow::Result<()> {
             );
             Ok(())
         }
+        #[cfg(feature = "native-git")]
         Command::Log { cmd } => {
             let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
             match cmd {
@@ -460,6 +515,8 @@ async fn run(command: Command) -> anyhow::Result<()> {
             }
             Ok(())
         }
+        #[cfg(not(feature = "native-git"))]
+        Command::Log { .. } => anyhow::bail!("gila was built without the native-git feature"),
         Command::Worktree { cmd } => {
             let cwd = std::path::PathBuf::from(".");
             match cmd {
@@ -533,9 +590,12 @@ fn run_delegate(args: &[std::ffi::OsString]) -> anyhow::Result<()> {
     // via pyo3 (no subprocess startup cost). Everything else falls through to
     // the shell-delegate subprocess below. If the in-process import fails (venv
     // not embedded), surface the error — don't silently double-fallback.
-    if gilamonster_agent::python_bridge::is_pyo3_routed(&cmd_name) {
-        let code = gilamonster_agent::python_bridge::run_python_command(&cmd_name, &args[1..])?;
-        std::process::exit(code);
+    #[cfg(feature = "python-bridge")]
+    {
+        if gilamonster_agent::python_bridge::is_pyo3_routed(&cmd_name) {
+            let code = gilamonster_agent::python_bridge::run_python_command(&cmd_name, &args[1..])?;
+            std::process::exit(code);
+        }
     }
 
     let path_var = std::env::var_os("PATH").unwrap_or_default();
@@ -597,6 +657,7 @@ fn today() -> String {
 /// `gila git …` — the Rust-native Phase-1 slice (commit via libgit2, tend via
 /// git-CLI profile steps). The lib-side logic is unit-tested in
 /// [`gilamonster_agent::gila_git`]; this arm owns only argv → effect.
+#[cfg(feature = "native-git")]
 fn run_git(cmd: gilamonster_agent::GitCmd) -> anyhow::Result<()> {
     use gilamonster_agent::gila_git;
     use gilamonster_agent::GitCmd;
@@ -655,6 +716,7 @@ fn run_git(cmd: gilamonster_agent::GitCmd) -> anyhow::Result<()> {
 /// `gila follow` / `gila cowork` use), maps it through
 /// [`chain::settings_from_backend`](gilamonster_agent::chain::settings_from_backend)
 /// (fail-loud on an unset model), and prints the chain's reply.
+#[cfg(feature = "langchain")]
 async fn run_chain(question: Vec<String>) -> anyhow::Result<()> {
     use gilamonster_agent::chain::{ask, settings_from_backend};
     let cfg = newt_core::Config::resolve()?;

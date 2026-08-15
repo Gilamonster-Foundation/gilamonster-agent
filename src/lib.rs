@@ -28,6 +28,7 @@ use clap::{Parser, Subcommand};
 pub mod authority;
 pub mod build_info;
 pub mod capabilities;
+#[cfg(feature = "langchain")]
 pub mod chain;
 pub mod cockpit;
 pub mod cowork;
@@ -36,15 +37,19 @@ pub mod fleet;
 pub mod follow;
 pub mod gila_board;
 pub mod gila_cache;
+#[cfg(feature = "native-git")]
 pub mod gila_checkpoint;
 pub mod gila_commit_msg;
 pub mod gila_completion;
 pub mod gila_daily;
 pub mod gila_dev;
+#[cfg(feature = "native-git")]
 pub mod gila_git;
 pub mod gila_ideas;
 pub mod gila_init;
+#[cfg(feature = "native-git")]
 pub mod gila_insights;
+#[cfg(feature = "native-git")]
 pub mod gila_log;
 pub mod gila_logs;
 pub mod gila_meeting;
@@ -62,8 +67,11 @@ pub mod launch;
 pub mod layout;
 pub mod manifest;
 pub mod pty;
+#[cfg(feature = "python-bridge")]
 pub mod python_bridge;
 pub mod scrybe;
+pub mod solve;
+pub mod solve_contract;
 pub mod venv;
 
 /// The `gila` command-line surface. Parsed in `main`, re-exported here so the
@@ -93,6 +101,37 @@ pub enum Command {
     Code {
         /// Optional working path.
         path: Option<PathBuf>,
+    },
+    /// Solve one task headlessly for an external evaluator.
+    Solve {
+        /// Workspace directory the agent may change.
+        #[arg(long, value_name = "DIR")]
+        cwd: PathBuf,
+        /// File containing the task instruction.
+        #[arg(long, value_name = "FILE")]
+        instruction_file: PathBuf,
+        /// Exact backend profile used for this run.
+        #[arg(long, value_name = "FILE")]
+        config: PathBuf,
+        /// Exact served model ID. It must match the profile.
+        #[arg(long)]
+        model: String,
+        /// Permit unconfined host command execution. Required because headless
+        /// execution has no operator prompt.
+        #[arg(long, required = true)]
+        unsafe_host_exec: bool,
+        /// Append the JSONL trace and Gila contract here.
+        #[arg(long, value_name = "FILE")]
+        events: Option<PathBuf>,
+        /// Maximum tool-call rounds.
+        #[arg(long, value_name = "N")]
+        max_rounds: Option<usize>,
+        /// Full context window served by the backend.
+        #[arg(long, value_name = "N")]
+        context_window: Option<u32>,
+        /// SHA-256 digest of the served model weights.
+        #[arg(long, value_name = "SHA256")]
+        model_digest: Option<String>,
     },
     /// Read-only "follow me": watch the human's own shell (a `script -F`
     /// typescript) and let the agent comment, never driving the shell.
@@ -531,7 +570,14 @@ impl Command {
     /// utility/delegate commands have no reason to inherit agent authority.
     #[must_use]
     pub fn permits_ambient_agent(&self) -> bool {
-        matches!(self, Self::Code { .. })
+        matches!(
+            self,
+            Self::Code { .. }
+                | Self::Solve {
+                    unsafe_host_exec: true,
+                    ..
+                }
+        )
     }
 }
 
@@ -694,6 +740,57 @@ mod tests {
     fn code_subcommand_without_path_parses() {
         let cli = Cli::parse_from(["gila", "code"]);
         assert_eq!(cli.effective_command(), Command::Code { path: None });
+    }
+
+    #[test]
+    fn solve_requires_an_explicit_ambient_grant() {
+        let base = [
+            "gila",
+            "solve",
+            "--cwd",
+            "/app",
+            "--instruction-file",
+            "/tmp/task.md",
+            "--config",
+            "/tmp/bench.toml",
+            "--model",
+            "qwen3.6_35b",
+        ];
+        assert!(Cli::try_parse_from(base).is_err());
+
+        let cli = Cli::try_parse_from(base.into_iter().chain([
+            "--unsafe-host-exec",
+            "--context-window",
+            "65536",
+        ]))
+        .expect("explicit unsafe grant");
+        let command = cli.command.as_ref().expect("solve command");
+        assert!(command.permits_ambient_agent());
+        assert_eq!(
+            cli.launch_posture_for(command),
+            launch::LaunchPosture::Ambient
+        );
+    }
+
+    #[test]
+    fn global_ocap_attenuates_solve_before_launch() {
+        let cli = Cli::try_parse_from([
+            "gila",
+            "--ocap",
+            "solve",
+            "--cwd",
+            "/app",
+            "--instruction-file",
+            "/tmp/task.md",
+            "--config",
+            "/tmp/bench.toml",
+            "--model",
+            "qwen3.6_35b",
+            "--unsafe-host-exec",
+        ])
+        .expect("the global clamp remains available");
+        let command = cli.command.as_ref().expect("solve command");
+        assert_eq!(cli.launch_posture_for(command), launch::LaunchPosture::Ocap);
     }
 
     #[test]
