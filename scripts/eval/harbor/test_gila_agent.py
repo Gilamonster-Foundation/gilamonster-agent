@@ -9,7 +9,6 @@ from unittest.mock import AsyncMock
 from gila_agent import GilaAgent, _contract
 from harbor.models.agent.context import AgentContext
 
-
 MODEL = "qwen3.6_35b"
 DIGEST = "a" * 64
 VERSION = "0.4.0 (123456789abc)"
@@ -52,37 +51,108 @@ def record(**overrides):
     return value
 
 
-def parse(trace):
+def solve_result(workdir="/app"):
+    return {"kind": "solve_result", "cwd": workdir}
+
+
+def trace(*records):
+    return "\n".join(json.dumps(value) for value in records) + "\n"
+
+
+def parse(value, workdir="/app"):
     return _contract(
-        trace,
+        value,
         MODEL,
         DIGEST,
         agent_version=VERSION,
         profile_sha256=PROFILE_SHA256,
         context_window=65536,
         max_rounds=40,
+        workdir=workdir,
     )
+
+
+def agent_fixture(root):
+    binary = root / "gila"
+    profile = root / "bench.toml"
+    binary.write_bytes(b"portable-gila")
+    profile.write_text("profile")
+    return GilaAgent(
+        logs_dir=root / "logs",
+        model_name=f"gila/{MODEL}",
+        extra_env={
+            "GILA_BENCH_BIN": str(binary),
+            "GILA_BENCH_PROFILE": str(profile),
+            "GILA_BENCH_LANE": "yolo",
+            "GILA_BENCH_MODEL_DIGESTS": json.dumps({MODEL: DIGEST}),
+        },
+    )
+
+
+class FakeEnvironment:
+    def __init__(self, binary_sha256, workdir_output):
+        self.default_user = "bench"
+        self.binary_sha256 = binary_sha256
+        self.workdir_output = workdir_output
+        self.exec_calls = []
+        self.uploads = []
+        self.trace = ""
+
+    async def exec(
+        self,
+        command,
+        cwd=None,
+        env=None,
+        timeout_sec=None,
+        user=None,
+    ):
+        self.exec_calls.append(
+            SimpleNamespace(
+                command=command,
+                cwd=cwd,
+                env=env,
+                timeout_sec=timeout_sec,
+                user=user,
+            )
+        )
+        stdout = ""
+        if "sha256sum /usr/local/bin/gila" in command:
+            stdout = f"{self.binary_sha256}  /usr/local/bin/gila\n"
+        elif command.endswith("/usr/local/bin/gila --version"):
+            stdout = f"gila {VERSION}\n"
+        elif command.endswith("pwd -P"):
+            stdout = self.workdir_output
+        return SimpleNamespace(return_code=0, stdout=stdout, stderr="")
+
+    async def upload_file(self, source_path, target_path):
+        self.uploads.append((Path(source_path), target_path))
+
+    async def download_file(self, _source_path, target_path):
+        Path(target_path).write_text(self.trace)
 
 
 class ContractTests(unittest.TestCase):
     def test_accepts_one_native_gila_contract(self):
         value = record()
-        self.assertEqual(parse(json.dumps(value)), value)
+        self.assertEqual(parse(trace(solve_result(), value)), value)
 
     def test_rejects_relabelled_newt_contract(self):
         with self.assertRaisesRegex(RuntimeError, "agent"):
-            parse(json.dumps(record(agent="newt-agent")))
+            parse(trace(solve_result(), record(agent="newt-agent")))
 
     def test_rejects_configuration_drift(self):
         drifted = record()
         drifted["effective_config"]["max_rounds"] = 39
         with self.assertRaisesRegex(RuntimeError, "max_rounds"):
-            parse(json.dumps(drifted))
+            parse(trace(solve_result(), drifted))
 
     def test_rejects_ambiguous_trace(self):
-        line = json.dumps(record())
         with self.assertRaisesRegex(RuntimeError, "2 contract records"):
-            parse(f"{line}\n{line}\n")
+            parse(trace(solve_result(), record(), record()))
+
+    def test_rejects_solve_result_workdir_drift(self):
+        with self.assertRaisesRegex(RuntimeError, "solve_result cwd"):
+            parse(trace(solve_result("/workspace"), record()), workdir="/app")
 
 
 class InstallTests(unittest.IsolatedAsyncioTestCase):
@@ -116,9 +186,16 @@ class InstallTests(unittest.IsolatedAsyncioTestCase):
                 return SimpleNamespace(stdout=stdout)
 
             agent.exec_as_root = AsyncMock(side_effect=root_exec)
-            agent.exec_as_agent = AsyncMock(
-                return_value=SimpleNamespace(stdout=f"gila {VERSION}\n")
-            )
+
+            async def agent_exec(*_args, **kwargs):
+                command = kwargs["command"] if "command" in kwargs else _args[1]
+                if command == "/usr/local/bin/gila --version":
+                    return SimpleNamespace(stdout=f"gila {VERSION}\n")
+                if command == "pwd -P":
+                    return SimpleNamespace(stdout="/app\n")
+                raise AssertionError(f"unexpected agent command: {command}")
+
+            agent.exec_as_agent = AsyncMock(side_effect=agent_exec)
 
             await agent.install(environment)
 
@@ -129,14 +206,18 @@ class InstallTests(unittest.IsolatedAsyncioTestCase):
                     Path(__file__).with_name("gila_agent.py").read_bytes()
                 ).hexdigest(),
             )
+            self.assertEqual(agent._workdir, "/app")
             self.assertEqual(environment.upload_file.await_count, 3)
             root_commands = [
                 call.kwargs["command"] for call in agent.exec_as_root.await_args_list
             ]
-            self.assertTrue(any(command.startswith("chown bench ") for command in root_commands))
-            agent.exec_as_agent.assert_awaited_once_with(
+            self.assertTrue(
+                any(command.startswith("chown bench ") for command in root_commands)
+            )
+            agent.exec_as_agent.assert_any_await(
                 environment, command="/usr/local/bin/gila --version"
             )
+            agent.exec_as_agent.assert_any_await(environment, "pwd -P")
 
     async def test_run_records_loaded_adapter_digest(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -162,14 +243,16 @@ class InstallTests(unittest.IsolatedAsyncioTestCase):
             agent._adapter_sha256 = hashlib.sha256(
                 Path(__file__).with_name("gila_agent.py").read_bytes()
             ).hexdigest()
+            agent._workdir = "/workspace"
 
             async def download_trace(_remote_path, local_path):
                 Path(local_path).write_text(
-                    json.dumps(
+                    trace(
+                        solve_result("/workspace"),
                         record(
                             profile_sha256=agent._profile_sha256,
                             timing={"gen_tokens": 7},
-                        )
+                        ),
                     )
                 )
 
@@ -184,6 +267,11 @@ class InstallTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(
                 context.metadata["gila_adapter_sha256"], agent._adapter_sha256
+            )
+            self.assertEqual(context.metadata["gila_workdir"], "/workspace")
+            self.assertEqual(agent.exec_as_agent.await_args.kwargs["cwd"], "/workspace")
+            self.assertIn(
+                "--cwd /workspace", agent.exec_as_agent.await_args.kwargs["command"]
             )
             self.assertEqual(context.n_output_tokens, 7)
 
@@ -211,6 +299,7 @@ class InstallTests(unittest.IsolatedAsyncioTestCase):
             agent._adapter_sha256 = hashlib.sha256(
                 Path(__file__).with_name("gila_agent.py").read_bytes()
             ).hexdigest()
+            agent._workdir = "/app"
             environment = SimpleNamespace(
                 upload_file=AsyncMock(),
                 download_file=AsyncMock(side_effect=FileNotFoundError("no trace")),
@@ -224,6 +313,66 @@ class InstallTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(caught.exception.__cause__, process_error)
             command = agent.exec_as_agent.await_args.kwargs["command"]
             self.assertIn("/usr/local/bin/gila solve", command)
+
+    async def test_fake_environments_bind_each_task_workdir(self):
+        for workdir in ("/app", "/workspace", "/app/personal-site"):
+            with (
+                self.subTest(workdir=workdir),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory)
+                agent = agent_fixture(root)
+                binary_sha256 = hashlib.sha256((root / "gila").read_bytes()).hexdigest()
+                environment = FakeEnvironment(binary_sha256, f"{workdir}\n")
+
+                await agent.install(environment)
+                environment.trace = trace(
+                    solve_result(workdir),
+                    record(profile_sha256=agent._profile_sha256),
+                )
+                context = AgentContext()
+                await agent.run("task", environment, context)
+
+                probe = [
+                    call
+                    for call in environment.exec_calls
+                    if call.command.endswith("pwd -P")
+                ]
+                self.assertEqual(len(probe), 1)
+                self.assertIsNone(probe[0].cwd)
+                solve = [
+                    call
+                    for call in environment.exec_calls
+                    if "/usr/local/bin/gila solve" in call.command
+                ]
+                self.assertEqual(len(solve), 1)
+                self.assertEqual(solve[0].cwd, workdir)
+                self.assertIn(f"--cwd {workdir}", solve[0].command)
+                self.assertEqual(context.metadata["gila_workdir"], workdir)
+
+    async def test_install_rejects_invalid_workdir_probe_output(self):
+        invalid_outputs = (
+            "",
+            "app\n",
+            "/app/../workspace\n",
+            "/app/\n",
+            "//app\n",
+            "/app\n/workspace\n",
+            "/app\x00\n",
+            "/app\v",
+        )
+        for output in invalid_outputs:
+            with (
+                self.subTest(output=output),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory)
+                agent = agent_fixture(root)
+                binary_sha256 = hashlib.sha256((root / "gila").read_bytes()).hexdigest()
+                environment = FakeEnvironment(binary_sha256, output)
+
+                with self.assertRaisesRegex(RuntimeError, "workdir probe"):
+                    await agent.install(environment)
 
 
 if __name__ == "__main__":

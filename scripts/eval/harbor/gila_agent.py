@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import posixpath
 import re
 import shlex
 import tempfile
@@ -14,7 +15,6 @@ from typing import Any, override
 from harbor.agents.installed.base import BaseInstalledAgent, with_prompt_template
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
-
 
 _OUTCOMES = {
     "completed",
@@ -58,11 +58,31 @@ def _model_digests(raw: str) -> dict[str, str]:
         isinstance(key, str) and isinstance(digest, str)
         for key, digest in value.items()
     ):
-        raise ValueError("GILA_BENCH_MODEL_DIGESTS must map model IDs to SHA-256 strings")
+        raise ValueError(
+            "GILA_BENCH_MODEL_DIGESTS must map model IDs to SHA-256 strings"
+        )
     for model, digest in value.items():
         if not _SHA256.fullmatch(digest):
             raise ValueError(f"invalid SHA-256 for {model!r}")
     return value
+
+
+def _container_workdir(stdout: str) -> str:
+    without_final_newline = stdout.removesuffix("\n")
+    if "\n" in without_final_newline or "\r" in stdout:
+        raise RuntimeError("Gila workdir probe must return exactly one path")
+    workdir = without_final_newline
+    if (
+        not workdir
+        or not workdir.isprintable()
+        or not posixpath.isabs(workdir)
+        or workdir.startswith("//")
+        or posixpath.normpath(workdir) != workdir
+    ):
+        raise RuntimeError(
+            f"Gila workdir probe returned a non-normalized absolute path: {workdir!r}"
+        )
+    return workdir
 
 
 def _contract(
@@ -74,19 +94,36 @@ def _contract(
     profile_sha256: str,
     context_window: int,
     max_rounds: int,
+    workdir: str,
 ) -> dict[str, Any]:
-    records: list[dict[str, Any]] = []
+    contracts: list[dict[str, Any]] = []
+    solve_results: list[dict[str, Any]] = []
     for line in trace.splitlines():
         try:
             value = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if isinstance(value, dict) and "contract_version" in value:
-            records.append(value)
-    if len(records) != 1:
-        raise RuntimeError(f"Gila trace has {len(records)} contract records; expected one")
+        if not isinstance(value, dict):
+            continue
+        if "contract_version" in value:
+            contracts.append(value)
+        if value.get("kind") == "solve_result":
+            solve_results.append(value)
+    if len(contracts) != 1:
+        raise RuntimeError(
+            f"Gila trace has {len(contracts)} contract records; expected one"
+        )
+    if len(solve_results) != 1:
+        raise RuntimeError(
+            f"Gila trace has {len(solve_results)} solve_result records; expected one"
+        )
+    if solve_results[0].get("cwd") != workdir:
+        raise RuntimeError(
+            f"Gila solve_result cwd={solve_results[0].get('cwd')!r}; "
+            f"expected {workdir!r}"
+        )
 
-    record = records[0]
+    record = contracts[0]
     expected = {
         "contract_version": "1",
         "agent": "gilamonster-agent",
@@ -102,11 +139,15 @@ def _contract(
                 f"Gila contract {field}={record.get(field)!r}; expected {wanted!r}"
             )
     if record.get("outcome") not in _OUTCOMES:
-        raise RuntimeError(f"Gila contract has unknown outcome {record.get('outcome')!r}")
+        raise RuntimeError(
+            f"Gila contract has unknown outcome {record.get('outcome')!r}"
+        )
     if record.get("model_digest") != digest:
         raise RuntimeError("Gila contract model digest does not match the campaign pin")
     if record.get("model_digest_source") != "operator_supplied":
-        raise RuntimeError("Gila contract must label its model digest as operator-supplied")
+        raise RuntimeError(
+            "Gila contract must label its model digest as operator-supplied"
+        )
     airframe = record.get("airframe")
     if airframe != {"name": "newt-agent", "revision": _AIRFRAME_REVISION}:
         raise RuntimeError("Gila contract airframe does not match the campaign pin")
@@ -169,23 +210,21 @@ class GilaAgent(BaseInstalledAgent):
             context_window = int(value("GILA_BENCH_CONTEXT_WINDOW", "65536"))
             http_retries = int(value("GILA_BENCH_HTTP_RETRIES", "10"))
         except ValueError as error:
-            raise ValueError("Gila numeric benchmark settings must be integers") from error
+            raise ValueError(
+                "Gila numeric benchmark settings must be integers"
+            ) from error
         if min(max_rounds, context_window, http_retries) <= 0:
             raise ValueError("Gila numeric benchmark settings must be positive")
         api_key_value = self._get_env("GILA_BENCH_API_KEY_FILE")
         return BenchSettings(
             binary=Path(value("GILA_BENCH_BIN")).expanduser(),
             profile=Path(value("GILA_BENCH_PROFILE")).expanduser(),
-            api_key_file=(
-                Path(api_key_value).expanduser() if api_key_value else None
-            ),
+            api_key_file=(Path(api_key_value).expanduser() if api_key_value else None),
             lane=value("GILA_BENCH_LANE"),
             max_rounds=max_rounds,
             context_window=context_window,
             http_retries=http_retries,
-            model_digests=_model_digests(
-                value("GILA_BENCH_MODEL_DIGESTS", "{}")
-            ),
+            model_digests=_model_digests(value("GILA_BENCH_MODEL_DIGESTS", "{}")),
         )
 
     def _preflight(self) -> tuple[BenchSettings, str, str]:
@@ -219,23 +258,20 @@ class GilaAgent(BaseInstalledAgent):
         with tempfile.NamedTemporaryFile("w", delete=False) as handle:
             empty_manifest = Path(handle.name)
         try:
-            await environment.upload_file(
-                empty_manifest, "/etc/gila/capabilities.toml"
-            )
+            await environment.upload_file(empty_manifest, "/etc/gila/capabilities.toml")
         finally:
             empty_manifest.unlink(missing_ok=True)
         if settings.api_key_file is not None:
             await environment.upload_file(settings.api_key_file, "/etc/gila/api-key")
         result = await self.exec_as_root(
             environment,
-            command=(
-                "chmod 0755 /usr/local/bin/gila && "
-                "sha256sum /usr/local/bin/gila"
-            ),
+            command=("chmod 0755 /usr/local/bin/gila && sha256sum /usr/local/bin/gila"),
         )
         installed_digest = result.stdout.strip().split()[0]
         if installed_digest != binary_digest:
-            raise RuntimeError("installed Gila binary digest differs from the host artifact")
+            raise RuntimeError(
+                "installed Gila binary digest differs from the host artifact"
+            )
         private_paths = ["/etc/gila/bench.toml", "/etc/gila/capabilities.toml"]
         if settings.api_key_file is not None:
             private_paths.append("/etc/gila/api-key")
@@ -254,11 +290,14 @@ class GilaAgent(BaseInstalledAgent):
         version = self.parse_version(version_result.stdout)
         if not _VERSION.fullmatch(version):
             raise RuntimeError(f"non-publishable Gila build identity {version!r}")
+        workdir_result = await self.exec_as_agent(environment, "pwd -P")
+        workdir = _container_workdir(workdir_result.stdout)
         self._version = version
         self._installed_settings = settings
         self._binary_sha256 = binary_digest
         self._profile_sha256 = profile_digest
         self._adapter_sha256 = adapter_digest
+        self._workdir = workdir
 
     @override
     @with_prompt_template
@@ -275,7 +314,9 @@ class GilaAgent(BaseInstalledAgent):
             raise RuntimeError("Gila Harbor adapter changed after installation")
         agent_version = self.version()
         if agent_version is None:
-            raise RuntimeError("Gila build identity was not established during installation")
+            raise RuntimeError(
+                "Gila build identity was not established during installation"
+            )
         with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as handle:
             handle.write(instruction)
             instruction_path = Path(handle.name)
@@ -288,7 +329,7 @@ class GilaAgent(BaseInstalledAgent):
             "/usr/local/bin/gila",
             "solve",
             "--cwd",
-            "/app",
+            self._workdir,
             "--instruction-file",
             "/tmp/gila-task.md",
             "--config",
@@ -321,11 +362,10 @@ class GilaAgent(BaseInstalledAgent):
                 command=(
                     "mkdir -p /logs/agent && "
                     "rm -f /logs/agent/gila-events.jsonl "
-                    "/logs/agent/gila-flight-recorder.jsonl && "
-                    + shlex.join(argv)
+                    "/logs/agent/gila-flight-recorder.jsonl && " + shlex.join(argv)
                 ),
                 env=env,
-                cwd="/app",
+                cwd=self._workdir,
             )
         except Exception as error:  # validate typed failure contracts too
             process_error = error
@@ -335,9 +375,7 @@ class GilaAgent(BaseInstalledAgent):
         trace_error: Exception | None = None
         record: dict[str, Any] | None = None
         try:
-            await environment.download_file(
-                "/logs/agent/gila-events.jsonl", trace_path
-            )
+            await environment.download_file("/logs/agent/gila-events.jsonl", trace_path)
             record = _contract(
                 trace_path.read_text(),
                 model,
@@ -346,6 +384,7 @@ class GilaAgent(BaseInstalledAgent):
                 profile_sha256=self._profile_sha256,
                 context_window=settings.context_window,
                 max_rounds=settings.max_rounds,
+                workdir=self._workdir,
             )
         except Exception as error:
             trace_error = error
@@ -365,6 +404,7 @@ class GilaAgent(BaseInstalledAgent):
             "gila_adapter_sha256": self._adapter_sha256,
             "gila_binary_sha256": self._binary_sha256,
             "gila_profile_sha256": self._profile_sha256,
+            "gila_workdir": self._workdir,
         }
         if process_error is not None:
             raise process_error
