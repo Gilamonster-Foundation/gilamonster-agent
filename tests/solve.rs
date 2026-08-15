@@ -106,7 +106,15 @@ fn command(temp: &TempDir) -> Command {
     command
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn assert_success(mut command: Command) {
+    tokio::task::spawn_blocking(move || {
+        command.assert().success();
+    })
+    .await
+    .expect("Gila child assertion task");
+}
+
+#[tokio::test]
 async fn native_solve_emits_one_gila_contract() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -128,7 +136,9 @@ async fn native_solve_emits_one_gila_contract() {
         .await;
     let (temp, args) = fixture(&server);
 
-    command(&temp).args(&args).assert().success();
+    let mut process = command(&temp);
+    process.args(&args);
+    assert_success(process).await;
     let records: Vec<Value> = fs::read_to_string(temp.path().join("events.jsonl"))
         .expect("events")
         .lines()
@@ -158,7 +168,7 @@ async fn native_solve_emits_one_gila_contract() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn native_solve_executes_a_workspace_write() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -176,7 +186,9 @@ async fn native_solve_executes_a_workspace_write() {
         .expect("max-rounds argument");
     args[max_rounds + 1] = "2".into();
 
-    command(&temp).args(&args).assert().success();
+    let mut process = command(&temp);
+    process.args(&args);
+    assert_success(process).await;
     assert_eq!(
         fs::read_to_string(temp.path().join("workspace/gila-tool-proof.txt"))
             .expect("workspace write"),
@@ -201,7 +213,7 @@ async fn native_solve_executes_a_workspace_write() {
         .is_some_and(|events| events.iter().any(|event| event["tool"] == "write_file")));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn model_mismatch_fails_before_inference_or_trace() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
