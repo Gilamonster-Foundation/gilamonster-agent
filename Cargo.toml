@@ -122,6 +122,23 @@ serde_yaml = "0.9"
 # PYO3_PYTHON=/Users/shartsock/venv/bin/python so pyo3 embeds the venv
 # interpreter (the default `python3` pyenv shim lacks the gila-plugin-* pkgs).
 pyo3 = { version = "0.28", features = ["auto-initialize"] }
+# --- Jupyter notebook tooling (ported from newt-agent PR #1730) -------------
+# Gila ports newt-agent's `newt-tools/src/jupyter.rs` into its own tree as
+# `src/gila_jupyter.rs` (the extension point is a separate binary, not a
+# plugin slot — so the jupyter surface lives HERE, not behind a newt rev bump).
+# All four deps are `optional = true` and ride the `jupyter` feature below, so
+# a default `cargo build` stays strictly free of jupyter-only deps.
+nbformat = { version = "0.7", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls-native-roots"], optional = true }
+rand = { version = "0.8", optional = true }
+argon2 = { version = "0.5", optional = true }
+
+[features]
+default = []
+# Compile the Jupyter notebook execution + server-management tool
+# (`src/gila_jupyter.rs`, surfaced as `gila jupyter …`). Off by default so the
+# lean airframe build does not pull nbformat/reqwest/rand/argon2.
+jupyter = ["dep:nbformat", "dep:reqwest", "dep:rand", "dep:argon2"]
 
 [dev-dependencies]
 # CLI integration tests: run the real `gila` binary and assert on its output.

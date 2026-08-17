@@ -487,7 +487,114 @@ async fn main() -> anyhow::Result<()> {
         // args; re-exec the real gilabot binary so every gilabot command works
         // from day one (Phase 1 of the parity plan). Commands graduate out of
         // this arm as they gain their own `Command` variant.
+        // Jupyter notebook tooling — compiled out unless `--features jupyter`.
+        #[cfg(feature = "jupyter")]
+        Command::Jupyter { action } => run_jupyter(action),
         Command::External(args) => run_delegate(&args),
+    }
+}
+
+/// `gila jupyter …` — dispatch the jupyter subcommand to its gila-native impl.
+#[cfg(feature = "jupyter")]
+fn run_jupyter(action: gilamonster_agent::gila_jupyter::JupyterCmd) -> Result<(), anyhow::Error> {
+    use gilamonster_agent::gila_jupyter::{
+        execute_notebook, get_server_status, start_server, stop_server, JupyterCmd,
+        JupyterExecuteParams, JupyterServerParams,
+    };
+    match action {
+        JupyterCmd::Execute {
+            notebook_path,
+            working_dir,
+            timeout,
+            kernel,
+            no_save_outputs,
+        } => {
+            let params = JupyterExecuteParams {
+                notebook_path: notebook_path.to_string_lossy().into_owned(),
+                working_dir,
+                timeout_seconds: timeout,
+                kernel_name: kernel,
+                save_outputs: Some(!no_save_outputs),
+            };
+            let res = execute_notebook(params)?;
+            // Print a concise human summary; full detail is on the struct (Debug).
+            println!(
+                "executed `{}`: {} cells, {} failed, {:.1}s — {}",
+                res.notebook_path,
+                res.cells_executed,
+                res.cells_failed,
+                res.execution_time_seconds,
+                if res.success { "ok" } else { "FAILED" },
+            );
+            if let Some(e) = res.error {
+                eprintln!("error: {e}");
+            }
+            Ok(())
+        }
+        JupyterCmd::Start {
+            working_dir,
+            port,
+            host,
+            token,
+            password,
+            password_hash,
+            open_browser,
+            extra,
+        } => {
+            let params = JupyterServerParams {
+                working_dir,
+                port,
+                host,
+                token,
+                password_hash,
+                password,
+                open_browser: Some(open_browser),
+                extra_args: extra,
+            };
+            let res = start_server(params)?;
+            if res.success {
+                println!(
+                    "jupyter server started — handle {} at {} (pid {})",
+                    res.handle_id.unwrap_or(0),
+                    res.url.as_deref().unwrap_or("?"),
+                    res.pid.unwrap_or(0),
+                );
+            } else {
+                eprintln!(
+                    "jupyter server failed: {}",
+                    res.error.as_deref().unwrap_or("unknown"),
+                );
+            }
+            Ok(())
+        }
+        JupyterCmd::Stop { handle_id } => {
+            let stopped = stop_server(handle_id)?;
+            println!(
+                "handle {handle_id}: {}",
+                if stopped { "stopped" } else { "not running" },
+            );
+            Ok(())
+        }
+        JupyterCmd::Status { handle_id } => {
+            let st = get_server_status(handle_id)?;
+            println!(
+                "handle {handle_id}: {}",
+                if st.running { "running" } else { "not running" },
+            );
+            if let Some(url) = st.url {
+                println!("  url:  {url}");
+            }
+            if let Some(port) = st.port {
+                println!("  port: {port}");
+            }
+            for k in &st.kernels {
+                println!(
+                    "  kernel {} `{}` {} ({} conns)",
+                    k.id, k.name, k.execution_state, k.connections,
+                );
+            }
+            Ok(())
+        }
     }
 }
 
