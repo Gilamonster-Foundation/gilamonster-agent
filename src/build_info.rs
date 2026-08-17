@@ -15,6 +15,17 @@ pub const SOURCE_ID: &str = env!("GILA_BUILD_SOURCE_ID");
 /// User-visible build identity, for example `0.4.0 (6eb3e02644ab)`.
 pub const VERSION_WITH_COMMIT: &str = env!("GILA_BUILD_VERSION");
 
+/// The rustc release channel the binary was built under (`stable` / `nightly`
+/// / `beta` / `dev`), captured by `build.rs` from a rustup-managed toolchain.
+/// Derived at compile time rather than hardcoded, the same way every other
+/// build-identity field here is — so the version report reflects the actual
+/// toolchain, not a frozen literal.
+pub const RUSTC_CHANNEL: &str = env!("GILA_BUILD_RUSTC_CHANNEL");
+
+/// The Rust edition the package was built with, read from `Cargo.toml` by
+/// `build.rs`. Derived at compile time rather than hardcoded.
+pub const EDITION: &str = env!("GILA_BUILD_EDITION");
+
 /// Compiled-in default harness/brand name — the GitHub User
 /// [`gilamonster-agent`](https://github.com/Gilamonster-Foundation/gilamonster-agent),
 /// overridden by `GILA_BRAND_NAME` for a downstream rebrand. Mirrors newt-agent's

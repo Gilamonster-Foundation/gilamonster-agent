@@ -10,8 +10,10 @@ use crate::build_info;
 /// The `gila version` report body.
 pub fn version_report() -> String {
     format!(
-        "gila (gilamonster-agent) {}\nrustc channel: stable\nedition: 2021",
+        "gila (gilamonster-agent) {}\nrustc channel: {}\nedition: {}",
         build_info::VERSION_WITH_COMMIT,
+        build_info::RUSTC_CHANNEL,
+        build_info::EDITION,
     )
 }
 
@@ -24,6 +26,13 @@ mod tests {
         let r = version_report();
         assert!(r.contains(build_info::VERSION_WITH_COMMIT));
         assert!(r.contains("gilamonster-agent"));
-        assert!(r.contains("edition: 2021"));
+        assert!(
+            r.contains(&format!("edition: {}", build_info::EDITION)),
+            "report must surface the derived edition"
+        );
+        assert!(
+            r.contains(&format!("rustc channel: {}", build_info::RUSTC_CHANNEL)),
+            "report must surface the derived rustc channel"
+        );
     }
 }
