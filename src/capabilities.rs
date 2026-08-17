@@ -18,7 +18,7 @@ use std::process::Command;
 
 use agent_bridle_core::{Caveats, ConfinedCommand, Gate, Scope, Tool, ToolContext, ToolResult};
 use anyhow::{Context, Result};
-use newt_core::mcp::{admit, McpServerEntry, McpTrust, TransportKind};
+use newt_core::mcp::{McpServerEntry, McpTrust, TransportKind};
 use newt_core::Config;
 use newt_mcp_client::{McpConnection, StdioTransport};
 use serde_json::json;
