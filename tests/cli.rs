@@ -201,7 +201,7 @@ fn capabilities_run_engages_the_confined_path_when_the_manifest_marks_it() {
         .env_remove("VIRTUAL_ENV")
         .assert()
         .failure()
-        .stderr(predicate::str::contains("confined spawn"));
+        .stderr(predicate::str::contains("running confined"));
 }
 
 #[cfg(unix)]

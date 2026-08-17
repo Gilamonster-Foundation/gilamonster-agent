@@ -19,6 +19,12 @@
 
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Mutex;
+
+/// The embedded CPython interpreter is process-global, so concurrent test
+/// threads corrupt click's global state. This mutex serializes all bridge
+/// calls within the test binary.
+static BRIDGE_LOCK: Mutex<()> = Mutex::new(());
 
 /// The venv python the bridge expects to embed (`PYO3_PYTHON` at build time).
 fn venv_python() -> Option<PathBuf> {
@@ -70,6 +76,7 @@ fn run(cmd: &str, args: &[&str]) -> i32 {
 /// command state, but a stateful subcommand would not be safe to repeat.
 #[test]
 fn pyo3_routed_help_reaches_click_help() {
+    let _guard = BRIDGE_LOCK.lock().unwrap();
     if !bridge_env_ready() {
         eprintln!("SKIP: ~/venv with importable gilabot not present");
         return;
@@ -89,6 +96,7 @@ fn pyo3_routed_help_reaches_click_help() {
 /// so it gets a fresh interpreter.
 #[test]
 fn pyo3_routed_unknown_subcommand_fails_nonzero() {
+    let _guard = BRIDGE_LOCK.lock().unwrap();
     if !bridge_env_ready() {
         eprintln!("SKIP: ~/venv with importable gilabot not present");
         return;

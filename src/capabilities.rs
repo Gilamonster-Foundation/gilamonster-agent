@@ -18,7 +18,7 @@ use std::process::Command;
 
 use agent_bridle_core::{Caveats, ConfinedCommand, Gate, Scope, Tool, ToolContext, ToolResult};
 use anyhow::{Context, Result};
-use newt_core::mcp::{McpServerEntry, McpTrust, TransportKind};
+use newt_core::mcp::{admit, McpServerEntry, McpTrust, TransportKind};
 use newt_core::Config;
 use newt_mcp_client::{McpConnection, StdioTransport};
 use serde_json::json;
@@ -252,7 +252,13 @@ pub async fn check(name: &str) -> Result<()> {
     let leash = Config::resolve()
         .unwrap_or_default()
         .mcp_probe_caveats(&workspace);
-    let transport = StdioTransport::spawn(&entry, &leash).with_context(|| {
+    let admitted = admit(&entry).map_err(|e| {
+        anyhow::anyhow!(
+            "admitting `{} mcp {name}` — {e:?} (check the server's trust level)",
+            g.program
+        )
+    })?;
+    let transport = StdioTransport::spawn(&admitted, &leash).with_context(|| {
         format!(
             "spawning `{} mcp {name}` — is the caps venv set up? \
              (try `~/.gila/caps-venv/bin/pip install gila-cap-{name}`)",
