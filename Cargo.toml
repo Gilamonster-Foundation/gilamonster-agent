@@ -51,7 +51,7 @@ path = "src/bin/newt-net-guard.rs"
 # newt-core / newt-inference / newt-tools / newt-skills / newt-mcp-client).
 # gilamonster reuses it directly and will extend it; "inherits and extends" is a
 # git dependency on a sibling repo, not a fork.
-newt-tui = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev = "ba56944bd262224b00c7c72d838f039bedf70087" }
+newt-tui = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev = "a46d001430f4c3b9713fa5254beb9838a0777968" }
 # The cowork foundation (newt PR #310 / issue #308): the redaction-gated
 # `ShellObservation` seam, the non-blocking `TurnDriver` (submit_observation /
 # submit / poll / cancel), and `transcript_lines`. `gila follow` consumes these
@@ -59,10 +59,10 @@ newt-tui = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev =
 # built once in newt-core, gila only feeds it. The attenuation-only `Caveats`
 # lattice (re-exported from newt-core) is what clamps follow to a read-only
 # posture. Same pinned rev as the rest of the airframe.
-newt-core = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev = "ba56944bd262224b00c7c72d838f039bedf70087" }
+newt-core = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev = "a46d001430f4c3b9713fa5254beb9838a0777968" }
 # The object-capability identity layer — signed, attenuation-only AgentKey
 # caveats. Shared with newt so the whole matrix runs under one capability model.
-newt-identity = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev = "ba56944bd262224b00c7c72d838f039bedf70087" }
+newt-identity = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev = "a46d001430f4c3b9713fa5254beb9838a0777968" }
 
 # --- Local ---------------------------------------------------------------------
 anyhow = "1"
@@ -71,7 +71,7 @@ tokio = { version = "1", features = ["full"] }
 # newt's MCP client — `gila capabilities check` connects to a capability's MCP
 # server over the SAME stdio JSON-RPC transport the inherited TUI uses, so the
 # check exercises the real path, not a re-implementation. Same pinned rev.
-newt-mcp-client = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev = "ba56944bd262224b00c7c72d838f039bedf70087" }
+newt-mcp-client = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev = "a46d001430f4c3b9713fa5254beb9838a0777968" }
 # `gila capabilities check` builds tool-call arguments and reads MCP results.
 serde_json = "1"
 sha2 = "0.10"

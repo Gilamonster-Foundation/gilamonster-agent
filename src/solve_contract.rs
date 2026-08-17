@@ -6,7 +6,7 @@ use crate::build_info;
 
 pub const CONTRACT_VERSION: &str = "1";
 pub const AGENT: &str = "gilamonster-agent";
-pub const AIRFRAME_REVISION: &str = "ba56944bd262224b00c7c72d838f039bedf70087";
+pub const AIRFRAME_REVISION: &str = "a46d001430f4c3b9713fa5254beb9838a0777968";
 
 pub struct ContractInputs<'a> {
     pub requested_model: &'a str,
