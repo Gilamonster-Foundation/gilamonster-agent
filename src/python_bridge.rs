@@ -142,10 +142,10 @@ fn ensure_sys_path(py: Python<'_>) -> Result<()> {
         return Ok(()); // no venv resolvable — rely on ambient interpreter
     };
     let (major, minor) = interpreter_version(py);
-    let sys = py.import_bound("sys").context("import sys")?;
+    let sys = py.import("sys").context("import sys")?;
     let path = sys
         .getattr("path")?
-        .downcast_into::<PyList>()
+        .cast_into::<PyList>()
         .map_err(|e| anyhow::anyhow!("sys.path is not a list: {e}"))?;
     let existing: Vec<String> = path
         .iter()
@@ -160,7 +160,7 @@ fn ensure_sys_path(py: Python<'_>) -> Result<()> {
         // processed — gilabot's editable installs live behind
         // `__editable__*.finder.__path_hook__` entries that only activate when
         // the .pth runs. A bare sys.path insert misses them.
-        let site = py.import_bound("site")?;
+        let site = py.import("site")?;
         site.call_method1("addsitedir", (dir.to_string_lossy().into_owned(),))?;
         let s = dir.to_string_lossy().into_owned();
         if !existing.contains(&s) {
@@ -199,7 +199,7 @@ fn exit_code_from_result(result: Result<(), PyErr>, py: Python<'_>) -> i32 {
             let is_system_exit = err.is_instance_of::<pyo3::exceptions::PySystemExit>(py);
             // `SystemExit` carries the intended exit code (default 0).
             let code = err
-                .value_bound(py)
+                .value(py)
                 .getattr("code")
                 .and_then(|c| c.extract::<i32>())
                 .unwrap_or(if is_system_exit { 0 } else { 1 });
@@ -219,11 +219,11 @@ fn exit_code_from_result(result: Result<(), PyErr>, py: Python<'_>) -> i32 {
 /// This is the thin GIL seam — it needs a real embedded interpreter, so it is
 /// covered by integration tests rather than unit tests.
 pub fn run_python_command(cmd: &str, args: &[OsString]) -> Result<i32> {
-    let out: Result<i32> = Python::with_gil(|py| -> Result<i32> {
+    let out: Result<i32> = Python::attach(|py| -> Result<i32> {
         ensure_sys_path(py)?;
-        let sys = py.import_bound("sys")?;
-        sys.setattr("argv", PyList::new_bound(py, build_argv(cmd, args)))?;
-        let module = py.import_bound(GILABOT_MODULE).with_context(|| {
+        let sys = py.import("sys")?;
+        sys.setattr("argv", PyList::new(py, build_argv(cmd, args))?)?;
+        let module = py.import(GILABOT_MODULE).with_context(|| {
             format!("import {GILABOT_MODULE} (is the venv embedded? set PYO3_PYTHON)")
         })?;
         let main = module.getattr(GILABOT_CALLABLE)?;

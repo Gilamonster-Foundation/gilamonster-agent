@@ -49,6 +49,8 @@ pub mod gila_ideas;
 pub mod gila_init;
 #[cfg(feature = "native-git")]
 pub mod gila_insights;
+#[cfg(feature = "jupyter")]
+pub mod gila_jupyter;
 #[cfg(feature = "native-git")]
 pub mod gila_log;
 pub mod gila_logs;
@@ -350,6 +352,14 @@ pub enum Command {
     Worktree {
         #[command(subcommand)]
         cmd: WorktreeCmd,
+    },
+    /// Jupyter notebook tooling (compiled with `--features jupyter`): execute
+    /// notebooks and own the notebook-server lifecycle. Compiled out by
+    /// default; `gila jupyter` is only present when the `jupyter` feature is on.
+    #[cfg(feature = "jupyter")]
+    Jupyter {
+        #[command(subcommand)]
+        action: gila_jupyter::JupyterCmd,
     },
     /// Shell-delegate fallback: any subcommand gilamonster-agent has not yet
     /// ported from gilabot (Python). clap's `external_subcommand` catch-all
