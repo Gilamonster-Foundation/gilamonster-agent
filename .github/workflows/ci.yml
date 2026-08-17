@@ -63,6 +63,27 @@ jobs:
         # surface in one run.
         if: always()
         run: cargo clippy --all-targets -- -D warnings
+      - name: headless dependency gate
+        if: always()
+        run: |
+          cargo clippy --no-default-features --bin gila-headless -- -D warnings
+
+  headless-portability:
+    name: Headless portability (Debian 12)
+    runs-on: ${{ vars.GMF_LINUX_RUNNER || 'ubuntu-latest' }}
+    container: rust:1.88-bookworm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: build portable evaluator binary
+        run: cargo build --release --no-default-features --bin gila-headless
+      - name: reject non-portable dynamic dependencies
+        run: |
+          if readelf -d target/release/gila-headless | grep NEEDED | grep -Eiq 'python|ssl|crypto|git2|ssh2'; then
+            echo "::error::gila-headless gained a non-portable runtime dependency"
+            exit 1
+          fi
+          target/release/gila-headless --version
 
   test:
     name: Rust tests
@@ -82,6 +103,23 @@ jobs:
         # --locked is intentionally absent: Cargo.lock is git-ignored for this
         # binary (the git-dep resolves per build). Lock staleness is irrelevant.
         run: cargo test
+      - name: native headless solve tests
+        run: cargo test --no-default-features --test solve
+
+  harbor-adapter:
+    name: Harbor 0.20 adapter
+    runs-on: ${{ vars.GMF_LINUX_RUNNER || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: install pinned Harbor
+        run: python -m pip install --disable-pip-version-check 'harbor==0.20.0'
+      - name: test adapter
+        env:
+          PYTHONPATH: scripts/eval/harbor
+        run: python -m unittest discover -s scripts/eval/harbor -p 'test_*.py'
 
   coverage:
     name: Coverage (cargo-llvm-cov, >= 80% lines)

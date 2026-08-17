@@ -1,3 +1,5 @@
+#![cfg(feature = "python-bridge")]
+
 //! Integration tests for the pyo3-vendored command path (Phase 2 bridge).
 //!
 //! These exercise the real embedded-interpreter seam in

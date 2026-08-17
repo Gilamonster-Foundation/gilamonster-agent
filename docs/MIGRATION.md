@@ -24,6 +24,8 @@ back to the Python CLI automatically (with a one-line stderr notice).
 | Startup | interpreter + plugin import on every invocation | Rust: instant; in-process Python only for the 9 bridged commands |
 | `git commit`/`git tend` | subprocess git | libgit2 in-process |
 | `completion` | not available | `gila completion bash|zsh` |
+| Agent authority | n/a | Ambient by default; `gila --ocap` confines |
+| Version identity | Python package version | SemVer + 12-character Gila commit (`-dirty` when modified) |
 | Unported commands | direct | auto-delegate to Python `gila` + stderr notice |
 | Install | `pip install -e` into a venv | `cargo install` / prebuilt binary; bridge needs `PYO3_PYTHON` at build time |
 
@@ -31,15 +33,25 @@ back to the Python CLI automatically (with a one-line stderr notice).
 
 ```bash
 # Build against the venv that has the gila-plugin-* editable installs:
-PYO3_PYTHON="$HOME/venv/bin/python" cargo install --path .
+PYO3_PYTHON="$HOME/venv/bin/python" just install "$HOME/.local/bin"
 ```
 
 Ensure the resulting `gila` appears **before** the pyenv shim `gila` on PATH
-(e.g. `~/.cargo/bin` ahead of `~/.pyenv/shims`). Verify with:
+(e.g. `~/.local/bin` ahead of `~/.pyenv/shims`). Verify with:
 
 ```bash
-gila version        # Rust-native; prints the crate version
+gila version        # Rust-native; prints SemVer + exact Gila source commit
 gila confluence --help   # in-process Python bridge smoke test
+gila --ocap --help  # confirms the optional confinement switch is installed
+```
+
+The fallback carries an internal recursion guard across wrappers, so a pyenv
+shim that resolves back to Rust Gila is skipped on the next hop while the real
+Python gilabot remains available later on PATH. If an older Rust Gila also
+appears on PATH, set `GILABOT_BIN` to the exact Python entry point:
+
+```bash
+export GILABOT_BIN="/path/to/python-gilabot/bin/gila"
 ```
 
 ## Rolling back
@@ -59,3 +71,6 @@ GILABOT_BIN="$(pyenv which gila)" cargo test --test parity -- --nocapture
 ---
 
 Model: nvidia/moonshotai/eccn-kimi-k3-max-preview | Harness: newt-agent v0.8.0 | Operator: Shawn Hartsock | Time: 19:58 EDT | Date: 2026-08-12
+
+<!-- markdownlint-disable-next-line MD013 -->
+Model: OpenAI GPT-5 | Harness: Codex | Operator: Shawn Hartsock | Time: 10:11 EDT | Date: 2026-08-14

@@ -46,8 +46,8 @@ use newt_core::agentic::TurnDriverConfig;
 use newt_core::{BackendKind, Caveats, CountBound, Scope};
 
 /// The environment variable that disables newt's object-capability enforcement.
-/// Its presence (any value) makes the shell tool bypass the caveat lattice, so
-/// the cockpit refuses to construct drivers while it is set.
+/// Newt accepts the exact value `1` and freezes it at startup; the cockpit
+/// refuses to construct drivers when that frozen authority is active.
 pub const DISABLE_OCAP_ENV: &str = "NEWT_DISABLE_OCAP";
 
 /// A bounded, non-zero tool-call budget for the tool-capable postures. Small on
@@ -76,8 +76,8 @@ pub enum PaneKind {
 /// Why a driver config could not be minted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthorityError {
-    /// `NEWT_DISABLE_OCAP` is set: the caveat lattice would not actually bind a
-    /// driven turn (the shell tool bypasses it), so we refuse to build one.
+    /// `NEWT_DISABLE_OCAP=1` was frozen at launch: the caveat lattice would not
+    /// actually bind a driven turn, so we refuse to build one.
     OcapDisabled,
 }
 
@@ -139,9 +139,9 @@ pub fn caveats_for(kind: PaneKind) -> Caveats {
 /// in the crate. Stamps the pane's [`caveats_for`] clamp onto a fresh config.
 ///
 /// # Errors
-/// [`AuthorityError::OcapDisabled`] when [`DISABLE_OCAP_ENV`] is set in the
-/// environment — see the module docs. Callers must surface this (fail-loud),
-/// never fall back to an unclamped driver.
+/// [`AuthorityError::OcapDisabled`] when [`DISABLE_OCAP_ENV`] was frozen active
+/// at launch — see the module docs. Callers must surface this (fail-loud), never
+/// fall back to an unclamped driver.
 pub fn driver_config(
     kind: PaneKind,
     url: impl Into<String>,
@@ -171,12 +171,14 @@ fn driver_config_inner(
     Ok(config)
 }
 
-/// Whether newt's OCAP enforcement is disabled in this environment. Presence of
-/// [`DISABLE_OCAP_ENV`] (any value, even empty) counts — matching newt's own
-/// `ocap_disabled()` which treats the var as a flag.
+/// Whether newt's frozen launch authority has OCAP enforcement disabled.
+///
+/// Newt resolves the widening switch once at startup and accepts only the
+/// exact value `1`; consulting its frozen value keeps this pane guard aligned
+/// with the shell dispatch it is meant to describe.
 #[must_use]
 pub fn ocap_disabled() -> bool {
-    std::env::var_os(DISABLE_OCAP_ENV).is_some()
+    newt_core::agentic::ocap_disabled()
 }
 
 #[cfg(test)]

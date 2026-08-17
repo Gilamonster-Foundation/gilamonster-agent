@@ -252,12 +252,11 @@ pub async fn check(name: &str) -> Result<()> {
     let leash = Config::resolve()
         .unwrap_or_default()
         .mcp_probe_caveats(&workspace);
-    let admitted = admit(&entry).map_err(|e| {
-        anyhow::anyhow!(
-            "admitting `{} mcp {name}` — {e:?} (check the server's trust level)",
-            g.program
-        )
-    })?;
+    // Newt's admission witness makes disabled/untrusted entries
+    // unrepresentable at the spawn boundary. Gila-created entries are enabled
+    // and trusted, but still pass through the same gate as the inherited TUI.
+    let admitted = newt_core::mcp::admit(&entry)
+        .map_err(|denied| anyhow::anyhow!("MCP server admission denied: {denied}"))?;
     let transport = StdioTransport::spawn(&admitted, &leash).with_context(|| {
         format!(
             "spawning `{} mcp {name}` — is the caps venv set up? \
@@ -452,10 +451,9 @@ pub fn agent_mcp_entries() -> Vec<McpServerEntry> {
 /// of the same name **wins** (no clobber/duplicate) — the same precedence as
 /// `compose_hotseat_config`. Pure (consumes + returns the config).
 ///
-/// Note: the mounted server is `gilacap mcp <name>`, spawned by newt — i.e. *not*
-/// yet wrapped by the agent-bridle confined launcher (that interposition is a
-/// follow-up). The `confined` manifest flag governs `gila capabilities run`
-/// today; confining the agent-mounted MCP server is the next layer.
+/// The mounted server is `gilacap mcp <name>`, admitted and spawned by newt
+/// under the session's MCP leash. The manifest's `confined` flag separately
+/// governs direct `gila capabilities run` invocations.
 #[must_use]
 pub fn compose_agent_mcp(mut base: Config, entries: Vec<McpServerEntry>) -> Config {
     for entry in entries {
@@ -484,6 +482,10 @@ mod tests {
         assert_eq!(e.command.as_deref(), Some("/v/bin/gilacap"));
         assert_eq!(e.args, ["mcp", "mogul"]);
         assert!(e.is_valid());
+        assert!(
+            newt_core::mcp::admit(&e).is_ok(),
+            "gila-owned entries must satisfy newt's spawn admission gate"
+        );
     }
 
     #[test]

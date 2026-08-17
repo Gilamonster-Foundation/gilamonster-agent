@@ -1,6 +1,6 @@
 [package]
 name = "gilamonster-agent"
-# 0.4.0 opens the post-re-pin line (newt 0.7.5 airframe; ROADMAP.md
+# 0.4.0 opens the post-re-pin line (newt 0.8.0 airframe; ROADMAP.md
 # "Renumbering note, 2026-07-29"). Ends the drift where the manifest sat at
 # 0.1.0 while tags reached v0.3.3 — from here the manifest moves with the tag.
 version = "0.4.0"
@@ -8,14 +8,29 @@ edition = "2021"
 # 1.75 -> 1.88: follows newt-agent's honest-floor bump (its current lock needs
 # 1.88 via darling 0.23 / instability 0.3.12 from the ratatui work).
 rust-version = "1.88"
+default-run = "gila"
 license = "Apache-2.0"
 description = "The Gilamonster agent matrix — inherits newt-agent's chat + agentic-coding airframe and extends it into a Hermes/Thoon-style multi-agent matrix."
 repository = "https://github.com/Gilamonster-Foundation/gilamonster-agent"
 keywords = ["gilamonster", "agent", "matrix", "ocap", "coding-agent"]
 
+[features]
+default = ["langchain", "native-git", "python-bridge"]
+langchain = ["dep:langchain-rust"]
+native-git = ["dep:git2"]
+python-bridge = ["dep:pyo3"]
+
 [[bin]]
 name = "gila"
 path = "src/main.rs"
+
+[[bin]]
+name = "gila-headless"
+path = "src/bin/gila-headless.rs"
+
+[[bin]]
+name = "newt-net-guard"
+path = "src/bin/newt-net-guard.rs"
 
 [dependencies]
 # --- Inherited from newt-agent (the "airframe") -------------------------------
@@ -55,13 +70,14 @@ tokio = { version = "1", features = ["full"] }
 newt-mcp-client = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev = "ba56944bd262224b00c7c72d838f039bedf70087" }
 # `gila capabilities check` builds tool-call arguments and reads MCP results.
 serde_json = "1"
+sha2 = "0.10"
 # The `~/.gila/capabilities.toml` selection manifest deserializes via serde
 # derive (see `src/manifest.rs`); `toml` (below) is the format.
 serde = { version = "1", features = ["derive"] }
 # The object-capability leash. `gila capabilities run` spawns a manifest-confined
 # capability through `agent_bridle_core::spawn_confined_subprocess` (Landlock +
 # env-scrub, agent-bridle#56). Published on crates.io; pinned to the same 0.7.x
-# line newt-core resolves (0.7.14) so the two halves agree on the gate types.
+# line newt-core resolves (0.7.15) so the two halves agree on the gate types.
 # `async-trait` is needed only to implement the trivial `Tool` that mints the
 # spawn's `ToolContext` through the gate.
 agent-bridle-core = "0.7"
@@ -100,14 +116,14 @@ vt100 = "0.15"
 # code). NOTE: upstream last published 2024-10 (4.6.0) — treat this as an
 # exploration surface, not a foundation; the seam is one module (`src/chain.rs`)
 # so it stays cheap to replace.
-langchain-rust = "4.6"
+langchain-rust = { version = "4.6", optional = true }
 # --- gila-parity Phase 1: Rust-native `gila git` ------------------------------
 # `git2` (libgit2) backs the Rust-native `gila git commit` — staging the index
 # and writing the commit object are pure-libgit2 operations with no subprocess.
 # Profile *steps* in `gila git tend` still shell out to the `git` CLI exactly
 # like the Python engine (git_service.py) does, so behavior matches gilabot
 # 1:1 rather than re-implementing fetch/pull/push semantics in libgit2.
-git2 = "0.20"
+git2 = { version = "0.20", optional = true }
 # `gila git tend` reads the operator's existing `git-tend.yaml` (the same file
 # Python gilabot's gila-plugin-git-tend parses) — serde_yaml deserializes it so
 # the Rust port is config-compatible with the deployed config on day one.
@@ -121,7 +137,7 @@ serde_yaml = "0.9"
 # boots the interpreter on first GIL acquisition. BUILD-TIME: set
 # PYO3_PYTHON=/Users/shartsock/venv/bin/python so pyo3 embeds the venv
 # interpreter (the default `python3` pyenv shim lacks the gila-plugin-* pkgs).
-pyo3 = { version = "0.28", features = ["auto-initialize"] }
+pyo3 = { version = "0.28", features = ["auto-initialize"], optional = true }
 # --- Jupyter notebook tooling (ported from newt-agent PR #1730) -------------
 # Gila ports newt-agent's `newt-tools/src/jupyter.rs` into its own tree as
 # `src/gila_jupyter.rs` (the extension point is a separate binary, not a
@@ -135,6 +151,9 @@ argon2 = { version = "0.5", optional = true }
 
 [features]
 default = []
+# In-process Python bridge (pyo3 embedding) — optional so the lean default
+# build stays pyo3-free (ambient-first, #75).
+python-bridge = ["dep:pyo3"]
 # Compile the Jupyter notebook execution + server-management tool
 # (`src/gila_jupyter.rs`, surfaced as `gila jupyter …`). Off by default so the
 # lean airframe build does not pull nbformat/reqwest/rand/argon2.

@@ -12,7 +12,11 @@ to `src/delegate.rs`.
 ## Routing summary
 
 | Command | Route | Notes |
-|---|---|---|
+| --- | --- | --- |
+| `gila` / `code` | Rust-native | Ambient; `--ocap` confines |
+| `cowork` | Rust-native | Confined agent; human-owned PTY |
+| `follow` / `hotseat` / `cockpit` | Rust-native | Always confined |
+| `capabilities` | Rust-native | MCP is opt-in and admission-gated |
 | `git commit` | Rust-native | libgit2, incl. `--bulk` |
 | `git tend` | Rust-native | git2-based profiles |
 | `version` | Rust-native | |
@@ -73,3 +77,6 @@ Rust-native and in-process-Python commands print nothing extra.
 ---
 
 Model: nvidia/moonshotai/eccn-kimi-k3-max-preview | Harness: newt-agent v0.8.0 | Operator: Shawn Hartsock | Time: 19:58 EDT | Date: 2026-08-12
+
+<!-- markdownlint-disable-next-line MD013 -->
+Model: OpenAI GPT-5 | Harness: Codex | Operator: Shawn Hartsock | Time: 19:34 EDT | Date: 2026-08-13

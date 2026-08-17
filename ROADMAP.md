@@ -31,6 +31,20 @@ the next epic.
 > continue unchanged inside `0.4.x`** — read "v0.3.N" below as "the Nth
 > milestone", now landing as 0.4.x patch/minor bumps.
 
+## Ambient-first product contract (2026-08-13)
+
+Gila now has a deliberate trust-posture split from its airframe: bare `gila`
+and `gila code` launch full-ambient with native host command execution;
+`--ocap` restores newt's configured confinement. Cowork, observer, hotseat,
+companion, and utility surfaces remain confined. The implementation and
+remaining release gates are tracked in
+[`docs/decisions/ambient_native_shell_default.md`](docs/decisions/ambient_native_shell_default.md).
+
+This is a cross-cutting launch contract, not a renumbering of the cockpit
+milestones below. This line packages a co-located Linux `newt-net-guard`; its
+remaining ratchets are live shell BAT evidence, overlay-disabled pin
+verification, and typed workbench-only expansion in the cockpit.
+
 ## Baseline: newt-agent 0.8.0
 
 The line drives off the **newt-agent 0.8.0** airframe — the release carrying
@@ -39,8 +53,8 @@ claims) and the #1030 "Plans within Plans" roadmap tree
 (`Roadmap→Phase→Plan→Task`, objective evaluators, headless `TreeDriver` /
 `/roadmap drive`). Gila consumes newt over pinned git revs (four crates
 lockstep: `newt-tui` / `newt-core` / `newt-identity` / `newt-mcp-client`);
-"0.8.0" here means *that rev line*, bumped deliberately at v0.3.6 (below), not
-tracked continuously.
+"0.8.0" here means *that rev line*, adopted deliberately by the ambient-first
+launch change and still bumped only through reviewed lockstep revisions.
 
 Upstream seam PRs (small, FleetView-4a/4b-style) run as a parallel track in
 newt-agent and gate only the milestones that name them:
@@ -57,7 +71,7 @@ non-blocking cancel (deletes the reaper workaround whenever it lands).
 | **v0.3.3** | **Layout.** `layout.rs` arena tree, split/resize/zoom algorithms, presets; proptest invariant suite. | 3 | — |
 | **v0.3.4** | **Cockpit + authority — first light.** `run_cockpit` with tabs; N concurrent companion chat panes (one `TurnDriver` per tab — *this is the first release that binds multiple newt-agents into panes*); ambient shell pane with the observe-only guarantee proven three ways; `authority.rs` lands in the same PR as the first driver; follow-me. `gila cowork` becomes a preset alias. | 4 | closes #10; extends #11, #24 |
 | **v0.3.5** | **MCP actor.** Per-tab `mcp_actor` + `McpProxy`, honestly reporting "tools: pending upstream" over `NoMcp`. | 5 | extends #20 |
-| **v0.3.6** | **newt 0.8.x pin-bump + workbench panes.** Lockstep rev bump (own no-feature PR), then `PaneKind::Workbench`: grant-display modal, `workspace_caveats()`, default-deny rendering. | 6 | upstream `with_tools`; extends #11, #20 |
+| **v0.3.6** | **Workbench panes on newt 0.8.x.** `PaneKind::Workbench`: grant-display modal, `workspace_caveats()`, default-deny rendering; ambient expansion is limited to this typed pane kind. | 6 | upstream `with_tools`; extends #11, #20 |
 | **v0.3.7** | **Jupyter + browser.** `jupyter.rs` venv/port/runtime-file management + status pane; `browser.rs` open chokepoint with `token=` pre-scrub. | 7 | — |
 | **v0.3.8** | **Copy/scroll + escalation.** Copy mode, vt100 scrollback, OSC 52 yank with paste-buffer fallback; permission-escalation modal (grants meet the pane ceiling, expire per request). | 8 | upstream `PermissionGate` (modal half splits out if it lags) |
 | **v0.3.9** | **Save & resume.** `Ctrl+B d` confirm + session serde; `--resume` via `with_transcript`; fresh PTYs; honest modal copy. | 9 | — |
@@ -91,3 +105,8 @@ evidence for the authority-first design.
 - Pure-function core, thin raw loop; 80% coverage floor; zero warnings.
 - This file states *what and why*; the design doc owns *how*. When they
   disagree, fix one of them in the same PR that exposed the disagreement.
+
+---
+
+<!-- markdownlint-disable-next-line MD013 -->
+Model: OpenAI GPT-5 | Harness: Codex | Operator: Shawn Hartsock | Time: 19:34 EDT | Date: 2026-08-13
