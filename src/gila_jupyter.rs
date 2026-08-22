@@ -21,6 +21,7 @@
 //! (`Child::kill`), so no `kill` / `taskkill` subprocess is ever spawned.
 
 use std::collections::HashMap;
+use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -102,6 +103,8 @@ pub enum JupyterCmd {
         /// Opaque handle id returned by `gila jupyter start`.
         handle_id: u64,
     },
+    /// List all active Jupyter servers started by this process.
+    List,
 }
 
 // ---- notebook execution -------------------------------------------------
@@ -368,6 +371,21 @@ pub struct KernelInfo {
     pub connections: usize,
 }
 
+/// Summary of an active Jupyter server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServerSummary {
+    pub handle_id: u64,
+    pub url: String,
+    pub port: u16,
+    pub running: bool,
+}
+
+/// Result of listing Jupyter servers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JupyterListResult {
+    pub servers: Vec<ServerSummary>,
+}
+
 /// Owned jupyter server process retained in the registry.
 struct ServerHandle {
     child: std::process::Child,
@@ -377,11 +395,57 @@ struct ServerHandle {
 }
 
 /// Monotonic handle id generator (1..; 0 is reserved as "no handle").
-static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
+/// Initialized lazily from the persistent registry to avoid collisions across invocations.
+static NEXT_HANDLE: LazyLock<AtomicU64> = LazyLock::new(|| {
+    let next_id = load_persistent_servers()
+        .ok()
+        .and_then(|records| records.iter().map(|r| r.handle_id).max())
+        .unwrap_or(0)
+        + 1;
+    AtomicU64::new(next_id)
+});
 
 /// Process-local registry of servers this tool started, keyed by handle id.
 static SERVERS: LazyLock<Mutex<HashMap<u64, ServerHandle>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Persistent file storing server handles (for cross-invocation visibility).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistentServerRecord {
+    pub handle_id: u64,
+    pub url: String,
+    pub port: u16,
+    pub token: String,
+}
+
+/// Path to the persistent server registry file.
+fn servers_file() -> Result<PathBuf> {
+    let home = std::env::var("HOME").context("HOME env var not set")?;
+    let path = PathBuf::from(home).join(".gila").join("servers.json");
+    Ok(path)
+}
+
+/// Load persisted server handles from disk.
+fn load_persistent_servers() -> Result<Vec<PersistentServerRecord>> {
+    let path = servers_file()?;
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let content = fs::read_to_string(&path).context("Failed to read servers file")?;
+    let records = serde_json::from_str(&content).context("Failed to parse servers file")?;
+    Ok(records)
+}
+
+/// Save persisted server handles to disk.
+fn save_persistent_servers(records: &[PersistentServerRecord]) -> Result<()> {
+    let path = servers_file()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).context("Failed to create .gila directory")?;
+    }
+    let json = serde_json::to_string_pretty(records).context("Failed to serialize servers")?;
+    fs::write(&path, json).context("Failed to write servers file")?;
+    Ok(())
+}
 
 fn is_loopback(host: &str) -> bool {
     matches!(host, "127.0.0.1" | "::1" | "localhost" | "localhost.")
@@ -602,6 +666,20 @@ pub fn start_server(params: JupyterServerParams) -> Result<JupyterServerResult> 
                     token: token.clone(),
                 },
             );
+            // Persist the handle for cross-invocation visibility.
+            if let Err(e) = (|| -> Result<()> {
+                let mut records = load_persistent_servers().unwrap_or_default();
+                records.push(PersistentServerRecord {
+                    handle_id,
+                    url: url.clone(),
+                    port,
+                    token: token.clone(),
+                });
+                save_persistent_servers(&records)?;
+                Ok(())
+            })() {
+                eprintln!("warning: failed to persist server handle: {e}");
+            }
             Ok(JupyterServerResult {
                 success: true,
                 handle_id: Some(handle_id),
@@ -622,14 +700,24 @@ pub fn start_server(params: JupyterServerParams) -> Result<JupyterServerResult> 
 /// (already stopped or never started by this process).
 pub fn stop_server(handle_id: u64) -> Result<bool> {
     let mut handle = SERVERS.lock().unwrap().remove(&handle_id);
-    match handle.as_mut() {
+    let killed = match handle.as_mut() {
         Some(h) => {
-            let killed = h.child.kill().is_ok();
+            let k = h.child.kill().is_ok();
             let _ = h.child.wait();
-            Ok(killed)
+            k
         }
-        None => Ok(false),
+        None => false,
+    };
+    // Remove from persistent registry as well.
+    if let Err(e) = (|| -> Result<()> {
+        let mut records = load_persistent_servers().unwrap_or_default();
+        records.retain(|r| r.handle_id != handle_id);
+        save_persistent_servers(&records)?;
+        Ok(())
+    })() {
+        eprintln!("warning: failed to remove handle from persistent registry: {e}");
     }
+    Ok(killed)
 }
 
 /// Get status of a Jupyter server by handle id.
@@ -683,6 +771,26 @@ pub fn get_server_status(handle_id: u64) -> Result<JupyterServerStatus> {
             kernels: vec![],
         }),
     }
+}
+
+/// List all active Jupyter servers started via `gila jupyter start`.
+///
+/// Reads from a persistent registry stored in `~/.gila/servers.json`, so this
+/// will return servers from any previous `gila` invocation, not just the
+/// current process. The registry is updated when servers are started or stopped.
+pub fn list_servers() -> Result<JupyterListResult> {
+    let records = load_persistent_servers().unwrap_or_default();
+    let mut servers = Vec::new();
+    for record in records {
+        servers.push(ServerSummary {
+            handle_id: record.handle_id,
+            url: record.url,
+            port: record.port,
+            running: true,
+        });
+    }
+    servers.sort_by_key(|s| s.handle_id);
+    Ok(JupyterListResult { servers })
 }
 
 #[cfg(test)]

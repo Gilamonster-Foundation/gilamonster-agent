@@ -575,7 +575,7 @@ async fn run(command: Command, prepared_solve: Option<solve::PreparedSolve>) -> 
 #[cfg(feature = "jupyter")]
 fn run_jupyter(action: gilamonster_agent::gila_jupyter::JupyterCmd) -> Result<(), anyhow::Error> {
     use gilamonster_agent::gila_jupyter::{
-        execute_notebook, get_server_status, start_server, stop_server, JupyterCmd,
+        execute_notebook, get_server_status, list_servers, start_server, stop_server, JupyterCmd,
         JupyterExecuteParams, JupyterServerParams,
     };
     match action {
@@ -669,6 +669,24 @@ fn run_jupyter(action: gilamonster_agent::gila_jupyter::JupyterCmd) -> Result<()
                     "  kernel {} `{}` {} ({} conns)",
                     k.id, k.name, k.execution_state, k.connections,
                 );
+            }
+            Ok(())
+        }
+        JupyterCmd::List => {
+            let result = list_servers()?;
+            if result.servers.is_empty() {
+                println!("no active jupyter servers");
+            } else {
+                println!("{} active server{}:", result.servers.len(),
+                         if result.servers.len() == 1 { "" } else { "s" });
+                for server in result.servers {
+                    println!(
+                        "  handle {} at {} (port {})",
+                        server.handle_id,
+                        server.url,
+                        server.port,
+                    );
+                }
             }
             Ok(())
         }
