@@ -451,6 +451,67 @@ fn is_loopback(host: &str) -> bool {
     matches!(host, "127.0.0.1" | "::1" | "localhost" | "localhost.")
 }
 
+/// Detect environment manager in a directory and return appropriate launcher.
+///
+/// Searches for pixi.toml, pyproject.toml (uv), requirements.txt (venv),
+/// environment.yml (conda), or .venv directory. Returns a command wrapper
+/// that will activate the environment before running jupyter.
+///
+/// The wrapper is constructed so that we can still append `notebook --port XXX` etc.
+fn detect_and_wrap_jupyter_cmd(working_dir: &Path) -> (String, Vec<String>) {
+    // Check for pixi.toml
+    if working_dir.join("pixi.toml").exists() {
+        return ("pixi".to_string(), vec!["run".to_string(), "jupyter".to_string()]);
+    }
+
+    // Check for uv (pyproject.toml with [tool.uv])
+    if let Ok(content) = fs::read_to_string(working_dir.join("pyproject.toml")) {
+        if content.contains("[tool.uv]") {
+            return ("uv".to_string(), vec!["run".to_string(), "jupyter".to_string()]);
+        }
+    }
+
+    // Check for conda environment.yml
+    if working_dir.join("environment.yml").exists() {
+        return (
+            "conda".to_string(),
+            vec![
+                "run".to_string(),
+                "--file".to_string(),
+                working_dir.join("environment.yml").to_string_lossy().to_string(),
+                "jupyter".to_string(),
+            ],
+        );
+    }
+
+    // Check for .venv directory
+    if working_dir.join(".venv").exists() {
+        let activate = working_dir.join(".venv/bin/activate");
+        return (
+            "sh".to_string(),
+            vec![
+                "-c".to_string(),
+                format!("source {} && exec jupyter \"$@\"", activate.display()),
+            ],
+        );
+    }
+
+    // Check for requirements.txt (assume venv exists or will be created)
+    if working_dir.join("requirements.txt").exists() {
+        let activate = working_dir.join(".venv/bin/activate");
+        return (
+            "sh".to_string(),
+            vec![
+                "-c".to_string(),
+                format!("source {} && exec jupyter \"$@\"", activate.display()),
+            ],
+        );
+    }
+
+    // Fallback: plain jupyter (with minimal environment)
+    ("jupyter".to_string(), vec![])
+}
+
 /// Build the base `jupyter` command with the inherited environment scrubbed
 /// and only a minimal, safe allowlist passed back through.
 fn jupyter_cmd() -> Command {
@@ -485,24 +546,47 @@ fn hash_password(plaintext: &str) -> Result<String> {
 
 /// Poll the server's REST API until it answers (or the deadline elapses),
 /// instead of sleeping a fixed delay that races startup.
-fn readiness_probe(url: &str, token: &str, timeout: Duration) -> Result<()> {
+///
+/// If the requested port is busy, Jupyter auto-selects a different port.
+/// This probe tries a range of ports (requested ± 10) to find the actual one.
+/// Any response (including auth errors) indicates the server is running.
+fn readiness_probe(base_url: &str, token: &str, timeout: Duration) -> Result<(String, u16)> {
     let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(3))
+        .timeout(Duration::from_secs(5))
         .build()
         .context("Failed to build HTTP client for readiness probe")?;
+
+    // Extract host and base port from the URL
+    let url_lower = base_url.to_lowercase();
+    let host_port = url_lower
+        .strip_prefix("http://")
+        .or_else(|| url_lower.strip_prefix("https://"))
+        .context("Invalid URL scheme")?;
+    let (host, base_port_str) = host_port.split_once(':').context("Missing port in URL")?;
+    let base_port: u16 = base_port_str.parse().context("Invalid port number")?;
+
     let deadline = std::time::Instant::now() + timeout;
+
+    // Try ports in expanding rings: base, base±1, base±2, etc., up to ±10
     loop {
-        let res = client
-            .get(format!("{}/api/kernels", url.trim_end_matches('/')))
-            .header("Authorization", format!("token {token}"))
-            .send();
-        if let Ok(resp) = res {
-            if resp.status().is_success() {
-                return Ok(());
+        for offset in 0..=10 {
+            for port in [base_port + offset, base_port.saturating_sub(offset)] {
+                if port == 0 {
+                    continue;
+                }
+                let try_url = format!("http://{}:{}", host, port);
+                let res = client
+                    .get(format!("{}/api/kernels", try_url.trim_end_matches('/')))
+                    .header("Authorization", format!("token {token}"))
+                    .send();
+                // Any successful connection (even 401/403) means the server is running
+                if let Ok(_resp) = res {
+                    return Ok((try_url, port));
+                }
             }
         }
         if std::time::Instant::now() >= deadline {
-            anyhow::bail!("jupyter server at {url} did not become ready within {timeout:?}");
+            anyhow::bail!("jupyter server did not become ready within {timeout:?}");
         }
         std::thread::sleep(Duration::from_millis(250));
     }
@@ -540,7 +624,12 @@ pub fn start_server(params: JupyterServerParams) -> Result<JupyterServerResult> 
     // Build the jupyter notebook command. Deliberately NO remote-access /
     // allow-origin flags — loopback binding + the default `False` is
     // load-bearing and keeps the server off the network.
-    let mut cmd = jupyter_cmd();
+    // Use environment-aware launcher (pixi, uv, venv, etc.) if available.
+    let (launcher, launcher_args) = detect_and_wrap_jupyter_cmd(&working_dir);
+    let mut cmd = Command::new(&launcher);
+    for arg in launcher_args {
+        cmd.arg(&arg);
+    }
     cmd.arg("notebook")
         .arg("--port")
         .arg(port.to_string())
@@ -583,16 +672,26 @@ pub fn start_server(params: JupyterServerParams) -> Result<JupyterServerResult> 
     let pid = child.id();
     let url = format!("http://{host}:{port}");
 
-    // Drain stdout fully (discard) and capture the tail of stderr for
-    // diagnostics. Without draining, the OS pipe buffer fills and deadlocks
-    // the server — the classic leaked-handle bug.
+    // Drain stdout and capture stderr to detect the actual port Jupyter uses
+    // (it may auto-select a different port if the requested one is busy).
+    let stdout_output = std::sync::Arc::new(Mutex::new(Vec::<u8>::new()));
+    let stderr_tail = std::sync::Arc::new(Mutex::new(Vec::<u8>::new()));
+
     if let Some(mut out) = child.stdout.take() {
+        let out_capture = std::sync::Arc::clone(&stdout_output);
         thread::spawn(move || {
             let mut buf = [0u8; 4096];
-            while out.read(&mut buf).map(|n| n > 0).unwrap_or(false) {}
+            loop {
+                match out.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let mut g = out_capture.lock().unwrap();
+                        g.extend_from_slice(&buf[..n]);
+                    }
+                }
+            }
         });
     }
-    let stderr_tail = std::sync::Arc::new(Mutex::new(Vec::<u8>::new()));
     if let Some(mut err) = child.stderr.take() {
         let tail = std::sync::Arc::clone(&stderr_tail);
         thread::spawn(move || {
@@ -612,8 +711,13 @@ pub fn start_server(params: JupyterServerParams) -> Result<JupyterServerResult> 
         });
     }
 
-    // Probe the REST API until the server answers (or we time out), instead of
-    // sleeping a fixed delay that races startup.
+    // Give the server a moment to fully initialize before probing.
+    // The process might have started but not yet bound to the port.
+    thread::sleep(Duration::from_millis(500));
+
+    // Probe the REST API until the server answers (or we time out). The probe
+    // detects which port Jupyter actually bound to (may differ from requested
+    // if the requested port was busy).
     let probe = readiness_probe(&url, &token, Duration::from_secs(20));
 
     if let Err(e) = probe {
@@ -635,8 +739,10 @@ pub fn start_server(params: JupyterServerParams) -> Result<JupyterServerResult> 
         });
     }
 
-    // Probe succeeded — confirm the process is still alive (it may have exited
-    // in the window between the probe and now).
+    let (actual_url, actual_port) = probe.unwrap();
+
+    // Confirm the process is still alive (it may have exited in the window
+    // between the probe and now).
     match child.try_wait() {
         Ok(Some(status)) => {
             let stderr_snippet = {
@@ -661,8 +767,8 @@ pub fn start_server(params: JupyterServerParams) -> Result<JupyterServerResult> 
                 handle_id,
                 ServerHandle {
                     child,
-                    url: url.clone(),
-                    port,
+                    url: actual_url.clone(),
+                    port: actual_port,
                     token: token.clone(),
                 },
             );
@@ -671,8 +777,8 @@ pub fn start_server(params: JupyterServerParams) -> Result<JupyterServerResult> 
                 let mut records = load_persistent_servers().unwrap_or_default();
                 records.push(PersistentServerRecord {
                     handle_id,
-                    url: url.clone(),
-                    port,
+                    url: actual_url.clone(),
+                    port: actual_port,
                     token: token.clone(),
                 });
                 save_persistent_servers(&records)?;
@@ -683,9 +789,9 @@ pub fn start_server(params: JupyterServerParams) -> Result<JupyterServerResult> 
             Ok(JupyterServerResult {
                 success: true,
                 handle_id: Some(handle_id),
-                url: Some(url),
+                url: Some(actual_url),
                 pid: Some(pid),
-                port: Some(port),
+                port: Some(actual_port),
                 token: Some(token),
                 error: None,
             })
