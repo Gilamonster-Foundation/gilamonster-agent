@@ -801,29 +801,37 @@ pub fn start_server(params: JupyterServerParams) -> Result<JupyterServerResult> 
 
     // Wait for endpoint announcement and parse it from captured output.
     // The child will write "Jupyter Server X is running at: http://HOST:PORT/..."
+    // Note: when run through Pixi, Jupyter output goes to stderr, so we combine both.
     let endpoint_result = {
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         loop {
             let output_snapshot = {
-                let g = stdout_output.lock().unwrap();
-                String::from_utf8_lossy(&g).to_string()
+                let stdout = stdout_output.lock().unwrap();
+                let stderr = stderr_tail.lock().unwrap();
+                let mut combined = stdout.clone();
+                combined.extend_from_slice(&stderr);
+                String::from_utf8_lossy(&combined).to_string()
             };
 
             if let Ok(endpoint) = parse_jupyter_endpoint(&output_snapshot) {
                 // Verify connectivity to the parsed endpoint
-                let client = reqwest::blocking::Client::builder()
-                    .timeout(Duration::from_secs(3))
-                    .build();
-                if let Ok(client) = client {
-                    let verify_url = format!("{}/api/kernels", endpoint.url.trim_end_matches('/'));
-                    if client
-                        .get(&verify_url)
-                        .header("Authorization", format!("token {}", endpoint.token))
-                        .send()
-                        .is_ok()
-                    {
-                        break Ok(endpoint);
+                let verify_success = tokio::task::block_in_place(|| {
+                    let client = reqwest::blocking::Client::builder()
+                        .timeout(Duration::from_secs(3))
+                        .build();
+                    if let Ok(client) = client {
+                        let verify_url = format!("{}/api/kernels", endpoint.url.trim_end_matches('/'));
+                        client
+                            .get(&verify_url)
+                            .header("Authorization", format!("token {}", endpoint.token))
+                            .send()
+                            .is_ok()
+                    } else {
+                        false
                     }
+                });
+                if verify_success {
+                    break Ok(endpoint);
                 }
             }
 
@@ -1057,6 +1065,7 @@ mod tests {
             password: None,
             open_browser: Some(false),
             extra_args: None,
+            pixi_task: None,
         };
 
         let json = serde_json::to_string(&params).unwrap();
@@ -1088,6 +1097,7 @@ mod tests {
             password: None,
             open_browser: None,
             extra_args: None,
+            pixi_task: None,
         })
         .expect_err("should refuse non-loopback host with an error");
         let msg = err.to_string();
@@ -1141,6 +1151,7 @@ mod tests {
             password: None,
             open_browser: None,
             extra_args: None,
+            pixi_task: None,
         })
         .unwrap();
         assert!(started.success, "server should start: {:?}", started.error);
@@ -1176,6 +1187,7 @@ mod tests {
             password: None,
             open_browser: None,
             extra_args: None,
+            pixi_task: None,
         })
         .unwrap();
         assert!(!res.success, "should not start on an occupied port");
