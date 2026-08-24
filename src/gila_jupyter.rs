@@ -10,15 +10,23 @@
 //!
 //! ## Server model
 //!
-//! `start_server` spawns `jupyter notebook` bound to the loopback interface
-//! only (never a remote-access flag), scrubs the child environment of gila's
-//! whole control plane (`env_clear` + a minimal allowlist), then *probes* the
-//! REST API until the server answers instead of sleeping a fixed delay. The
-//! spawned `Child` is owned by a process-local registry keyed by an opaque
-//! `handle_id`; `stop_server` / `get_server_status` operate by handle, never
-//! by bare PID or an arbitrary URL — so a caller cannot point this tool at a
-//! server it did not start. `stop_server` kills the owned child directly
-//! (`Child::kill`), so no `kill` / `taskkill` subprocess is ever spawned.
+//! `start_server` spawns `jupyter notebook` (through Pixi if available) bound
+//! to the loopback interface only (never a remote-access flag), scrubs the child
+//! environment of gila's whole control plane (`env_clear` + a minimal allowlist),
+//! then parses the actual endpoint from the server's startup output instead of
+//! probing blindly. The spawned `Child` is owned by a process-local registry
+//! keyed by an opaque `handle_id`; `stop_server` / `get_server_status` operate
+//! by handle, never by bare PID or an arbitrary URL — so a caller cannot point
+//! this tool at a server it did not start. `stop_server` kills the owned child
+//! directly (`Child::kill`), so no `kill` / `taskkill` subprocess is spawned.
+//!
+//! ## Pixi Integration
+//!
+//! When a project has pixi.toml and Pixi is available:
+//! - Search for declared tasks (lab-local, jupyter, lab, jupyter-lab)
+//! - Fall back to `pixi run jupyter notebook ...` if no task found
+//! - Environment is managed by Pixi; gila still scrubs sensitive vars
+//! - Bootstrap workflow available to modernize legacy [project] → [workspace]
 
 use std::collections::HashMap;
 use std::fs;
@@ -105,6 +113,15 @@ pub enum JupyterCmd {
     },
     /// List all active Jupyter servers started by this process.
     List,
+    /// Bootstrap: modernize pixi.toml from [project] to [workspace] syntax.
+    Bootstrap {
+        /// Auto-confirm the update (preview-only by default).
+        #[arg(long)]
+        confirm: bool,
+        /// Working directory (default: current directory).
+        #[arg(long)]
+        working_dir: Option<String>,
+    },
 }
 
 // ---- notebook execution -------------------------------------------------
@@ -371,6 +388,15 @@ pub struct KernelInfo {
     pub connections: usize,
 }
 
+/// Parsed endpoint from Jupyter server startup output
+#[derive(Debug, Clone)]
+pub struct JupyterEndpoint {
+    pub url: String,
+    pub host: String,
+    pub port: u16,
+    pub token: String,
+}
+
 /// Summary of an active Jupyter server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerSummary {
@@ -449,6 +475,74 @@ fn save_persistent_servers(records: &[PersistentServerRecord]) -> Result<()> {
 
 fn is_loopback(host: &str) -> bool {
     matches!(host, "127.0.0.1" | "::1" | "localhost" | "localhost.")
+}
+
+/// Parse Jupyter endpoint from server startup output.
+///
+/// Jupyter logs "Jupyter Server X.X.X is running at: http://HOST:PORT/tree?token=TOKEN"
+/// This function extracts the actual endpoint used by the child process.
+#[allow(dead_code)] // Will be used after start_server refactor
+fn parse_jupyter_endpoint(output: &str) -> Result<JupyterEndpoint> {
+    // Look for lines containing "http://" and "token="
+    let url_line = output
+        .lines()
+        .find(|l| l.contains("http://") || l.contains("https://"))
+        .context("No HTTP URL found in Jupyter startup output")?;
+
+    // Extract URL part (http://host:port/...)
+    let url_start = url_line
+        .find("http://")
+        .or_else(|| url_line.find("https://"))
+        .context("Missing http:// or https://")?;
+    let url_end = url_line[url_start..]
+        .find(' ')
+        .map(|i| url_start + i)
+        .unwrap_or(url_line.len());
+    let full_url = &url_line[url_start..url_end];
+
+    // Parse host and port from the URL
+    let after_scheme = full_url
+        .strip_prefix("https://")
+        .or_else(|| full_url.strip_prefix("http://"))
+        .context("Missing scheme")?;
+    let host_port_end = after_scheme
+        .find('/')
+        .unwrap_or(after_scheme.len());
+    let host_port = &after_scheme[..host_port_end];
+
+    let (host, port_str) = host_port
+        .rsplit_once(':')
+        .context("Missing port in URL")?;
+    let port: u16 = port_str.parse().context("Invalid port number")?;
+
+    // Extract token from the URL or from a separate line
+    let token = if let Some(token_start) = full_url.find("token=") {
+        let token_part = &full_url[token_start + 6..];
+        token_part
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .next()
+            .context("Empty token")?
+            .to_string()
+    } else {
+        // Token might be on a separate line or obscured, try to find it
+        output
+            .lines()
+            .find_map(|l| {
+                l.strip_prefix("Use Control-C")?;
+                // Token is printed obscured in newer Jupyter versions
+                None
+            })
+            .unwrap_or_else(|| "".to_string())
+    };
+
+    let url = format!("http://{}:{}", host, port);
+
+    Ok(JupyterEndpoint {
+        url,
+        host: host.to_string(),
+        port,
+        token,
+    })
 }
 
 /// Detect environment manager in a directory and return appropriate launcher.

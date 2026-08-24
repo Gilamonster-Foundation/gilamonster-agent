@@ -690,6 +690,29 @@ fn run_jupyter(action: gilamonster_agent::gila_jupyter::JupyterCmd) -> Result<()
             }
             Ok(())
         }
+        JupyterCmd::Bootstrap { confirm, working_dir } => {
+            use gilamonster_agent::gila_pixi;
+            let dir = working_dir
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+            if !gila_pixi::has_pixi_manifest(&dir) {
+                println!("No pixi.toml found in {}", dir.display());
+                return Ok(());
+            }
+
+            let manifest = gila_pixi::load_manifest(&dir)?;
+            let preview = gila_pixi::preview_modernization(&manifest);
+            println!("{}", preview);
+
+            if confirm {
+                gila_pixi::modernize_manifest(&dir)?;
+                println!("✓ Updated pixi.toml to modern [workspace] structure");
+            } else {
+                println!("\nTo apply: gila jupyter bootstrap --confirm");
+            }
+            Ok(())
+        }
     }
 }
 

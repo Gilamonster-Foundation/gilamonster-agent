@@ -51,6 +51,8 @@ pub mod gila_init;
 pub mod gila_insights;
 #[cfg(feature = "jupyter")]
 pub mod gila_jupyter;
+#[cfg(feature = "jupyter")]
+pub mod gila_pixi;
 #[cfg(feature = "native-git")]
 pub mod gila_log;
 pub mod gila_logs;
