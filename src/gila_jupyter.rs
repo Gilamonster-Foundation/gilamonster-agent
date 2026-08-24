@@ -693,15 +693,17 @@ pub fn start_server(params: JupyterServerParams) -> Result<JupyterServerResult> 
 
     let mut cmd = if use_declared_task && gila_pixi::has_pixi_manifest(&working_dir) {
         // Use declared Pixi task (it manages its own arguments, don't add ours)
+        // Use shell wrapper to ensure stdout/stderr merge for output capture
         let manifest = gila_pixi::load_manifest(&working_dir).unwrap();
         let task = gila_pixi::find_jupyter_task(&manifest, params.pixi_task.as_deref()).unwrap();
-        let mut cmd = Command::new("pixi");
-        cmd.arg("run").arg(&task);
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(format!("pixi run {} 2>&1", task));
         cmd
     } else if gila_pixi::has_pixi_manifest(&working_dir) {
         // Pixi available but no declared task; use jupyter through pixi with our args
-        let mut cmd = Command::new("pixi");
-        cmd.arg("run").arg("jupyter").arg("notebook");
+        // Use shell wrapper to ensure stdout/stderr merge for output capture
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("pixi run jupyter notebook 2>&1");
         cmd
     } else {
         // No pixi.toml; use legacy environment detection
