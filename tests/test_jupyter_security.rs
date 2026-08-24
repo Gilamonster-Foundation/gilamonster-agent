@@ -62,7 +62,10 @@ mod security_tests {
     fn test_empty_token_validation() {
         // Empty token should fail validation
         let empty_token = "";
-        assert!(empty_token.is_empty(), "Empty tokens should be rejected for security");
+        assert!(
+            empty_token.is_empty(),
+            "Empty tokens should be rejected for security"
+        );
 
         // Non-empty tokens should pass basic validation
         let valid_token = "abc123def456";
