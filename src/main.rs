@@ -679,20 +679,24 @@ fn run_jupyter(action: gilamonster_agent::gila_jupyter::JupyterCmd) -> Result<()
             if result.servers.is_empty() {
                 println!("no active jupyter servers");
             } else {
-                println!("{} active server{}:", result.servers.len(),
-                         if result.servers.len() == 1 { "" } else { "s" });
+                println!(
+                    "{} active server{}:",
+                    result.servers.len(),
+                    if result.servers.len() == 1 { "" } else { "s" }
+                );
                 for server in result.servers {
                     println!(
                         "  handle {} at {} (port {})",
-                        server.handle_id,
-                        server.url,
-                        server.port,
+                        server.handle_id, server.url, server.port,
                     );
                 }
             }
             Ok(())
         }
-        JupyterCmd::Bootstrap { confirm, working_dir } => {
+        JupyterCmd::Bootstrap {
+            confirm,
+            working_dir,
+        } => {
             use gilamonster_agent::gila_pixi;
             let dir = working_dir
                 .map(std::path::PathBuf::from)

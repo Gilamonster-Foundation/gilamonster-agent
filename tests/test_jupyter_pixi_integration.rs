@@ -3,7 +3,6 @@
 
 use gilamonster_agent::gila_pixi;
 use std::fs;
-use std::path::PathBuf;
 use tempfile::TempDir;
 
 #[test]
@@ -202,8 +201,6 @@ fn test_preview_modernization() {
 #[test]
 #[cfg(feature = "jupyter")]
 fn test_endpoint_parsing() {
-    use gilamonster_agent::gila_jupyter;
-
     // Simulate Jupyter startup output
     let output = r#"
 [I 2026-08-24 12:00:00.000 ServerApp] notebook | extension was successfully linked.

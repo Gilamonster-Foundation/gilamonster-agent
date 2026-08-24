@@ -178,19 +178,29 @@ pub struct CellOutputSummary {
 pub fn execute_notebook(params: JupyterExecuteParams) -> Result<JupyterExecuteResult> {
     let start_time = std::time::Instant::now();
 
-    // working_dir=None means the notebook's parent directory.
+    // Resolve notebook path: use as-is if absolute, otherwise relative to working_dir.
     let notebook_input = PathBuf::from(&params.notebook_path);
-    let working_dir = match params.working_dir.map(PathBuf::from) {
+    let notebook_path = if notebook_input.is_absolute() {
+        notebook_input.clone()
+    } else {
+        // For relative paths, resolve against working_dir (or current dir if not specified).
+        let working_dir = params
+            .working_dir
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."));
+        working_dir.join(&notebook_input)
+    };
+
+    // Determine working_dir for execution: notebook's parent if not explicitly specified.
+    let working_dir = match params.working_dir.as_ref().map(PathBuf::from) {
         Some(d) => d,
-        None => notebook_input
+        None => notebook_path
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from(".")),
     };
-
-    // Resolve notebook path relative to working_dir.
-    let notebook_path = working_dir.join(&notebook_input);
     if !notebook_path.exists() {
         anyhow::bail!("Notebook not found: {}", notebook_path.display());
     }
@@ -444,12 +454,17 @@ static SERVERS: LazyLock<Mutex<HashMap<u64, ServerHandle>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Persistent file storing server handles (for cross-invocation visibility).
+/// Includes PID and start time to detect stale entries and PID reuse on Windows.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersistentServerRecord {
     pub handle_id: u64,
     pub url: String,
     pub port: u16,
     pub token: String,
+    #[serde(default)]
+    pub pid: Option<u32>,
+    #[serde(default)]
+    pub start_time_unix: Option<u64>,
 }
 
 /// Path to the persistent server registry file.
@@ -470,14 +485,53 @@ fn load_persistent_servers() -> Result<Vec<PersistentServerRecord>> {
     Ok(records)
 }
 
-/// Save persisted server handles to disk.
+/// Save persisted server handles to disk with atomic writes and user-only permissions.
 fn save_persistent_servers(records: &[PersistentServerRecord]) -> Result<()> {
+    use std::io::Write;
+
     let path = servers_file()?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).context("Failed to create .gila directory")?;
+    let parent = path.parent().context("Invalid path")?;
+
+    // Create directory with restricted permissions (0700)
+    fs::create_dir_all(parent).context("Failed to create .gila directory")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = fs::Permissions::from_mode(0o700);
+        fs::set_permissions(parent, perms).context("Failed to set directory permissions")?;
     }
+
+    // Write to temporary file first, then atomically move it
+    let mut temp_path = path.clone();
+    temp_path.set_file_name(format!(".servers.{}.tmp", std::process::id()));
+
     let json = serde_json::to_string_pretty(records).context("Failed to serialize servers")?;
-    fs::write(&path, json).context("Failed to write servers file")?;
+
+    {
+        let mut file =
+            fs::File::create(&temp_path).context("Failed to create temporary servers file")?;
+        file.write_all(json.as_bytes())
+            .context("Failed to write servers data")?;
+        file.sync_all().context("Failed to sync servers file")?;
+    }
+
+    // Set file permissions to user-only (0600) on Unix before moving
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = fs::Permissions::from_mode(0o600);
+        fs::set_permissions(&temp_path, perms).context("Failed to set file permissions")?;
+    }
+
+    // Atomic move (on Unix) or overwrite (on Windows)
+    #[cfg(unix)]
+    fs::rename(&temp_path, &path).context("Failed to atomically move servers file")?;
+    #[cfg(not(unix))]
+    {
+        let _ = fs::remove_file(&path); // Ignore error if file doesn't exist
+        fs::rename(&temp_path, &path).context("Failed to write servers file")?;
+    }
+
     Ok(())
 }
 
@@ -513,14 +567,10 @@ fn parse_jupyter_endpoint(output: &str) -> Result<JupyterEndpoint> {
         .strip_prefix("https://")
         .or_else(|| full_url.strip_prefix("http://"))
         .context("Missing scheme")?;
-    let host_port_end = after_scheme
-        .find('/')
-        .unwrap_or(after_scheme.len());
+    let host_port_end = after_scheme.find('/').unwrap_or(after_scheme.len());
     let host_port = &after_scheme[..host_port_end];
 
-    let (host, port_str) = host_port
-        .rsplit_once(':')
-        .context("Missing port in URL")?;
+    let (host, port_str) = host_port.rsplit_once(':').context("Missing port in URL")?;
     let port: u16 = port_str.parse().context("Invalid port number")?;
 
     // Extract token from the URL or from a separate line
@@ -563,13 +613,19 @@ fn parse_jupyter_endpoint(output: &str) -> Result<JupyterEndpoint> {
 fn detect_and_wrap_jupyter_cmd(working_dir: &Path) -> (String, Vec<String>) {
     // Check for pixi.toml
     if working_dir.join("pixi.toml").exists() {
-        return ("pixi".to_string(), vec!["run".to_string(), "jupyter".to_string()]);
+        return (
+            "pixi".to_string(),
+            vec!["run".to_string(), "jupyter".to_string()],
+        );
     }
 
     // Check for uv (pyproject.toml with [tool.uv])
     if let Ok(content) = fs::read_to_string(working_dir.join("pyproject.toml")) {
         if content.contains("[tool.uv]") {
-            return ("uv".to_string(), vec!["run".to_string(), "jupyter".to_string()]);
+            return (
+                "uv".to_string(),
+                vec!["run".to_string(), "jupyter".to_string()],
+            );
         }
     }
 
@@ -580,7 +636,10 @@ fn detect_and_wrap_jupyter_cmd(working_dir: &Path) -> (String, Vec<String>) {
             vec![
                 "run".to_string(),
                 "--file".to_string(),
-                working_dir.join("environment.yml").to_string_lossy().to_string(),
+                working_dir
+                    .join("environment.yml")
+                    .to_string_lossy()
+                    .to_string(),
                 "jupyter".to_string(),
             ],
         );
@@ -693,17 +752,17 @@ pub fn start_server(params: JupyterServerParams) -> Result<JupyterServerResult> 
 
     let mut cmd = if use_declared_task && gila_pixi::has_pixi_manifest(&working_dir) {
         // Use declared Pixi task (it manages its own arguments, don't add ours)
-        // Use shell wrapper to ensure stdout/stderr merge for output capture
+        // Invoke pixi directly with structured argv (no shell wrapper)
         let manifest = gila_pixi::load_manifest(&working_dir).unwrap();
         let task = gila_pixi::find_jupyter_task(&manifest, params.pixi_task.as_deref()).unwrap();
-        let mut cmd = Command::new("sh");
-        cmd.arg("-c").arg(format!("pixi run {} 2>&1", task));
+        let mut cmd = Command::new("pixi");
+        cmd.arg("run").arg(task);
         cmd
     } else if gila_pixi::has_pixi_manifest(&working_dir) {
         // Pixi available but no declared task; use jupyter through pixi with our args
-        // Use shell wrapper to ensure stdout/stderr merge for output capture
-        let mut cmd = Command::new("sh");
-        cmd.arg("-c").arg("pixi run jupyter notebook 2>&1");
+        // Invoke pixi directly with structured argv
+        let mut cmd = Command::new("pixi");
+        cmd.arg("run").arg("jupyter").arg("notebook");
         cmd
     } else {
         // No pixi.toml; use legacy environment detection
@@ -716,7 +775,7 @@ pub fn start_server(params: JupyterServerParams) -> Result<JupyterServerResult> 
         cmd
     };
 
-    // Add server configuration args (only if not using a declared task)
+    // Add server configuration args (only if not using a declared task that manages its own config)
     if !use_declared_task {
         cmd.arg("--port")
             .arg(port.to_string())
@@ -726,7 +785,21 @@ pub fn start_server(params: JupyterServerParams) -> Result<JupyterServerResult> 
             .arg(&token);
     }
 
+    // For declared Pixi tasks, reject any non-loopback binding or missing authentication
+    if use_declared_task && gila_pixi::has_pixi_manifest(&working_dir) {
+        // Will validate the parsed endpoint later
+    }
+
     cmd.current_dir(&working_dir);
+
+    // Apply security boundary: scrub environment of control-plane vars for ALL launchers.
+    // This applies to pixi, uv, conda, venv, and direct jupyter invocations.
+    cmd.env_clear();
+    for key in ENV_ALLOWLIST {
+        if let Ok(val) = std::env::var(key) {
+            cmd.env(key, val);
+        }
+    }
 
     // Honor the open_browser flag: only pass --no-browser when the caller
     // did not explicitly ask for a browser.
@@ -814,13 +887,27 @@ pub fn start_server(params: JupyterServerParams) -> Result<JupyterServerResult> 
             };
 
             if let Ok(endpoint) = parse_jupyter_endpoint(&output_snapshot) {
+                // Enforce security boundary: reject non-loopback binding or missing token
+                if !is_loopback(&endpoint.host) {
+                    break Err(anyhow::anyhow!(
+                        "Server is bound to non-loopback address {} (security boundary violation)",
+                        endpoint.host
+                    ));
+                }
+                if endpoint.token.is_empty() {
+                    break Err(anyhow::anyhow!(
+                        "Server has no authentication token (security boundary violation)"
+                    ));
+                }
+
                 // Verify connectivity to the parsed endpoint
                 let verify_success = tokio::task::block_in_place(|| {
                     let client = reqwest::blocking::Client::builder()
                         .timeout(Duration::from_secs(3))
                         .build();
                     if let Ok(client) = client {
-                        let verify_url = format!("{}/api/kernels", endpoint.url.trim_end_matches('/'));
+                        let verify_url =
+                            format!("{}/api/kernels", endpoint.url.trim_end_matches('/'));
                         client
                             .get(&verify_url)
                             .header("Authorization", format!("token {}", endpoint.token))
@@ -898,6 +985,10 @@ pub fn start_server(params: JupyterServerParams) -> Result<JupyterServerResult> 
             })
         }
         Ok(None) | Err(_) => {
+            // Use the actual token from the parsed endpoint, not the one we generated.
+            // For declared tasks that we didn't configure, this is the only source of truth.
+            let actual_token = endpoint.token.clone();
+
             let handle_id = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
             SERVERS.lock().unwrap().insert(
                 handle_id,
@@ -905,17 +996,23 @@ pub fn start_server(params: JupyterServerParams) -> Result<JupyterServerResult> 
                     child,
                     url: actual_url.clone(),
                     port: actual_port,
-                    token: token.clone(),
+                    token: actual_token.clone(),
                 },
             );
             // Persist the handle for cross-invocation visibility.
             if let Err(e) = (|| -> Result<()> {
                 let mut records = load_persistent_servers().unwrap_or_default();
+                let start_time = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .ok();
                 records.push(PersistentServerRecord {
                     handle_id,
                     url: actual_url.clone(),
                     port: actual_port,
-                    token: token.clone(),
+                    token: actual_token.clone(),
+                    pid: Some(pid),
+                    start_time_unix: start_time,
                 });
                 save_persistent_servers(&records)?;
                 Ok(())
@@ -928,7 +1025,7 @@ pub fn start_server(params: JupyterServerParams) -> Result<JupyterServerResult> 
                 url: Some(actual_url),
                 pid: Some(pid),
                 port: Some(actual_port),
-                token: Some(token),
+                token: Some(actual_token),
                 error: None,
             })
         }
@@ -968,34 +1065,46 @@ pub fn stop_server(handle_id: u64) -> Result<bool> {
 /// own REST API (with its own token). A caller cannot point this at an
 /// arbitrary URL — only at a server this tool started.
 pub fn get_server_status(handle_id: u64) -> Result<JupyterServerStatus> {
-    // Clone the connection details out of the registry without holding the
-    // lock across a network call.
+    // Try process-local registry first (servers started in this invocation).
     let (url, token, port) = {
         let g = SERVERS.lock().unwrap();
         match g.get(&handle_id) {
             Some(h) => (h.url.clone(), h.token.clone(), h.port),
             None => {
-                return Ok(JupyterServerStatus {
-                    running: false,
-                    handle_id,
-                    url: None,
-                    port: None,
-                    kernels: vec![],
-                });
+                // Fall back to persistent registry
+                let records = load_persistent_servers().unwrap_or_default();
+                match records.iter().find(|r| r.handle_id == handle_id) {
+                    Some(r) => (r.url.clone(), r.token.clone(), r.port),
+                    None => {
+                        return Ok(JupyterServerStatus {
+                            running: false,
+                            handle_id,
+                            url: None,
+                            port: None,
+                            kernels: vec![],
+                        });
+                    }
+                }
             }
         }
     };
 
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()?;
-    let resp = client
-        .get(format!("{}/api/kernels", url.trim_end_matches('/')))
-        .header("Authorization", format!("token {token}"))
-        .send();
+    let resp = tokio::task::block_in_place(|| {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build();
+        match client {
+            Ok(c) => c
+                .get(format!("{}/api/kernels", url.trim_end_matches('/')))
+                .header("Authorization", format!("token {token}"))
+                .send()
+                .ok(),
+            Err(_) => None,
+        }
+    });
 
     match resp {
-        Ok(r) if r.status().is_success() => {
+        Some(r) if r.status().is_success() => {
             let kernels: Vec<KernelInfo> = r.json().unwrap_or_default();
             Ok(JupyterServerStatus {
                 running: true,
@@ -1017,22 +1126,60 @@ pub fn get_server_status(handle_id: u64) -> Result<JupyterServerStatus> {
 
 /// List all active Jupyter servers started via `gila jupyter start`.
 ///
-/// Reads from a persistent registry stored in `~/.gila/servers.json`, so this
-/// will return servers from any previous `gila` invocation, not just the
-/// current process. The registry is updated when servers are started or stopped.
+/// Reads from a persistent registry stored in `~/.gila/servers.json`. Only returns
+/// servers that are actually running (verified via API ping). Cleans up stale entries
+/// from previous invocations. Safe to call from any process.
 pub fn list_servers() -> Result<JupyterListResult> {
     let records = load_persistent_servers().unwrap_or_default();
     let mut servers = Vec::new();
+    let mut stale = Vec::new();
+
     for record in records {
-        servers.push(ServerSummary {
-            handle_id: record.handle_id,
-            url: record.url,
-            port: record.port,
-            running: true,
-        });
+        // Verify the server is actually running by pinging its API
+        let is_running = verify_server_running(&record.url, &record.token);
+
+        if is_running {
+            servers.push(ServerSummary {
+                handle_id: record.handle_id,
+                url: record.url.clone(),
+                port: record.port,
+                running: true,
+            });
+        } else {
+            stale.push(record.handle_id);
+        }
     }
+
+    // Clean up stale entries from persistent registry
+    if !stale.is_empty() {
+        if let Ok(mut records) = load_persistent_servers() {
+            records.retain(|r| !stale.contains(&r.handle_id));
+            let _ = save_persistent_servers(&records);
+        }
+    }
+
     servers.sort_by_key(|s| s.handle_id);
     Ok(JupyterListResult { servers })
+}
+
+/// Verify that a server is actually running by attempting to connect to its API.
+fn verify_server_running(url: &str, token: &str) -> bool {
+    tokio::task::block_in_place(|| {
+        let client = match reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+
+        let resp = client
+            .get(format!("{}/api/kernels", url.trim_end_matches('/')))
+            .header("Authorization", format!("token {token}"))
+            .send();
+
+        matches!(resp, Ok(r) if r.status().is_success())
+    })
 }
 
 #[cfg(test)]

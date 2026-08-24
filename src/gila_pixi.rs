@@ -68,10 +68,8 @@ impl TaskDef {
 /// Load and parse pixi.toml from a directory
 pub fn load_manifest(working_dir: &Path) -> Result<PixiManifest> {
     let manifest_path = working_dir.join("pixi.toml");
-    let content = fs::read_to_string(&manifest_path)
-        .context("Failed to read pixi.toml")?;
-    let manifest: PixiManifest = toml::from_str(&content)
-        .context("Failed to parse pixi.toml")?;
+    let content = fs::read_to_string(&manifest_path).context("Failed to read pixi.toml")?;
+    let manifest: PixiManifest = toml::from_str(&content).context("Failed to parse pixi.toml")?;
     Ok(manifest)
 }
 
@@ -84,7 +82,11 @@ pub fn is_legacy_manifest(manifest: &PixiManifest) -> bool {
 pub fn find_jupyter_task(manifest: &PixiManifest, explicit_task: Option<&str>) -> Option<String> {
     if let Some(task_name) = explicit_task {
         // Explicit task requested - verify it exists
-        manifest.tasks.as_ref()?.contains_key(task_name).then_some(task_name.to_string())
+        manifest
+            .tasks
+            .as_ref()?
+            .contains_key(task_name)
+            .then_some(task_name.to_string())
     } else {
         // Look for conventional names
         for name in &["lab-local", "lab", "jupyter-lab", "jupyter"] {
@@ -113,8 +115,7 @@ pub fn preview_modernization(manifest: &PixiManifest) -> String {
 /// Bootstrap workflow: update manifest to [workspace] syntax
 pub fn modernize_manifest(working_dir: &Path) -> Result<()> {
     let manifest_path = working_dir.join("pixi.toml");
-    let content = fs::read_to_string(&manifest_path)
-        .context("Failed to read pixi.toml")?;
+    let content = fs::read_to_string(&manifest_path).context("Failed to read pixi.toml")?;
 
     // Simple transformation: replace [project] with [workspace]
     let updated = if content.contains("[project]") && !content.contains("[workspace]") {
@@ -124,8 +125,7 @@ pub fn modernize_manifest(working_dir: &Path) -> Result<()> {
     };
 
     if updated != content {
-        fs::write(&manifest_path, updated)
-            .context("Failed to write updated pixi.toml")?;
+        fs::write(&manifest_path, updated).context("Failed to write updated pixi.toml")?;
         Ok(())
     } else {
         Ok(()) // Already modern or no changes needed
@@ -186,7 +186,10 @@ mod tests {
             workspace: None,
             tasks: Some(
                 vec![
-                    ("lab-local".to_string(), TaskDef::String("jupyter lab".to_string())),
+                    (
+                        "lab-local".to_string(),
+                        TaskDef::String("jupyter lab".to_string()),
+                    ),
                     ("test".to_string(), TaskDef::String("pytest".to_string())),
                 ]
                 .into_iter()
@@ -195,10 +198,16 @@ mod tests {
         };
 
         // Should find lab-local
-        assert_eq!(find_jupyter_task(&manifest, None), Some("lab-local".to_string()));
+        assert_eq!(
+            find_jupyter_task(&manifest, None),
+            Some("lab-local".to_string())
+        );
 
         // Explicit task
-        assert_eq!(find_jupyter_task(&manifest, Some("test")), Some("test".to_string()));
+        assert_eq!(
+            find_jupyter_task(&manifest, Some("test")),
+            Some("test".to_string())
+        );
         assert_eq!(find_jupyter_task(&manifest, Some("nonexistent")), None);
     }
 }
