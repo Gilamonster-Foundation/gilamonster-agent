@@ -100,6 +100,10 @@ pub enum JupyterCmd {
         /// Extra `jupyter notebook` flags (caller-controlled — use with care).
         #[arg(long, value_delimiter = ' ')]
         extra: Option<Vec<String>>,
+        /// Explicit Pixi task to run (if pixi.toml exists).
+        /// If not specified, searches for conventional task names.
+        #[arg(long)]
+        task: Option<String>,
     },
     /// Stop a Jupyter server by its handle id (from `gila jupyter start`).
     Stop {
@@ -342,6 +346,10 @@ pub struct JupyterServerParams {
     pub open_browser: Option<bool>,
     /// Additional command line args
     pub extra_args: Option<Vec<String>>,
+    /// Explicit Pixi task to run instead of `jupyter notebook`.
+    /// Only used if pixi.toml exists. If not specified, searches for
+    /// conventional task names (lab-local, jupyter, lab, jupyter-lab).
+    pub pixi_task: Option<String>,
 }
 
 /// Result of starting a Jupyter server.
@@ -638,54 +646,6 @@ fn hash_password(plaintext: &str) -> Result<String> {
     Ok(format!("argon2:{hash}"))
 }
 
-/// Poll the server's REST API until it answers (or the deadline elapses),
-/// instead of sleeping a fixed delay that races startup.
-///
-/// If the requested port is busy, Jupyter auto-selects a different port.
-/// This probe tries a range of ports (requested ± 10) to find the actual one.
-/// Any response (including auth errors) indicates the server is running.
-fn readiness_probe(base_url: &str, token: &str, timeout: Duration) -> Result<(String, u16)> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .context("Failed to build HTTP client for readiness probe")?;
-
-    // Extract host and base port from the URL
-    let url_lower = base_url.to_lowercase();
-    let host_port = url_lower
-        .strip_prefix("http://")
-        .or_else(|| url_lower.strip_prefix("https://"))
-        .context("Invalid URL scheme")?;
-    let (host, base_port_str) = host_port.split_once(':').context("Missing port in URL")?;
-    let base_port: u16 = base_port_str.parse().context("Invalid port number")?;
-
-    let deadline = std::time::Instant::now() + timeout;
-
-    // Try ports in expanding rings: base, base±1, base±2, etc., up to ±10
-    loop {
-        for offset in 0..=10 {
-            for port in [base_port + offset, base_port.saturating_sub(offset)] {
-                if port == 0 {
-                    continue;
-                }
-                let try_url = format!("http://{}:{}", host, port);
-                let res = client
-                    .get(format!("{}/api/kernels", try_url.trim_end_matches('/')))
-                    .header("Authorization", format!("token {token}"))
-                    .send();
-                // Any successful connection (even 401/403) means the server is running
-                if let Ok(_resp) = res {
-                    return Ok((try_url, port));
-                }
-            }
-        }
-        if std::time::Instant::now() >= deadline {
-            anyhow::bail!("jupyter server did not become ready within {timeout:?}");
-        }
-        std::thread::sleep(Duration::from_millis(250));
-    }
-}
-
 /// Start a Jupyter server in the background, owned by this process.
 ///
 /// The server is bound to a loopback address only, spawned with a scrubbed
@@ -718,20 +678,53 @@ pub fn start_server(params: JupyterServerParams) -> Result<JupyterServerResult> 
     // Build the jupyter notebook command. Deliberately NO remote-access /
     // allow-origin flags — loopback binding + the default `False` is
     // load-bearing and keeps the server off the network.
-    // Use environment-aware launcher (pixi, uv, venv, etc.) if available.
-    let (launcher, launcher_args) = detect_and_wrap_jupyter_cmd(&working_dir);
-    let mut cmd = Command::new(&launcher);
-    for arg in launcher_args {
-        cmd.arg(&arg);
+    // Pixi-first: check for pixi.toml and declared tasks
+    use crate::gila_pixi;
+
+    let use_declared_task = if gila_pixi::has_pixi_manifest(&working_dir) {
+        if let Ok(manifest) = gila_pixi::load_manifest(&working_dir) {
+            gila_pixi::find_jupyter_task(&manifest, params.pixi_task.as_deref()).is_some()
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    let mut cmd = if use_declared_task && gila_pixi::has_pixi_manifest(&working_dir) {
+        // Use declared Pixi task (it manages its own arguments, don't add ours)
+        let manifest = gila_pixi::load_manifest(&working_dir).unwrap();
+        let task = gila_pixi::find_jupyter_task(&manifest, params.pixi_task.as_deref()).unwrap();
+        let mut cmd = Command::new("pixi");
+        cmd.arg("run").arg(&task);
+        cmd
+    } else if gila_pixi::has_pixi_manifest(&working_dir) {
+        // Pixi available but no declared task; use jupyter through pixi with our args
+        let mut cmd = Command::new("pixi");
+        cmd.arg("run").arg("jupyter").arg("notebook");
+        cmd
+    } else {
+        // No pixi.toml; use legacy environment detection
+        let (launcher, launcher_args) = detect_and_wrap_jupyter_cmd(&working_dir);
+        let mut cmd = Command::new(&launcher);
+        for arg in launcher_args {
+            cmd.arg(&arg);
+        }
+        cmd.arg("notebook");
+        cmd
+    };
+
+    // Add server configuration args (only if not using a declared task)
+    if !use_declared_task {
+        cmd.arg("--port")
+            .arg(port.to_string())
+            .arg("--ip")
+            .arg(host)
+            .arg("--NotebookApp.token")
+            .arg(&token);
     }
-    cmd.arg("notebook")
-        .arg("--port")
-        .arg(port.to_string())
-        .arg("--ip")
-        .arg(host)
-        .arg("--NotebookApp.token")
-        .arg(&token)
-        .current_dir(&working_dir);
+
+    cmd.current_dir(&working_dir);
 
     // Honor the open_browser flag: only pass --no-browser when the caller
     // did not explicitly ask for a browser.
@@ -764,7 +757,6 @@ pub fn start_server(params: JupyterServerParams) -> Result<JupyterServerResult> 
         .context("Failed to start jupyter server. Is jupyter installed?")?;
 
     let pid = child.id();
-    let url = format!("http://{host}:{port}");
 
     // Drain stdout and capture stderr to detect the actual port Jupyter uses
     // (it may auto-select a different port if the requested one is busy).
@@ -805,21 +797,59 @@ pub fn start_server(params: JupyterServerParams) -> Result<JupyterServerResult> 
         });
     }
 
-    // Give the server a moment to fully initialize before probing.
-    // The process might have started but not yet bound to the port.
-    thread::sleep(Duration::from_millis(500));
+    // Wait for endpoint announcement and parse it from captured output.
+    // The child will write "Jupyter Server X is running at: http://HOST:PORT/..."
+    let endpoint_result = {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let output_snapshot = {
+                let g = stdout_output.lock().unwrap();
+                String::from_utf8_lossy(&g).to_string()
+            };
 
-    // Probe the REST API until the server answers (or we time out). The probe
-    // detects which port Jupyter actually bound to (may differ from requested
-    // if the requested port was busy).
-    let probe = readiness_probe(&url, &token, Duration::from_secs(20));
+            if let Ok(endpoint) = parse_jupyter_endpoint(&output_snapshot) {
+                // Verify connectivity to the parsed endpoint
+                let client = reqwest::blocking::Client::builder()
+                    .timeout(Duration::from_secs(3))
+                    .build();
+                if let Ok(client) = client {
+                    let verify_url = format!("{}/api/kernels", endpoint.url.trim_end_matches('/'));
+                    if client
+                        .get(&verify_url)
+                        .header("Authorization", format!("token {}", endpoint.token))
+                        .send()
+                        .is_ok()
+                    {
+                        break Ok(endpoint);
+                    }
+                }
+            }
 
-    if let Err(e) = probe {
-        // Startup failed. Capture whatever stderr we have, reap the child.
-        let stderr_snippet = {
-            let g = stderr_tail.lock().unwrap();
-            String::from_utf8_lossy(&g).to_string()
-        };
+            if std::time::Instant::now() >= deadline {
+                let stderr_snippet = {
+                    let g = stderr_tail.lock().unwrap();
+                    String::from_utf8_lossy(&g).to_string()
+                };
+                let stdout_snippet = {
+                    let g = stdout_output.lock().unwrap();
+                    String::from_utf8_lossy(&g).to_string()
+                };
+                break Err(anyhow::anyhow!(
+                    "Failed to parse Jupyter endpoint from startup output within 20s.\n\
+                     Expected line: 'Jupyter Server X is running at: http://HOST:PORT/...'\n\
+                     stdout: {}\n\
+                     stderr: {}",
+                    stdout_snippet.chars().take(500).collect::<String>(),
+                    stderr_snippet.chars().take(500).collect::<String>()
+                ));
+            }
+
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    };
+
+    if let Err(e) = endpoint_result {
+        // Startup failed. Reap the child.
         let _ = child.kill();
         let _ = child.wait();
         return Ok(JupyterServerResult {
@@ -829,11 +859,13 @@ pub fn start_server(params: JupyterServerParams) -> Result<JupyterServerResult> 
             pid: None,
             port: None,
             token: None,
-            error: Some(format!("{e}\n--- stderr ---\n{stderr_snippet}")),
+            error: Some(e.to_string()),
         });
     }
 
-    let (actual_url, actual_port) = probe.unwrap();
+    let endpoint = endpoint_result.unwrap();
+    let actual_url = endpoint.url.clone();
+    let actual_port = endpoint.port;
 
     // Confirm the process is still alive (it may have exited in the window
     // between the probe and now).

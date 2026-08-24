@@ -617,6 +617,7 @@ fn run_jupyter(action: gilamonster_agent::gila_jupyter::JupyterCmd) -> Result<()
             password_hash,
             open_browser,
             extra,
+            task,
         } => {
             let params = JupyterServerParams {
                 working_dir,
@@ -627,6 +628,7 @@ fn run_jupyter(action: gilamonster_agent::gila_jupyter::JupyterCmd) -> Result<()
                 password,
                 open_browser: Some(open_browser),
                 extra_args: extra,
+                pixi_task: task,
             };
             let res = start_server(params)?;
             if res.success {
