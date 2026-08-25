@@ -9,8 +9,11 @@
 #
 # PIPELINE PARITY: this hook mirrors .github/workflows/ci.yml.
 #   - the agent-bridle stub guard below matches the lint job's guard step
-#   - `just check` matches the lint + test jobs (fmt + clippy + cargo test)
-#   - `just cov-ci` matches the coverage job (cargo llvm-cov with the 80% floor)
+#   - `just check` matches the lint + test jobs, including the isolated
+#     `jupyter` build, strict fixture/headless lint, native-git fixture suite,
+#     cross-process lifecycle, and the no-default solve gate
+#   - `just cov-ci` matches the coverage job (fixture + native-git llvm-cov
+#     instrumentation with the 80% floor)
 # When editing this hook, update the workflow to match, and vice-versa.
 #
 # Do NOT skip this hook with `--no-verify`. If a check fails, fix the issue.
@@ -83,7 +86,7 @@ if grep -Eq 'agent-bridle[a-z-]*[[:space:]]*= [{] git = "[^"]*agent-bridle", bra
 fi
 echo "shell guard OK: agent-bridle patch is on the publishable stub branch."
 
-echo "[pre-push] running just check..."
+echo "[pre-push] running just check (including Jupyter isolation + lifecycle gates)..."
 just check
 
 if [ "$SKIP_COV" -eq 0 ]; then

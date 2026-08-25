@@ -564,7 +564,204 @@ async fn run(command: Command, prepared_solve: Option<solve::PreparedSolve>) -> 
         // args; re-exec the real gilabot binary so every gilabot command works
         // from day one (Phase 1 of the parity plan). Commands graduate out of
         // this arm as they gain their own `Command` variant.
+        // Jupyter notebook tooling — compiled out unless `--features jupyter`.
+        #[cfg(feature = "jupyter")]
+        Command::Jupyter { action } => run_jupyter(action).await,
         Command::External(args) => run_delegate(&args),
+    }
+}
+
+/// `gila jupyter …` — dispatch the jupyter subcommand to its gila-native impl.
+/// All blocking I/O (process spawning, network, filesystem) runs on a dedicated thread.
+#[cfg(feature = "jupyter")]
+async fn run_jupyter(
+    action: gilamonster_agent::gila_jupyter::JupyterCmd,
+) -> Result<(), anyhow::Error> {
+    tokio::task::spawn_blocking(move || run_jupyter_blocking(action)).await?
+}
+
+#[cfg(feature = "jupyter")]
+fn run_jupyter_blocking(
+    action: gilamonster_agent::gila_jupyter::JupyterCmd,
+) -> Result<(), anyhow::Error> {
+    use gilamonster_agent::gila_jupyter::{
+        execute_notebook, get_server_status, list_servers, start_server, stop_server, JupyterCmd,
+        JupyterExecuteParams, JupyterServerParams, JupyterServerState,
+    };
+    match action {
+        JupyterCmd::Execute {
+            notebook_path,
+            working_dir,
+            timeout,
+            kernel,
+            no_save_outputs,
+        } => {
+            let params = JupyterExecuteParams {
+                notebook_path: notebook_path.to_string_lossy().into_owned(),
+                working_dir,
+                timeout_seconds: timeout,
+                kernel_name: kernel,
+                save_outputs: Some(!no_save_outputs),
+            };
+            let res = execute_notebook(params)?;
+            // Print a concise human summary; full detail is on the struct (Debug).
+            println!(
+                "executed `{}`: {} cells, {} failed, {:.1}s — {}",
+                res.notebook_path,
+                res.cells_executed,
+                res.cells_failed,
+                res.execution_time_seconds,
+                if res.success { "ok" } else { "FAILED" },
+            );
+            if let Some(e) = res.error {
+                eprintln!("error: {e}");
+            }
+            // Return error if execution failed, so CLI exits nonzero
+            if !res.success {
+                anyhow::bail!(
+                    "Notebook execution failed: {} cells executed, {} failed",
+                    res.cells_executed,
+                    res.cells_failed
+                );
+            }
+            Ok(())
+        }
+        JupyterCmd::Start {
+            working_dir,
+            port,
+            host,
+            token,
+            password,
+            password_hash,
+            open_browser,
+            extra,
+        } => {
+            let params = JupyterServerParams {
+                working_dir,
+                port,
+                host,
+                token,
+                password_hash,
+                password,
+                open_browser: Some(open_browser),
+                extra_args: extra,
+            };
+            let res = start_server(params)?;
+            if res.success {
+                println!(
+                    "jupyter server started — handle {} at {} (pid {})",
+                    res.handle_id.unwrap_or(0),
+                    res.url.as_deref().unwrap_or("?"),
+                    res.pid.unwrap_or(0),
+                );
+                if let Some(log_path) = res.log_path {
+                    println!("  log: {log_path}");
+                }
+            } else {
+                let log = res
+                    .log_path
+                    .as_deref()
+                    .map(|path| format!("; log: {path}"))
+                    .unwrap_or_default();
+                anyhow::bail!(
+                    "jupyter server failed: {}{log}",
+                    res.error.as_deref().unwrap_or("unknown"),
+                );
+            }
+            Ok(())
+        }
+        JupyterCmd::Stop { handle_id } => {
+            let stopped = stop_server(handle_id)?;
+            println!(
+                "handle {handle_id}: {}",
+                if stopped { "stopped" } else { "not running" },
+            );
+            Ok(())
+        }
+        JupyterCmd::Status { handle_id } => {
+            let st = get_server_status(handle_id)?;
+            let state = match st.state {
+                JupyterServerState::Running => "running",
+                JupyterServerState::Unreachable => "unreachable",
+                JupyterServerState::NotFound => "not found",
+            };
+            println!("handle {handle_id}: {state}");
+            if let Some(error) = st.error {
+                println!("  error: {error}");
+            }
+            if let Some(url) = st.url {
+                println!("  url:  {url}");
+            }
+            if let Some(port) = st.port {
+                println!("  port: {port}");
+            }
+            if let Some(log_path) = st.log_path {
+                println!("  log:  {log_path}");
+            }
+            for k in &st.kernels {
+                println!(
+                    "  kernel {} `{}` {} ({} conns)",
+                    k.id, k.name, k.execution_state, k.connections,
+                );
+            }
+            Ok(())
+        }
+        JupyterCmd::List => {
+            let result = list_servers()?;
+            if result.servers.is_empty() {
+                println!("no registered jupyter servers");
+            } else {
+                println!(
+                    "{} registered server{}:",
+                    result.servers.len(),
+                    if result.servers.len() == 1 { "" } else { "s" }
+                );
+                for server in result.servers {
+                    let state = match server.state {
+                        JupyterServerState::Running => "running",
+                        JupyterServerState::Unreachable => "unreachable",
+                        JupyterServerState::NotFound => "not found",
+                    };
+                    println!(
+                        "  handle {}: {} at {} (port {})",
+                        server.handle_id, state, server.url, server.port,
+                    );
+                    if let Some(error) = server.error {
+                        println!("    error: {error}");
+                    }
+                    if let Some(log_path) = server.log_path {
+                        println!("    log: {log_path}");
+                    }
+                }
+            }
+            Ok(())
+        }
+        JupyterCmd::Bootstrap {
+            confirm,
+            working_dir,
+        } => {
+            use gilamonster_agent::gila_pixi;
+            let dir = working_dir
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+            if !gila_pixi::has_pixi_manifest(&dir) {
+                println!("No pixi.toml found in {}", dir.display());
+                return Ok(());
+            }
+
+            let manifest = gila_pixi::load_manifest(&dir)?;
+            let preview = gila_pixi::preview_modernization(&manifest);
+            println!("{}", preview);
+
+            if confirm {
+                gila_pixi::modernize_manifest(&dir)?;
+                println!("✓ Updated pixi.toml to modern [workspace] structure");
+            } else {
+                println!("\nTo apply: gila jupyter bootstrap --confirm");
+            }
+            Ok(())
+        }
     }
 }
 

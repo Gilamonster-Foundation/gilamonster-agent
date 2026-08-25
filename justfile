@@ -81,12 +81,24 @@ check:
     rc=0
     cargo fmt --all -- --check || rc=1
     cargo clippy --all-targets -- -D warnings || rc=1
+    cargo clippy --all-targets --features jupyter -- -D warnings || rc=1
+    cargo clippy --all-targets --features jupyter-test-fixture -- -D warnings || rc=1
     cargo test || rc=1
+    cargo test --features jupyter || rc=1
+    cargo test --features jupyter-test-fixture,native-git || rc=1
+    cargo check --no-default-features --features jupyter || rc=1
+    cargo clippy --no-default-features --features jupyter-test-fixture --all-targets -- -D warnings || rc=1
+    cargo clippy --no-default-features --bin gila-headless -- -D warnings || rc=1
+    cargo test --no-default-features --features jupyter-test-fixture --lib || rc=1
+    cargo test --no-default-features --features jupyter-test-fixture --test test_cross_process_lifecycle || rc=1
+    cargo test --no-default-features --features jupyter-test-fixture --test test_jupyter_execute || rc=1
+    cargo test --no-default-features --features jupyter-test-fixture --test test_jupyter_pixi_integration || rc=1
+    cargo test --no-default-features --test solve || rc=1
     exit $rc
 
 [windows]
 check:
-    $rc = 0; cargo fmt --all -- --check; if ($LASTEXITCODE -ne 0) { $rc = 1 }; cargo clippy --all-targets -- -D warnings; if ($LASTEXITCODE -ne 0) { $rc = 1 }; cargo test; if ($LASTEXITCODE -ne 0) { $rc = 1 }; exit $rc
+    $rc = 0; cargo fmt --all -- --check; if ($LASTEXITCODE -ne 0) { $rc = 1 }; cargo clippy --all-targets -- -D warnings; if ($LASTEXITCODE -ne 0) { $rc = 1 }; cargo clippy --all-targets --features jupyter -- -D warnings; if ($LASTEXITCODE -ne 0) { $rc = 1 }; cargo clippy --all-targets --features jupyter-test-fixture -- -D warnings; if ($LASTEXITCODE -ne 0) { $rc = 1 }; cargo test; if ($LASTEXITCODE -ne 0) { $rc = 1 }; cargo test --features jupyter; if ($LASTEXITCODE -ne 0) { $rc = 1 }; cargo test --features jupyter-test-fixture,native-git; if ($LASTEXITCODE -ne 0) { $rc = 1 }; cargo check --no-default-features --features jupyter; if ($LASTEXITCODE -ne 0) { $rc = 1 }; cargo clippy --no-default-features --features jupyter-test-fixture --all-targets -- -D warnings; if ($LASTEXITCODE -ne 0) { $rc = 1 }; cargo clippy --no-default-features --bin gila-headless -- -D warnings; if ($LASTEXITCODE -ne 0) { $rc = 1 }; cargo test --no-default-features --features jupyter-test-fixture --lib; if ($LASTEXITCODE -ne 0) { $rc = 1 }; cargo test --no-default-features --features jupyter-test-fixture --test test_cross_process_lifecycle; if ($LASTEXITCODE -ne 0) { $rc = 1 }; cargo test --no-default-features --features jupyter-test-fixture --test test_jupyter_execute; if ($LASTEXITCODE -ne 0) { $rc = 1 }; cargo test --no-default-features --features jupyter-test-fixture --test test_jupyter_pixi_integration; if ($LASTEXITCODE -ne 0) { $rc = 1 }; cargo test --no-default-features --test solve; if ($LASTEXITCODE -ne 0) { $rc = 1 }; exit $rc
 
 # --- Coverage ---
 #
@@ -111,7 +123,7 @@ cov-ci:
     #!/usr/bin/env bash
     set -euo pipefail
     floor=80
-    cargo llvm-cov --no-report
+    cargo llvm-cov --features jupyter-test-fixture,native-git --no-report
     cargo llvm-cov report --lcov --output-path lcov.info
     summary=$(cargo llvm-cov report --summary-only)
     echo "$summary"
@@ -131,7 +143,7 @@ cov-ci:
 
 [windows]
 cov-ci:
-    $floor = 80; cargo llvm-cov --no-report; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; cargo llvm-cov report --lcov --output-path lcov.info; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; $summary = cargo llvm-cov report --summary-only; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; $summary; $total = $summary | Where-Object { $_ -match '^TOTAL\s+' } | Select-Object -First 1; if (-not $total) { Write-Error 'ERROR: could not parse line coverage'; exit 1 }; $cols = $total -split '\s+'; $line_cov = [double]($cols[9].TrimEnd('%')); Write-Output "measured line coverage: $line_cov% (floor: $floor%)"; if ($line_cov -lt $floor) { Write-Error "ERROR: line coverage $line_cov% is below the $floor% floor"; exit 1 }; Write-Output "coverage gate OK: $line_cov% >= $floor%"
+    $floor = 80; cargo llvm-cov --features jupyter-test-fixture,native-git --no-report; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; cargo llvm-cov report --lcov --output-path lcov.info; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; $summary = cargo llvm-cov report --summary-only; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; $summary; $total = $summary | Where-Object { $_ -match '^TOTAL\s+' } | Select-Object -First 1; if (-not $total) { Write-Error 'ERROR: could not parse line coverage'; exit 1 }; $cols = $total -split '\s+'; $line_cov = [double]($cols[9].TrimEnd('%')); Write-Output "measured line coverage: $line_cov% (floor: $floor%)"; if ($line_cov -lt $floor) { Write-Error "ERROR: line coverage $line_cov% is below the $floor% floor"; exit 1 }; Write-Output "coverage gate OK: $line_cov% >= $floor%"
 
 # --- Local newt overlay (dev-only path override) ---
 #
