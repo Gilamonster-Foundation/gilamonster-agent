@@ -63,6 +63,12 @@ jobs:
         # surface in one run.
         if: always()
         run: cargo clippy --all-targets -- -D warnings
+      - name: clippy --features jupyter
+        if: always()
+        run: cargo clippy --all-targets --features jupyter -- -D warnings
+      - name: clippy --features jupyter-test-fixture
+        if: always()
+        run: cargo clippy --all-targets --features jupyter-test-fixture -- -D warnings
       - name: headless dependency gate
         if: always()
         run: |
@@ -103,7 +109,14 @@ jobs:
         # --locked is intentionally absent: Cargo.lock is git-ignored for this
         # binary (the git-dep resolves per build). Lock staleness is irrelevant.
         run: cargo test
+      - name: jupyter feature tests
+        if: always()
+        run: cargo test --features jupyter
+      - name: jupyter test-fixture tests
+        if: always()
+        run: cargo test --features jupyter-test-fixture
       - name: native headless solve tests
+        if: always()
         run: cargo test --no-default-features --test solve
 
   harbor-adapter:
@@ -219,6 +232,18 @@ jobs:
           key: windows
       - name: clippy
         run: cargo clippy --all-targets -- -D warnings
+      - name: clippy --features jupyter
+        if: always()
+        run: cargo clippy --all-targets --features jupyter -- -D warnings
+      - name: clippy --features jupyter-test-fixture
+        if: always()
+        run: cargo clippy --all-targets --features jupyter-test-fixture -- -D warnings
       - name: cargo test
         if: always()
         run: cargo test
+      - name: jupyter feature tests
+        if: always()
+        run: cargo test --features jupyter
+      - name: jupyter test-fixture tests
+        if: always()
+        run: cargo test --features jupyter-test-fixture

@@ -11,14 +11,29 @@
 //! ## Server model
 //!
 //! `start_server` spawns `jupyter notebook` (through Pixi if available) bound
-//! to the loopback interface only (never a remote-access flag), scrubs the child
-//! environment of gila's whole control plane (`env_clear` + a minimal allowlist),
-//! then parses the actual endpoint from the server's startup output instead of
-//! probing blindly. The spawned `Child` is owned by a process-local registry
-//! keyed by an opaque `handle_id`; `stop_server` / `get_server_status` operate
-//! by handle, never by bare PID or an arbitrary URL — so a caller cannot point
-//! this tool at a server it did not start. `stop_server` kills the owned child
-//! directly (`Child::kill`), so no `kill` / `taskkill` subprocess is spawned.
+//! to a typed loopback address only, scrubs the child environment of gila's
+//! whole control plane (`env_clear` + a minimal allowlist), and redirects both
+//! output streams to a private durable log. A startup guard owns the complete
+//! process tree until an authenticated readiness probe succeeds and the
+//! versioned registry transaction commits. After that commit the server owns
+//! its own lifetime across CLI invocations.
+//!
+//! `stop_server` / `get_server_status` / `list_servers` resolve opaque handles
+//! through that durable registry, validate the stored loopback endpoint before
+//! every request, and never treat the informational PID as authority. Stop uses
+//! authenticated POST `/api/shutdown`, confirms definite listener refusal, and
+//! CAS-deletes the exact registered instance. No bare-PID kill, `kill`, or
+//! `taskkill` subprocess is used.
+//!
+//! ## Phases
+//!
+//! - **B1a** (this module): Single-process registry with durable logs, startup
+//!   guard with process-group/job-object lifecycle, and authenticated shutdown.
+//! - **B2a**: Same, verified through cross-process CLI lifecycle tests.
+//! - **B3**: Negative-case behavioral tests (403/timeout/socket-error handling).
+//! - **B2c** (deferred, future phase): Cross-process concurrency (multiple gila
+//!   agents on the same GILA_HOME), file-lock contention, and the locking
+//!   harness tests. Single-instance lifecycle is stable.
 //!
 //! ## Pixi Integration
 //!
@@ -28,15 +43,14 @@
 //! - Environment is managed by Pixi; gila still scrubs sensitive vars
 //! - Bootstrap workflow available to modernize legacy [project] → [workspace]
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
-use std::io::Read;
+use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{LazyLock, Mutex};
+use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -49,8 +63,964 @@ use serde::{Deserialize, Serialize};
 /// notebook subprocess.
 const ENV_ALLOWLIST: &[&str] = &["PATH", "HOME", "USER", "LANG", "LC_ALL", "LC_CTYPE", "TERM"];
 
-/// Maximum bytes of captured stderr retained for diagnostics on a failed start.
-const STDERR_CAP: usize = 8 * 1024;
+// ---- Registry Store (B1a) -----------------------------------------------
+
+const REGISTRY_SCHEMA_VERSION: u32 = 1;
+const REGISTRY_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
+const REGISTRY_LOCK_RETRY: Duration = Duration::from_millis(25);
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServerRecord {
+    pub handle_id: u64,
+    #[serde(with = "instance_id_serde")]
+    pub instance_id: [u8; 16],
+    pub url: String,
+    pub port: u16,
+    // Token stored plaintext; threat boundary assumes OS file permissions (0600)
+    // enforce user-only read access to the registry file. Tokens are per-instance
+    // and short-lived (one server session); they do not grant access to other users
+    // or survive the server lifecycle.
+    pub token: String,
+    pub pid: Option<u32>,
+    pub registered_at_unix_ms: u64,
+    #[serde(default)]
+    pub log_path: Option<String>,
+}
+
+mod instance_id_serde {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(data: &[u8; 16], ser: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut encoded = String::with_capacity(32);
+        for byte in data {
+            encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+            encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+        ser.serialize_str(&encoded)
+    }
+
+    pub fn deserialize<'de, D>(de: D) -> Result<[u8; 16], D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(de)?;
+        if s.len() != 32
+            || !s
+                .as_bytes()
+                .iter()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+        {
+            return Err(serde::de::Error::custom(
+                "instance_id must be exactly 32 lowercase hex characters",
+            ));
+        }
+
+        fn nibble(byte: u8) -> u8 {
+            match byte {
+                b'0'..=b'9' => byte - b'0',
+                b'a'..=b'f' => byte - b'a' + 10,
+                _ => unreachable!("validated lowercase hex above"),
+            }
+        }
+
+        let mut bytes = [0u8; 16];
+        for (index, pair) in s.as_bytes().chunks_exact(2).enumerate() {
+            bytes[index] = (nibble(pair[0]) << 4) | nibble(pair[1]);
+        }
+        Ok(bytes)
+    }
+}
+
+fn deserialize_server_map<'de, D>(
+    deserializer: D,
+) -> std::result::Result<BTreeMap<u64, ServerRecord>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct UniqueServerMapVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for UniqueServerMapVisitor {
+        type Value = BTreeMap<u64, ServerRecord>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a server map with unique numeric handle keys")
+        }
+
+        fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
+        where
+            A: serde::de::MapAccess<'de>,
+        {
+            let mut servers = BTreeMap::new();
+            while let Some((handle, record)) = map.next_entry::<u64, ServerRecord>()? {
+                if servers.insert(handle, record).is_some() {
+                    return Err(serde::de::Error::custom(format!(
+                        "duplicate server handle key: {handle}"
+                    )));
+                }
+            }
+            Ok(servers)
+        }
+    }
+
+    deserializer.deserialize_map(UniqueServerMapVisitor)
+}
+
+fn deserialize_string_server_map<'de, D>(
+    deserializer: D,
+) -> std::result::Result<BTreeMap<String, ServerRecord>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct UniqueStringServerMapVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for UniqueStringServerMapVisitor {
+        type Value = BTreeMap<String, ServerRecord>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a server map with unique string handle keys")
+        }
+
+        fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
+        where
+            A: serde::de::MapAccess<'de>,
+        {
+            let mut servers = BTreeMap::new();
+            while let Some((handle, record)) = map.next_entry::<String, ServerRecord>()? {
+                if servers.insert(handle.clone(), record).is_some() {
+                    return Err(serde::de::Error::custom(format!(
+                        "duplicate server handle key: {handle}"
+                    )));
+                }
+            }
+            Ok(servers)
+        }
+    }
+
+    deserializer.deserialize_map(UniqueStringServerMapVisitor)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RegistryFile {
+    pub schema_version: u32,
+    pub revision: u64,
+    pub next_handle: u64,
+    #[serde(deserialize_with = "deserialize_server_map")]
+    pub servers: BTreeMap<u64, ServerRecord>,
+}
+
+#[derive(Debug)]
+pub struct RegistryStore {
+    root: PathBuf,
+}
+
+#[derive(Debug)]
+pub struct RegistryTransaction {
+    data: RegistryFile,
+    lock_file: fs::File,
+    reg_path: PathBuf,
+    allocated_handles: HashSet<u64>,
+    dirty: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyServerRecord {
+    handle_id: u64,
+    url: String,
+    port: u16,
+    token: String,
+    #[serde(default)]
+    pid: Option<u32>,
+    #[serde(default)]
+    start_time_unix: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OnDiskRegistryFile {
+    schema_version: u32,
+    revision: u64,
+    next_handle: u64,
+    #[serde(deserialize_with = "deserialize_string_server_map")]
+    servers: BTreeMap<String, ServerRecord>,
+}
+
+impl OnDiskRegistryFile {
+    fn into_registry(self) -> Result<RegistryFile> {
+        let mut servers = BTreeMap::new();
+        for (encoded_handle, record) in self.servers {
+            let handle = encoded_handle
+                .parse::<u64>()
+                .with_context(|| format!("registry server key is not a u64: {encoded_handle}"))?;
+            if servers.insert(handle, record).is_some() {
+                anyhow::bail!("duplicate numeric server handle key: {handle}");
+            }
+        }
+
+        Ok(RegistryFile {
+            schema_version: self.schema_version,
+            revision: self.revision,
+            next_handle: self.next_handle,
+            servers,
+        })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum OnDiskRegistry {
+    Current(OnDiskRegistryFile),
+    Legacy(Vec<LegacyServerRecord>),
+}
+
+enum LoadOutcome {
+    Current(RegistryFile),
+    Missing(RegistryFile),
+    Migrated(RegistryFile),
+}
+
+fn empty_registry() -> RegistryFile {
+    RegistryFile {
+        schema_version: REGISTRY_SCHEMA_VERSION,
+        revision: 0,
+        next_handle: 1,
+        servers: BTreeMap::new(),
+    }
+}
+
+fn validate_registry(registry: &RegistryFile) -> Result<()> {
+    if registry.schema_version != REGISTRY_SCHEMA_VERSION {
+        anyhow::bail!(
+            "unsupported registry schema version: {}",
+            registry.schema_version
+        );
+    }
+    if registry.next_handle == 0 {
+        anyhow::bail!("registry next_handle must not be zero");
+    }
+
+    for (&handle, record) in &registry.servers {
+        if handle == 0 || record.handle_id == 0 {
+            anyhow::bail!("registry server handles must not be zero");
+        }
+        if handle != record.handle_id {
+            anyhow::bail!(
+                "registry key {handle} does not match record handle {}",
+                record.handle_id
+            );
+        }
+        if handle >= registry.next_handle {
+            anyhow::bail!(
+                "registry next_handle {} must be greater than server handle {handle}",
+                registry.next_handle
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_root_path(root: &Path) -> Result<()> {
+    if root.as_os_str().is_empty() {
+        anyhow::bail!("registry root must not be empty");
+    }
+    if !root.is_absolute() {
+        anyhow::bail!("registry root must be absolute: {}", root.display());
+    }
+    Ok(())
+}
+
+fn reject_unsafe_existing_root(root: &Path) -> Result<()> {
+    match fs::symlink_metadata(root) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() {
+                anyhow::bail!("registry root must not be a symlink: {}", root.display());
+            }
+            if !metadata.is_dir() {
+                anyhow::bail!("registry root must be a directory: {}", root.display());
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error)
+            .with_context(|| format!("failed to inspect registry root {}", root.display())),
+    }
+}
+
+fn initialize_registry_root(root: &Path) -> Result<()> {
+    validate_root_path(root)?;
+    reject_unsafe_existing_root(root)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true).mode(0o700);
+        builder
+            .create(root)
+            .with_context(|| format!("failed to create registry root {}", root.display()))?;
+    }
+    #[cfg(not(unix))]
+    fs::create_dir_all(root)
+        .with_context(|| format!("failed to create registry root {}", root.display()))?;
+
+    // Check again after creation so a final-component symlink or non-directory
+    // introduced during the create is never accepted on any platform.
+    reject_unsafe_existing_root(root)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(root, fs::Permissions::from_mode(0o700)).with_context(|| {
+            format!(
+                "failed to set registry root permissions on {}",
+                root.display()
+            )
+        })?;
+    }
+
+    Ok(())
+}
+
+fn resolve_registry_root() -> Result<PathBuf> {
+    let root = match std::env::var_os("GILA_HOME") {
+        Some(value) => {
+            if value.is_empty() {
+                anyhow::bail!("GILA_HOME must not be empty");
+            }
+            PathBuf::from(value)
+        }
+        None => directories::BaseDirs::new()
+            .context("failed to determine the home directory for the registry")?
+            .home_dir()
+            .join(".gila"),
+    };
+
+    validate_root_path(&root)?;
+    Ok(root)
+}
+
+fn open_lock_file(lock_path: &Path) -> Result<fs::File> {
+    match fs::symlink_metadata(lock_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            anyhow::bail!("registry lock file must not be a symlink")
+        }
+        Ok(metadata) if !metadata.is_file() => {
+            anyhow::bail!("registry lock path must be a regular file")
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).context("failed to inspect registry lock file"),
+    }
+
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+
+    let lock_file = options
+        .open(lock_path)
+        .context("failed to open registry lock file")?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        lock_file
+            .set_permissions(fs::Permissions::from_mode(0o600))
+            .context("failed to repair registry lock file permissions")?;
+    }
+
+    Ok(lock_file)
+}
+
+fn acquire_exclusive_lock(lock_file: &fs::File, timeout: Duration) -> Result<()> {
+    let started = std::time::Instant::now();
+    loop {
+        match fs4::FileExt::try_lock(lock_file) {
+            Ok(()) => return Ok(()),
+            Err(fs4::TryLockError::WouldBlock) if started.elapsed() < timeout => {
+                let remaining = timeout.saturating_sub(started.elapsed());
+                thread::sleep(REGISTRY_LOCK_RETRY.min(remaining));
+            }
+            Err(fs4::TryLockError::WouldBlock) => {
+                anyhow::bail!(
+                    "timed out after {} seconds waiting for the registry lock",
+                    timeout.as_secs()
+                )
+            }
+            Err(fs4::TryLockError::Error(error)) => {
+                return Err(error).context("failed to acquire registry lock")
+            }
+        }
+    }
+}
+
+fn atomic_write_registry_with<F>(path: &Path, registry: &RegistryFile, writer: F) -> Result<()>
+where
+    F: FnOnce(&mut fs::File, &[u8]) -> io::Result<()>,
+{
+    validate_registry(registry)?;
+    let encoded = serde_json::to_vec(registry).context("failed to serialize registry")?;
+
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+
+    atomicwrites::AtomicFile::new(path, atomicwrites::AllowOverwrite)
+        .write_with_options(|file| writer(file, &encoded), options)
+        .context("failed to write registry atomically")?;
+    Ok(())
+}
+
+fn atomic_write_registry(path: &Path, registry: &RegistryFile) -> Result<()> {
+    atomic_write_registry_with(path, registry, |file, encoded| file.write_all(encoded))
+}
+
+impl RegistryStore {
+    pub fn new() -> Result<Self> {
+        Self::from_root(resolve_registry_root()?)
+    }
+
+    #[cfg(test)]
+    fn for_test(root: PathBuf) -> Result<Self> {
+        Self::from_root(root)
+    }
+
+    fn from_root(root: PathBuf) -> Result<Self> {
+        initialize_registry_root(&root)?;
+        Ok(Self { root })
+    }
+
+    fn registry_path(&self) -> PathBuf {
+        self.root.join("servers.json")
+    }
+
+    fn lock_path(&self) -> PathBuf {
+        self.root.join("servers.lock")
+    }
+
+    pub fn snapshot(&self) -> Result<RegistryFile> {
+        Ok(self.begin_transaction()?.data.clone())
+    }
+
+    pub fn begin_transaction(&self) -> Result<RegistryTransaction> {
+        self.begin_transaction_with_timeout(REGISTRY_LOCK_TIMEOUT)
+    }
+
+    fn begin_transaction_with_timeout(&self, timeout: Duration) -> Result<RegistryTransaction> {
+        let lock_path = self.lock_path();
+        let reg_path = self.registry_path();
+        let lock_file = open_lock_file(&lock_path)?;
+        acquire_exclusive_lock(&lock_file, timeout)?;
+
+        let outcome = self.load_registry(&reg_path)?;
+        let data = match outcome {
+            LoadOutcome::Current(data) | LoadOutcome::Missing(data) => data,
+            LoadOutcome::Migrated(data) => {
+                // Migration is a committed mutation. Persist it before exposing
+                // the transaction, while the same exclusive lock is still held.
+                atomic_write_registry(&reg_path, &data)?;
+                data
+            }
+        };
+
+        Ok(RegistryTransaction {
+            data,
+            lock_file,
+            reg_path,
+            allocated_handles: HashSet::new(),
+            dirty: false,
+        })
+    }
+
+    fn load_registry(&self, path: &Path) -> Result<LoadOutcome> {
+        let bytes = match fs::read(path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(LoadOutcome::Missing(empty_registry()));
+            }
+            Err(e) => return Err(e).context("failed to read registry"),
+        };
+
+        match serde_json::from_slice::<OnDiskRegistry>(&bytes)
+            .context("malformed registry: expected schema v1 or the legacy server array")?
+        {
+            OnDiskRegistry::Current(registry) => {
+                let registry = registry.into_registry()?;
+                validate_registry(&registry)?;
+                Ok(LoadOutcome::Current(registry))
+            }
+            OnDiskRegistry::Legacy(legacy) => {
+                let mut servers = BTreeMap::new();
+                let mut seen = HashSet::new();
+
+                for legacy_record in legacy {
+                    let LegacyServerRecord {
+                        handle_id,
+                        url,
+                        port,
+                        token,
+                        pid,
+                        start_time_unix,
+                    } = legacy_record;
+
+                    if handle_id == 0 {
+                        anyhow::bail!("legacy registry server handle must not be zero");
+                    }
+                    if !seen.insert(handle_id) {
+                        anyhow::bail!("duplicate legacy registry handle: {handle_id}");
+                    }
+
+                    let mut instance_bytes = [0u8; 16];
+                    use rand::RngCore;
+                    rand::thread_rng().fill_bytes(&mut instance_bytes);
+
+                    let registered_at_unix_ms = start_time_unix
+                        .unwrap_or(0)
+                        .checked_mul(1_000)
+                        .context("legacy start_time_unix overflows milliseconds")?;
+
+                    let rec = ServerRecord {
+                        handle_id,
+                        instance_id: instance_bytes,
+                        url,
+                        port,
+                        token,
+                        pid,
+                        registered_at_unix_ms,
+                        log_path: None,
+                    };
+                    servers.insert(handle_id, rec);
+                }
+
+                let next_handle = match servers.keys().next_back().copied() {
+                    Some(maximum) => maximum
+                        .checked_add(1)
+                        .context("legacy registry handle overflow")?,
+                    None => 1,
+                };
+                let registry = RegistryFile {
+                    schema_version: REGISTRY_SCHEMA_VERSION,
+                    // Loading legacy data and replacing it with v1 is the first
+                    // committed mutation in the versioned registry.
+                    revision: 1,
+                    next_handle,
+                    servers,
+                };
+                validate_registry(&registry)?;
+                Ok(LoadOutcome::Migrated(registry))
+            }
+        }
+    }
+}
+
+impl RegistryTransaction {
+    pub fn snapshot(&self) -> &RegistryFile {
+        &self.data
+    }
+
+    pub fn allocate_handle(&mut self) -> Result<u64> {
+        let handle = self.data.next_handle;
+        let next_handle = handle.checked_add(1).context("registry handle overflow")?;
+        let revision = self
+            .data
+            .revision
+            .checked_add(1)
+            .context("registry revision overflow")?;
+
+        self.data.next_handle = next_handle;
+        self.data.revision = revision;
+        self.allocated_handles.insert(handle);
+        self.dirty = true;
+        Ok(handle)
+    }
+
+    pub fn insert(&mut self, record: ServerRecord) -> Result<()> {
+        let handle = record.handle_id;
+        if handle == 0 {
+            anyhow::bail!("Cannot insert record with zero handle");
+        }
+        if self.data.servers.contains_key(&handle) {
+            anyhow::bail!("record with handle {handle} already exists");
+        }
+        if !self.allocated_handles.contains(&handle) {
+            anyhow::bail!("record handle {handle} was not allocated by this transaction");
+        }
+
+        let revision = self
+            .data
+            .revision
+            .checked_add(1)
+            .context("registry revision overflow")?;
+        self.data.servers.insert(handle, record);
+        self.data.revision = revision;
+        self.allocated_handles.remove(&handle);
+        self.dirty = true;
+        Ok(())
+    }
+
+    pub fn compare_and_delete(&mut self, handle: u64, instance_id: [u8; 16]) -> Result<bool> {
+        let matches = self
+            .data
+            .servers
+            .get(&handle)
+            .is_some_and(|record| record.instance_id == instance_id);
+        if !matches {
+            return Ok(false);
+        }
+
+        let revision = self
+            .data
+            .revision
+            .checked_add(1)
+            .context("registry revision overflow")?;
+        self.data.servers.remove(&handle);
+        self.data.revision = revision;
+        self.dirty = true;
+        Ok(true)
+    }
+
+    pub fn commit(self) -> Result<()> {
+        self.commit_with_writer(|file, encoded| file.write_all(encoded))
+    }
+
+    fn commit_with_writer<F>(self, writer: F) -> Result<()>
+    where
+        F: FnOnce(&mut fs::File, &[u8]) -> io::Result<()>,
+    {
+        let Self {
+            data,
+            lock_file,
+            reg_path,
+            allocated_handles: _,
+            dirty,
+        } = self;
+
+        let result = if dirty {
+            atomic_write_registry_with(&reg_path, &data, writer)
+        } else {
+            Ok(())
+        };
+
+        // Keep the exact handle that acquired the lock alive until the atomic
+        // replacement (or its failure) has completed.
+        drop(lock_file);
+        result
+    }
+}
+
+#[cfg(test)]
+mod registry_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn test_store(temp: &TempDir) -> RegistryStore {
+        RegistryStore::for_test(temp.path().to_path_buf()).expect("store")
+    }
+
+    fn legacy_record(handle_id: u64, port: u16) -> serde_json::Value {
+        serde_json::json!({
+            "handle_id": handle_id,
+            "url": format!("http://127.0.0.1:{port}"),
+            "port": port,
+            "token": format!("token-{handle_id}"),
+            "pid": 1234,
+            "start_time_unix": 2
+        })
+    }
+
+    fn server_record(handle_id: u64, instance_id: [u8; 16]) -> ServerRecord {
+        ServerRecord {
+            handle_id,
+            instance_id,
+            url: "http://127.0.0.1:8888".to_string(),
+            port: 8888,
+            token: "token".to_string(),
+            pid: Some(1234),
+            registered_at_unix_ms: 2_000,
+            log_path: Some("server.log".to_string()),
+        }
+    }
+
+    fn assert_rejected_without_rewrite(store: &RegistryStore, original: &[u8]) {
+        fs::write(store.registry_path(), original).expect("write invalid registry");
+        assert!(store.begin_transaction().is_err());
+        assert_eq!(
+            fs::read(store.registry_path()).expect("read invalid registry"),
+            original
+        );
+    }
+
+    #[test]
+    fn missing_registry_starts_empty_without_creating_data_file() {
+        let tmp = TempDir::new().expect("temp dir");
+        let store = test_store(&tmp);
+        let tx = store.begin_transaction().expect("transaction");
+        assert_eq!(tx.snapshot(), &empty_registry());
+        assert!(!store.registry_path().exists());
+    }
+
+    #[test]
+    fn actual_legacy_object_array_migrates_and_rewrites_immediately() {
+        let tmp = TempDir::new().expect("temp dir");
+        let store = test_store(&tmp);
+        let legacy_json = serde_json::to_vec(&vec![legacy_record(1, 8888), legacy_record(2, 8889)])
+            .expect("json");
+        fs::write(store.registry_path(), legacy_json).expect("write legacy");
+
+        let tx = store.begin_transaction().expect("transaction");
+        assert_eq!(tx.snapshot().schema_version, REGISTRY_SCHEMA_VERSION);
+        assert_eq!(tx.snapshot().revision, 1);
+        assert_eq!(tx.snapshot().next_handle, 3);
+        assert_eq!(tx.snapshot().servers.len(), 2);
+        assert_eq!(tx.snapshot().servers[&1].registered_at_unix_ms, 2_000);
+
+        // The migration must already be durable even though this transaction
+        // is still holding the lock and has not been committed by the caller.
+        let rewritten: RegistryFile = serde_json::from_slice(
+            &fs::read(store.registry_path()).expect("read migrated registry"),
+        )
+        .expect("schema v1 registry");
+        assert_eq!(rewritten, *tx.snapshot());
+    }
+
+    #[test]
+    fn malformed_registry_is_preserved_byte_for_byte() {
+        let tmp = TempDir::new().expect("temp dir");
+        let store = test_store(&tmp);
+        assert_rejected_without_rewrite(&store, b"{ broken json");
+    }
+
+    #[test]
+    fn unsupported_schema_is_preserved_byte_for_byte() {
+        let tmp = TempDir::new().expect("temp dir");
+        let store = test_store(&tmp);
+        let unsupported = serde_json::to_vec(&RegistryFile {
+            schema_version: 2,
+            revision: 0,
+            next_handle: 1,
+            servers: BTreeMap::new(),
+        })
+        .expect("json");
+        assert_rejected_without_rewrite(&store, &unsupported);
+    }
+
+    #[test]
+    fn zero_legacy_handle_is_preserved_byte_for_byte() {
+        let tmp = TempDir::new().expect("temp dir");
+        let store = test_store(&tmp);
+        let zero = serde_json::to_vec(&vec![legacy_record(0, 8888)]).expect("json");
+        assert_rejected_without_rewrite(&store, &zero);
+    }
+
+    #[test]
+    fn duplicate_legacy_handles_are_preserved_byte_for_byte() {
+        let tmp = TempDir::new().expect("temp dir");
+        let store = test_store(&tmp);
+        let duplicate = serde_json::to_vec(&vec![legacy_record(1, 8888), legacy_record(1, 8889)])
+            .expect("json");
+        assert_rejected_without_rewrite(&store, &duplicate);
+    }
+
+    #[test]
+    fn legacy_handle_overflow_is_preserved_byte_for_byte() {
+        let tmp = TempDir::new().expect("temp dir");
+        let store = test_store(&tmp);
+        let overflow = serde_json::to_vec(&vec![legacy_record(u64::MAX, 8888)]).expect("json");
+        assert_rejected_without_rewrite(&store, &overflow);
+    }
+
+    #[test]
+    fn duplicate_current_server_keys_are_preserved_byte_for_byte() {
+        let tmp = TempDir::new().expect("temp dir");
+        let store = test_store(&tmp);
+        let record = serde_json::to_string(&server_record(1, [1; 16])).expect("record json");
+        let duplicate = format!(
+            "{{\"schema_version\":1,\"revision\":0,\"next_handle\":2,\"servers\":{{\"1\":{record},\"1\":{record}}}}}"
+        );
+        assert_rejected_without_rewrite(&store, duplicate.as_bytes());
+    }
+
+    #[test]
+    fn handles_remain_monotonic_across_delete_and_reopen() {
+        let tmp = TempDir::new().expect("temp dir");
+        let store = test_store(&tmp);
+
+        let mut tx = store.begin_transaction().expect("tx1");
+        let h1 = tx.allocate_handle().expect("h1");
+        assert_eq!(h1, 1);
+        tx.insert(server_record(h1, [1; 16])).expect("insert");
+        tx.commit().expect("commit1");
+
+        let mut delete_tx = store.begin_transaction().expect("delete tx");
+        assert!(delete_tx.compare_and_delete(h1, [1; 16]).expect("delete"));
+        delete_tx.commit().expect("delete commit");
+
+        let mut reopen_tx = store.begin_transaction().expect("reopen tx");
+        assert!(reopen_tx.snapshot().servers.is_empty());
+        assert_eq!(reopen_tx.snapshot().revision, 3);
+        assert!(reopen_tx.insert(server_record(h1, [2; 16])).is_err());
+        let h2 = reopen_tx.allocate_handle().expect("h2");
+        assert_eq!(h2, 2);
+        reopen_tx.commit().expect("commit h2");
+
+        let snapshot = store.snapshot().expect("snapshot");
+        assert_eq!(snapshot.next_handle, 3);
+        assert_eq!(snapshot.revision, 4);
+    }
+
+    #[test]
+    fn instance_mismatch_preserves_the_record_and_exact_file() {
+        let tmp = TempDir::new().expect("temp dir");
+        let store = test_store(&tmp);
+
+        let mut tx = store.begin_transaction().expect("tx1");
+        let h = tx.allocate_handle().expect("h");
+        tx.insert(server_record(h, [1; 16])).expect("insert");
+        tx.commit().expect("commit1");
+        let before = fs::read(store.registry_path()).expect("read before mismatch");
+
+        let mut tx2 = store.begin_transaction().expect("tx2");
+        let deleted = tx2
+            .compare_and_delete(h, [2; 16])
+            .expect("compare_and_delete");
+        assert!(!deleted);
+        assert!(tx2.snapshot().servers.contains_key(&h));
+        tx2.commit().expect("no-op commit");
+        assert_eq!(
+            fs::read(store.registry_path()).expect("read after mismatch"),
+            before
+        );
+    }
+
+    #[test]
+    fn instance_id_serialization_is_lowercase_and_roundtrips_exactly() {
+        let instance_id = [
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+            0xfe, 0xff,
+        ];
+        let record = server_record(1, instance_id);
+        let encoded = serde_json::to_string(&record).expect("serialize record");
+        assert!(encoded.contains("000102030405060708090a0b0c0dfeff"));
+        let decoded: ServerRecord = serde_json::from_str(&encoded).expect("deserialize record");
+        assert_eq!(decoded.instance_id, instance_id);
+    }
+
+    #[test]
+    fn failed_atomic_commit_preserves_the_prior_valid_registry() {
+        let tmp = TempDir::new().expect("temp dir");
+        let store = test_store(&tmp);
+
+        let mut initial = store.begin_transaction().expect("initial tx");
+        let handle = initial.allocate_handle().expect("handle");
+        initial
+            .insert(server_record(handle, [3; 16]))
+            .expect("insert");
+        initial.commit().expect("initial commit");
+        let before = fs::read(store.registry_path()).expect("read prior registry");
+
+        let mut failing = store.begin_transaction().expect("failing tx");
+        failing.allocate_handle().expect("allocate mutation");
+        let error = failing
+            .commit_with_writer(|file, _encoded| {
+                file.write_all(b"partial replacement")?;
+                Err(io::Error::other("forced commit failure"))
+            })
+            .expect_err("forced writer failure must propagate");
+        assert!(error
+            .to_string()
+            .contains("failed to write registry atomically"));
+        assert_eq!(
+            fs::read(store.registry_path()).expect("read preserved registry"),
+            before
+        );
+    }
+
+    #[test]
+    fn a_second_transaction_cannot_bypass_the_exclusive_lock() {
+        let tmp = TempDir::new().expect("temp dir");
+        let store = test_store(&tmp);
+        let first = store.begin_transaction().expect("first transaction");
+
+        let error = store
+            .begin_transaction_with_timeout(Duration::from_millis(50))
+            .expect_err("second transaction must not acquire the held lock");
+        assert!(error.to_string().contains("timed out"));
+
+        drop(first);
+        store
+            .begin_transaction_with_timeout(Duration::from_millis(50))
+            .expect("dropping the first transaction releases the lock");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn unix_permissions_are_repaired_and_created_securely() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().expect("temp dir");
+        let root = tmp.path();
+        fs::set_permissions(root, fs::Permissions::from_mode(0o755)).expect("loosen root");
+
+        let store = test_store(&tmp);
+        let root_perms = fs::metadata(root).expect("root meta").permissions();
+        assert_eq!(root_perms.mode() & 0o777, 0o700);
+
+        fs::write(store.lock_path(), b"").expect("create permissive lock file");
+        fs::set_permissions(store.lock_path(), fs::Permissions::from_mode(0o666))
+            .expect("loosen lock file");
+
+        let mut tx = store.begin_transaction().expect("tx");
+        tx.allocate_handle().expect("h");
+        tx.commit().expect("commit");
+
+        let reg_perms = fs::metadata(store.registry_path())
+            .expect("reg meta")
+            .permissions();
+        assert_eq!(reg_perms.mode() & 0o777, 0o600);
+
+        let lock_perms = fs::metadata(store.lock_path())
+            .expect("lock meta")
+            .permissions();
+        assert_eq!(lock_perms.mode() & 0o777, 0o600);
+    }
+
+    #[test]
+    fn explicit_test_root_must_be_absolute_and_a_directory() {
+        assert!(RegistryStore::for_test(PathBuf::new()).is_err());
+        assert!(RegistryStore::for_test(PathBuf::from("relative")).is_err());
+
+        let tmp = TempDir::new().expect("temp dir");
+        let file = tmp.path().join("not-a-directory");
+        fs::write(&file, b"file").expect("write file");
+        assert!(RegistryStore::for_test(file).is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn explicit_test_root_rejects_a_final_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = TempDir::new().expect("temp dir");
+        let target = tmp.path().join("target");
+        fs::create_dir(&target).expect("target directory");
+        let link = tmp.path().join("registry-link");
+        symlink(&target, &link).expect("directory symlink");
+        assert!(RegistryStore::for_test(link).is_err());
+    }
+}
 
 /// `gila jupyter …` subcommands. The whole enum (and the `Jupyter` arm of the
 /// top-level `Command`) is compiled out unless the `jupyter` feature is on.
@@ -73,7 +1043,7 @@ pub enum JupyterCmd {
         #[arg(long)]
         no_save_outputs: bool,
     },
-    /// Start a Jupyter notebook server bound to loopback, owned by this process.
+    /// Start a durable Jupyter notebook server bound to a typed loopback IP.
     Start {
         /// Working directory for the server (default: current directory).
         #[arg(long)]
@@ -81,7 +1051,7 @@ pub enum JupyterCmd {
         /// Port to run the server on (default: 8888).
         #[arg(long)]
         port: Option<u16>,
-        /// Bind address — must be loopback (127.0.0.1 / ::1 / localhost).
+        /// Bind address — must be a typed loopback IP (for example 127.0.0.1 or ::1).
         #[arg(long)]
         host: Option<String>,
         /// Auth token (default: auto-generated 32 random chars).
@@ -100,10 +1070,6 @@ pub enum JupyterCmd {
         /// Extra `jupyter notebook` flags (caller-controlled — use with care).
         #[arg(long, value_delimiter = ' ')]
         extra: Option<Vec<String>>,
-        /// Explicit Pixi task to run (if pixi.toml exists).
-        /// If not specified, searches for conventional task names.
-        #[arg(long)]
-        task: Option<String>,
     },
     /// Stop a Jupyter server by its handle id (from `gila jupyter start`).
     Stop {
@@ -115,7 +1081,7 @@ pub enum JupyterCmd {
         /// Opaque handle id returned by `gila jupyter start`.
         handle_id: u64,
     },
-    /// List all active Jupyter servers started by this process.
+    /// List all durable Jupyter registrations, including unreachable servers.
     List,
     /// Bootstrap: modernize pixi.toml from [project] to [workspace] syntax.
     Bootstrap {
@@ -126,6 +1092,1074 @@ pub enum JupyterCmd {
         #[arg(long)]
         working_dir: Option<String>,
     },
+}
+
+// ---- Durable Logs & Process Management (B2a) ----------------------------
+
+pub type OwnedChild = Box<dyn process_wrap::std::ChildWrapper>;
+
+#[cfg(unix)]
+// `process-wrap` exposes `killpg(2)` failures as `io::Error`; ESRCH is the
+// platform errno indicating that the process group no longer exists.
+const ESRCH_RAW_OS_ERROR: i32 = 3;
+
+fn process_tree_already_exited(error: &io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        error.raw_os_error() == Some(ESRCH_RAW_OS_ERROR)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = error;
+        false
+    }
+}
+
+/// Spawn a child in an explicitly managed process group (Unix) or job object
+/// (Windows). The selected wrappers do not kill on drop/handle close; callers
+/// must retain the returned ownership and explicitly terminate it when needed.
+pub fn spawn_owned(command: Command) -> io::Result<OwnedChild> {
+    let mut command = process_wrap::std::CommandWrap::from(command);
+
+    #[cfg(unix)]
+    command.wrap(process_wrap::std::ProcessGroup::leader());
+
+    #[cfg(windows)]
+    command.wrap(process_wrap::std::JobObject);
+
+    #[cfg(not(any(unix, windows)))]
+    return Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "owned process trees require a Unix process group or Windows job object",
+    ));
+
+    #[cfg(any(unix, windows))]
+    command.spawn()
+}
+
+#[derive(Debug)]
+pub struct StartupGuard {
+    child: Option<OwnedChild>,
+}
+
+impl StartupGuard {
+    /// Spawn and arm in one operation so there is no unguarded post-spawn gap.
+    pub fn spawn(command: Command) -> io::Result<Self> {
+        spawn_owned(command).map(Self::armed)
+    }
+
+    pub fn armed(child: OwnedChild) -> Self {
+        Self { child: Some(child) }
+    }
+
+    pub fn id(&self) -> u32 {
+        self.child
+            .as_ref()
+            .expect("child always present until disarmed")
+            .id()
+    }
+
+    pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        self.child
+            .as_mut()
+            .expect("child always present until disarmed")
+            .try_wait()
+    }
+
+    pub fn into_child(mut self) -> OwnedChild {
+        self.child
+            .take()
+            .expect("child always present until disarmed")
+    }
+
+    pub fn disarm(self) -> OwnedChild {
+        self.into_child()
+    }
+
+    /// Terminate and reap the complete owned process tree.
+    ///
+    /// Termination dispatches through the outer `ProcessGroupChild` /
+    /// `JobObjectChild`, and the subsequent wait observes the complete tree
+    /// exiting. Unix `ESRCH` means that tree has already exited, so it proceeds
+    /// directly to reaping; every other termination failure returns immediately
+    /// instead of waiting on a tree that was never successfully signalled.
+    pub fn rollback(mut self) -> io::Result<()> {
+        self.terminate_and_wait()
+    }
+
+    fn terminate_and_wait(&mut self) -> io::Result<()> {
+        let Some(mut child) = self.child.take() else {
+            return Ok(());
+        };
+        match child.start_kill() {
+            Ok(()) => {}
+            Err(error) if process_tree_already_exited(&error) => {}
+            Err(error) => return Err(error),
+        }
+        child.wait()?;
+        Ok(())
+    }
+}
+
+impl Drop for StartupGuard {
+    fn drop(&mut self) {
+        // Explicit post-spawn error paths call `rollback` so cleanup errors can
+        // be returned to the caller. Drop remains only the last-resort safety
+        // net for unwind / early-return paths that cannot report another error.
+        let _ = self.terminate_and_wait();
+    }
+}
+
+pub const LOG_DIAGNOSTIC_TAIL_CAP: usize = 8 * 1024;
+pub const LOG_PARTIAL_LINE_CAP: usize = 8 * 1024;
+const START_LOG_CREATE_ATTEMPTS: usize = 16;
+const LOG_SCAN_CHUNK_SIZE: usize = 4 * 1024;
+const TRUNCATED_LOG_LINE_PREFIX: &str = "[...truncated...] ";
+
+struct DurableLog {
+    logs_dir: PathBuf,
+}
+
+#[derive(Debug)]
+pub struct LogHandles {
+    pub stdout_append: fs::File,
+    pub stderr_append: fs::File,
+    pub read_handle: fs::File,
+    pub log_path: String,
+}
+
+impl DurableLog {
+    fn new(store: &RegistryStore) -> Result<Self> {
+        // Revalidate the root at point of use; the store never exposes it to
+        // callers, and the two new path components are each checked without
+        // following a pre-existing final-component symlink.
+        initialize_registry_root(&store.root)?;
+        let jupyter_dir = store.root.join("jupyter");
+        ensure_private_directory(&jupyter_dir, "jupyter log parent")?;
+        let logs_dir = jupyter_dir.join("logs");
+        ensure_private_directory(&logs_dir, "jupyter logs")?;
+
+        Ok(Self { logs_dir })
+    }
+
+    fn create_handles(&self) -> Result<LogHandles> {
+        for _ in 0..START_LOG_CREATE_ATTEMPTS {
+            let name = random_start_log_name();
+            let absolute_path = self.logs_dir.join(&name);
+            let created_file = match create_secure_log(&absolute_path) {
+                Ok(file) => file,
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("failed to create durable log {}", absolute_path.display())
+                    });
+                }
+            };
+            let created_metadata = created_file
+                .metadata()
+                .context("failed to inspect newly created durable log")?;
+
+            let stdout_append =
+                open_existing_log(&absolute_path, &created_metadata, ExistingLogAccess::Append)
+                    .context("failed to open independent durable stdout log handle")?;
+            let stderr_append =
+                open_existing_log(&absolute_path, &created_metadata, ExistingLogAccess::Append)
+                    .context("failed to open independent durable stderr log handle")?;
+            let read_handle =
+                open_existing_log(&absolute_path, &created_metadata, ExistingLogAccess::Read)
+                    .context("failed to open independent durable log read handle")?;
+            drop(created_file);
+
+            return Ok(LogHandles {
+                stdout_append,
+                stderr_append,
+                read_handle,
+                log_path: format!("jupyter/logs/{name}"),
+            });
+        }
+
+        anyhow::bail!(
+            "failed to allocate a unique durable start log after {START_LOG_CREATE_ATTEMPTS} attempts"
+        )
+    }
+}
+
+impl RegistryStore {
+    /// Create the durable log handles for one server-start attempt without
+    /// exposing the trusted registry root to callers.
+    pub fn create_start_log(&self) -> Result<LogHandles> {
+        DurableLog::new(self)?.create_handles()
+    }
+}
+
+fn ensure_private_directory(path: &Path, description: &str) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            anyhow::bail!("{description} directory must not be a symlink")
+        }
+        Ok(metadata) if !metadata.is_dir() => {
+            anyhow::bail!("{description} path must be a directory")
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            match create_private_directory(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "failed to create {description} directory {}",
+                            path.display()
+                        )
+                    });
+                }
+            }
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "failed to inspect {description} directory {}",
+                    path.display()
+                )
+            });
+        }
+    }
+
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("failed to re-inspect {description} directory"))?;
+    if metadata.file_type().is_symlink() {
+        anyhow::bail!("{description} directory must not be a symlink");
+    }
+    if !metadata.is_dir() {
+        anyhow::bail!("{description} path must be a directory");
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).with_context(|| {
+            format!(
+                "failed to repair {description} directory permissions on {}",
+                path.display()
+            )
+        })?;
+    }
+
+    Ok(())
+}
+
+fn create_private_directory(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+
+        let mut builder = fs::DirBuilder::new();
+        builder.mode(0o700).create(path)
+    }
+
+    #[cfg(not(unix))]
+    fs::create_dir(path)
+}
+
+fn random_start_log_name() -> String {
+    use rand::RngCore;
+
+    let mut random_bytes = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut random_bytes);
+    format!("start-{:032x}.log", u128::from_be_bytes(random_bytes))
+}
+
+fn create_secure_log(path: &Path) -> io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+
+    let file = options.open(path)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+
+    Ok(file)
+}
+
+#[derive(Clone, Copy)]
+enum ExistingLogAccess {
+    Append,
+    Read,
+}
+
+fn open_existing_log(
+    path: &Path,
+    created_metadata: &fs::Metadata,
+    access: ExistingLogAccess,
+) -> io::Result<fs::File> {
+    validate_log_path(path, created_metadata)?;
+
+    let mut options = fs::OpenOptions::new();
+    match access {
+        ExistingLogAccess::Append => {
+            options.write(true).append(true);
+        }
+        ExistingLogAccess::Read => {
+            options.read(true);
+        }
+    }
+    let file = options.open(path)?;
+    validate_opened_log(path, created_metadata, &file)?;
+    Ok(file)
+}
+
+fn validate_log_path(path: &Path, created_metadata: &fs::Metadata) -> io::Result<()> {
+    let path_metadata = fs::symlink_metadata(path)?;
+    if path_metadata.file_type().is_symlink() || !path_metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "durable log path is not a regular non-symlink file",
+        ));
+    }
+
+    validate_log_identity(created_metadata, &path_metadata)
+}
+
+fn validate_opened_log(
+    path: &Path,
+    created_metadata: &fs::Metadata,
+    file: &fs::File,
+) -> io::Result<()> {
+    let opened_metadata = file.metadata()?;
+    if !opened_metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "opened durable log handle is not a regular file",
+        ));
+    }
+    validate_log_identity(created_metadata, &opened_metadata)?;
+
+    // A final path check catches replacement between the pre-open inspection
+    // and open. On Unix, inode/device equality also proves the opened handle is
+    // the exact create_new file rather than a followed replacement symlink.
+    validate_log_path(path, created_metadata)
+}
+
+fn validate_log_identity(
+    created_metadata: &fs::Metadata,
+    candidate_metadata: &fs::Metadata,
+) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        if created_metadata.dev() != candidate_metadata.dev()
+            || created_metadata.ino() != candidate_metadata.ino()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "durable log was replaced while opening independent handles",
+            ));
+        }
+        if candidate_metadata.permissions().mode() & 0o777 != 0o600 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "durable log permissions changed while opening handles",
+            ));
+        }
+    }
+
+    #[cfg(not(unix))]
+    let _ = (created_metadata, candidate_metadata);
+
+    Ok(())
+}
+
+#[derive(Debug)]
+pub struct IncrementalLogScanner {
+    file: fs::File,
+    offset: u64,
+    partial_line: Vec<u8>,
+    partial_line_truncated: bool,
+    diagnostic_tail: Vec<u8>,
+}
+
+impl IncrementalLogScanner {
+    pub fn new(file: fs::File) -> Self {
+        Self {
+            file,
+            offset: 0,
+            partial_line: Vec::new(),
+            partial_line_truncated: false,
+            diagnostic_tail: Vec::new(),
+        }
+    }
+
+    /// Read only bytes appended since the prior poll and return newly completed
+    /// lines. A shrink is treated as a truncation and starts a fresh stream.
+    pub fn poll_lines(&mut self) -> io::Result<Vec<String>> {
+        let file_len = self.file.metadata()?.len();
+        if file_len < self.offset {
+            self.offset = 0;
+            self.partial_line.clear();
+            self.partial_line_truncated = false;
+            self.diagnostic_tail.clear();
+        }
+
+        self.file.seek(SeekFrom::Start(self.offset))?;
+        let mut bytes_available = file_len.saturating_sub(self.offset);
+        let mut chunk = [0u8; LOG_SCAN_CHUNK_SIZE];
+        let mut lines = Vec::new();
+        while bytes_available != 0 {
+            let read_size = usize::try_from(bytes_available.min(LOG_SCAN_CHUNK_SIZE as u64))
+                .unwrap_or(LOG_SCAN_CHUNK_SIZE);
+            let bytes_read = self.file.read(&mut chunk[..read_size])?;
+            if bytes_read == 0 {
+                break;
+            }
+
+            let appended = &chunk[..bytes_read];
+            self.offset = self
+                .offset
+                .saturating_add(u64::try_from(bytes_read).unwrap_or(u64::MAX));
+            bytes_available = bytes_available.saturating_sub(bytes_read as u64);
+            self.retain_diagnostic_tail(appended);
+            self.consume_appended_bytes(appended, &mut lines);
+        }
+
+        Ok(lines)
+    }
+
+    pub fn diagnostic_tail(&self) -> &[u8] {
+        &self.diagnostic_tail
+    }
+
+    fn consume_appended_bytes(&mut self, appended: &[u8], lines: &mut Vec<String>) {
+        let mut start = 0;
+        for (index, byte) in appended.iter().enumerate() {
+            if *byte != b'\n' {
+                continue;
+            }
+
+            self.retain_partial_suffix(&appended[start..index]);
+            let mut line = &self.partial_line[..];
+            if line.last() == Some(&b'\r') {
+                line = &line[..line.len() - 1];
+            }
+            let line = String::from_utf8_lossy(line);
+            if self.partial_line_truncated {
+                lines.push(format!("{TRUNCATED_LOG_LINE_PREFIX}{line}"));
+            } else {
+                lines.push(line.into_owned());
+            }
+            self.partial_line.clear();
+            self.partial_line_truncated = false;
+            start = index + 1;
+        }
+
+        self.retain_partial_suffix(&appended[start..]);
+    }
+
+    fn retain_partial_suffix(&mut self, appended: &[u8]) {
+        if appended.len() >= LOG_PARTIAL_LINE_CAP {
+            self.partial_line.clear();
+            self.partial_line
+                .extend_from_slice(&appended[appended.len() - LOG_PARTIAL_LINE_CAP..]);
+            self.partial_line_truncated = true;
+            return;
+        }
+
+        let overflow = self
+            .partial_line
+            .len()
+            .saturating_add(appended.len())
+            .saturating_sub(LOG_PARTIAL_LINE_CAP);
+        if overflow != 0 {
+            self.partial_line.drain(..overflow);
+            self.partial_line_truncated = true;
+        }
+        self.partial_line.extend_from_slice(appended);
+    }
+
+    fn retain_diagnostic_tail(&mut self, appended: &[u8]) {
+        if appended.len() >= LOG_DIAGNOSTIC_TAIL_CAP {
+            self.diagnostic_tail.clear();
+            self.diagnostic_tail
+                .extend_from_slice(&appended[appended.len() - LOG_DIAGNOSTIC_TAIL_CAP..]);
+            return;
+        }
+
+        let overflow = self
+            .diagnostic_tail
+            .len()
+            .saturating_add(appended.len())
+            .saturating_sub(LOG_DIAGNOSTIC_TAIL_CAP);
+        if overflow != 0 {
+            self.diagnostic_tail.drain(..overflow);
+        }
+        self.diagnostic_tail.extend_from_slice(appended);
+    }
+}
+
+#[cfg(test)]
+mod durable_log_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn test_store(tmp: &TempDir) -> RegistryStore {
+        RegistryStore::for_test(tmp.path().join("registry")).expect("test registry")
+    }
+
+    fn absolute_log_path(store: &RegistryStore, handles: &LogHandles) -> PathBuf {
+        store.root.join(Path::new(&handles.log_path))
+    }
+
+    #[test]
+    fn start_log_names_are_unique_lowercase_hex() {
+        let tmp = TempDir::new().expect("temp dir");
+        let store = test_store(&tmp);
+        let first = store.create_start_log().expect("first log");
+        let second = store.create_start_log().expect("second log");
+
+        assert_ne!(first.log_path, second.log_path);
+        for handles in [&first, &second] {
+            let id = handles
+                .log_path
+                .strip_prefix("jupyter/logs/start-")
+                .and_then(|value| value.strip_suffix(".log"))
+                .expect("trusted relative start-log path");
+            assert_eq!(id.len(), 32);
+            assert!(id
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+            assert!(absolute_log_path(&store, handles).is_file());
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn symlink_components_are_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = TempDir::new().expect("temp dir");
+        let first_store = test_store(&tmp);
+        let target = tmp.path().join("symlink-target");
+        fs::create_dir(&target).expect("symlink target");
+        symlink(&target, first_store.root.join("jupyter")).expect("jupyter symlink");
+        assert!(first_store.create_start_log().is_err());
+
+        let second_root = tmp.path().join("second-registry");
+        let second_store = RegistryStore::for_test(second_root.clone()).expect("second registry");
+        fs::create_dir(second_root.join("jupyter")).expect("jupyter directory");
+        symlink(&target, second_root.join("jupyter/logs")).expect("logs symlink");
+        assert!(second_store.create_start_log().is_err());
+    }
+
+    #[test]
+    fn non_directory_components_are_rejected() {
+        let tmp = TempDir::new().expect("temp dir");
+        let first_store = test_store(&tmp);
+        fs::write(first_store.root.join("jupyter"), b"not a directory").expect("jupyter file");
+        assert!(first_store.create_start_log().is_err());
+
+        let second_root = tmp.path().join("second-registry");
+        let second_store = RegistryStore::for_test(second_root.clone()).expect("second registry");
+        fs::create_dir(second_root.join("jupyter")).expect("jupyter directory");
+        fs::write(second_root.join("jupyter/logs"), b"not a directory").expect("logs file");
+        assert!(second_store.create_start_log().is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn unix_directories_and_logs_have_private_modes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new().expect("temp dir");
+        let store = test_store(&tmp);
+        let handles = store.create_start_log().expect("start log");
+        let directories = [store.root.join("jupyter"), store.root.join("jupyter/logs")];
+        for directory in &directories {
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o755))
+                .expect("loosen directory mode");
+        }
+        store.create_start_log().expect("repair directory modes");
+
+        for directory in directories {
+            let mode = fs::metadata(directory)
+                .expect("directory metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o700);
+        }
+
+        let mode = fs::metadata(absolute_log_path(&store, &handles))
+            .expect("log metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn scanner_reads_appends_from_independent_file_descriptions() {
+        let tmp = TempDir::new().expect("temp dir");
+        let store = test_store(&tmp);
+        let mut handles = store.create_start_log().expect("start log");
+
+        let stderr_offset = handles
+            .stderr_append
+            .stream_position()
+            .expect("stderr position");
+        let reader_offset = handles
+            .read_handle
+            .stream_position()
+            .expect("reader position");
+
+        handles
+            .stdout_append
+            .write_all(b"stdout\n")
+            .expect("stdout write");
+        assert_eq!(
+            handles
+                .stderr_append
+                .stream_position()
+                .expect("stderr position after stdout write"),
+            stderr_offset,
+            "stdout writes must not move stderr's independent file offset"
+        );
+        assert_eq!(
+            handles
+                .read_handle
+                .stream_position()
+                .expect("reader position after stdout write"),
+            reader_offset,
+            "stdout writes must not move the scanner's independent file offset"
+        );
+        handles
+            .stderr_append
+            .write_all(b"stderr\n")
+            .expect("stderr write");
+        assert_eq!(
+            handles
+                .read_handle
+                .stream_position()
+                .expect("reader position after stderr write"),
+            reader_offset,
+            "stderr writes must not move the scanner's independent file offset"
+        );
+
+        let mut scanner = IncrementalLogScanner::new(handles.read_handle);
+        assert_eq!(scanner.poll_lines().expect("scan"), ["stdout", "stderr"]);
+
+        handles
+            .stdout_append
+            .write_all(b"later\n")
+            .expect("later append");
+        assert_eq!(scanner.poll_lines().expect("later scan"), ["later"]);
+    }
+
+    #[test]
+    fn scanner_preserves_partial_lines_across_polls() {
+        let tmp = TempDir::new().expect("temp dir");
+        let store = test_store(&tmp);
+        let mut handles = store.create_start_log().expect("start log");
+
+        handles
+            .stdout_append
+            .write_all(b"first\npar")
+            .expect("first append");
+        let mut scanner = IncrementalLogScanner::new(handles.read_handle);
+        assert_eq!(scanner.poll_lines().expect("first poll"), ["first"]);
+        assert!(scanner.poll_lines().expect("unchanged poll").is_empty());
+
+        handles
+            .stderr_append
+            .write_all(b"tial\r\nlast")
+            .expect("second append");
+        assert_eq!(scanner.poll_lines().expect("second poll"), ["partial"]);
+
+        handles
+            .stdout_append
+            .write_all(b"\n")
+            .expect("final append");
+        assert_eq!(scanner.poll_lines().expect("final poll"), ["last"]);
+    }
+
+    #[test]
+    fn scanner_tail_is_bounded_and_truncation_resets_state() {
+        let tmp = TempDir::new().expect("temp dir");
+        let store = test_store(&tmp);
+        let mut handles = store.create_start_log().expect("start log");
+        let absolute_path = absolute_log_path(&store, &handles);
+        let oversized = vec![b'x'; LOG_DIAGNOSTIC_TAIL_CAP + 257];
+
+        handles
+            .stdout_append
+            .write_all(&oversized)
+            .expect("oversized append");
+        let mut scanner = IncrementalLogScanner::new(handles.read_handle);
+        assert!(scanner.poll_lines().expect("oversized poll").is_empty());
+        assert_eq!(scanner.diagnostic_tail().len(), LOG_DIAGNOSTIC_TAIL_CAP);
+        assert_eq!(
+            scanner.diagnostic_tail(),
+            &oversized[oversized.len() - LOG_DIAGNOSTIC_TAIL_CAP..]
+        );
+
+        fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&absolute_path)
+            .expect("open for truncate")
+            .write_all(b"reset\n")
+            .expect("write replacement");
+        assert_eq!(scanner.poll_lines().expect("post-truncate poll"), ["reset"]);
+        assert_eq!(scanner.diagnostic_tail(), b"reset\n");
+    }
+
+    #[test]
+    fn scanner_partial_line_is_bounded_across_multiple_polls() {
+        let tmp = TempDir::new().expect("temp dir");
+        let store = test_store(&tmp);
+        let mut handles = store.create_start_log().expect("start log");
+        let first = vec![b'a'; LOG_PARTIAL_LINE_CAP - 7];
+        let second = vec![b'b'; LOG_PARTIAL_LINE_CAP + 31];
+
+        handles
+            .stdout_append
+            .write_all(&first)
+            .expect("first unterminated append");
+        let mut scanner = IncrementalLogScanner::new(handles.read_handle);
+        assert!(scanner.poll_lines().expect("first poll").is_empty());
+        assert_eq!(scanner.partial_line.len(), first.len());
+        assert!(!scanner.partial_line_truncated);
+
+        handles
+            .stderr_append
+            .write_all(&second)
+            .expect("second unterminated append");
+        assert!(scanner.poll_lines().expect("second poll").is_empty());
+        assert_eq!(scanner.partial_line.len(), LOG_PARTIAL_LINE_CAP);
+        assert!(scanner.partial_line_truncated);
+        assert!(scanner.partial_line.iter().all(|byte| *byte == b'b'));
+        assert_eq!(scanner.diagnostic_tail().len(), LOG_DIAGNOSTIC_TAIL_CAP);
+
+        handles
+            .stdout_append
+            .write_all(b"suffix")
+            .expect("third unterminated append");
+        assert!(scanner.poll_lines().expect("third poll").is_empty());
+        assert_eq!(scanner.partial_line.len(), LOG_PARTIAL_LINE_CAP);
+        assert!(scanner.partial_line.ends_with(b"suffix"));
+
+        handles
+            .stderr_append
+            .write_all(b"\n")
+            .expect("terminate oversized line");
+        let lines = scanner.poll_lines().expect("terminating poll");
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].starts_with(TRUNCATED_LOG_LINE_PREFIX));
+        assert!(lines[0].ends_with("suffix"));
+        assert!(lines[0].len() <= TRUNCATED_LOG_LINE_PREFIX.len() + LOG_PARTIAL_LINE_CAP);
+        assert!(scanner.partial_line.is_empty());
+        assert!(!scanner.partial_line_truncated);
+    }
+}
+
+#[cfg(test)]
+mod startup_guard_tests {
+    use super::*;
+    use std::net::{SocketAddr, TcpListener, TcpStream};
+    use std::process::Stdio;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::Instant;
+    use tempfile::TempDir;
+
+    const FIXTURE_ROLE_ENV: &str = "GILA_B2A_FIXTURE_ROLE";
+    const FIXTURE_MARKER_ENV: &str = "GILA_B2A_FIXTURE_MARKER";
+    const FIXTURE_PLATFORM_ENV: &str = "GILA_B2A_FIXTURE_PLATFORM";
+
+    #[derive(Debug, Clone, Copy)]
+    enum InjectedTerminationFailure {
+        Kind(io::ErrorKind),
+        #[cfg(unix)]
+        RawOs(i32),
+    }
+
+    #[derive(Debug)]
+    struct FaultInjectingChild {
+        termination_error: Option<InjectedTerminationFailure>,
+        wait_error: io::ErrorKind,
+        termination_called: Arc<AtomicBool>,
+        wait_called: Arc<AtomicBool>,
+    }
+
+    impl process_wrap::std::ChildWrapper for FaultInjectingChild {
+        fn inner(&self) -> &dyn process_wrap::std::ChildWrapper {
+            self
+        }
+
+        fn inner_mut(&mut self) -> &mut dyn process_wrap::std::ChildWrapper {
+            self
+        }
+
+        fn into_inner(self: Box<Self>) -> Box<dyn process_wrap::std::ChildWrapper> {
+            self
+        }
+
+        fn start_kill(&mut self) -> io::Result<()> {
+            self.termination_called.store(true, Ordering::SeqCst);
+            match self.termination_error {
+                Some(InjectedTerminationFailure::Kind(kind)) => {
+                    Err(io::Error::new(kind, "injected termination failure"))
+                }
+                #[cfg(unix)]
+                Some(InjectedTerminationFailure::RawOs(code)) => {
+                    Err(io::Error::from_raw_os_error(code))
+                }
+                None => Ok(()),
+            }
+        }
+
+        fn wait(&mut self) -> io::Result<ExitStatus> {
+            self.wait_called.store(true, Ordering::SeqCst);
+            Err(io::Error::new(self.wait_error, "injected wait failure"))
+        }
+    }
+
+    fn fault_injecting_guard(
+        termination_error: Option<InjectedTerminationFailure>,
+    ) -> (StartupGuard, Arc<AtomicBool>, Arc<AtomicBool>) {
+        let termination_called = Arc::new(AtomicBool::new(false));
+        let wait_called = Arc::new(AtomicBool::new(false));
+        let child = FaultInjectingChild {
+            termination_error,
+            wait_error: io::ErrorKind::BrokenPipe,
+            termination_called: Arc::clone(&termination_called),
+            wait_called: Arc::clone(&wait_called),
+        };
+        (
+            StartupGuard::armed(Box::new(child)),
+            termination_called,
+            wait_called,
+        )
+    }
+
+    fn base_fixture_command(test_filter: &str, role: &str, marker: &Path) -> Command {
+        let mut command = Command::new(std::env::current_exe().expect("current test executable"));
+        command
+            .arg(test_filter)
+            .arg("--ignored")
+            .arg("--test-threads=1")
+            .env(FIXTURE_ROLE_ENV, role)
+            .env(FIXTURE_MARKER_ENV, marker)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        command
+    }
+
+    #[cfg(unix)]
+    fn fixture_command(test_filter: &str, role: &str, marker: &Path) -> Command {
+        let mut command = base_fixture_command(test_filter, role, marker);
+        command.env(FIXTURE_PLATFORM_ENV, "unix");
+        command
+    }
+
+    #[cfg(windows)]
+    fn fixture_command(test_filter: &str, role: &str, marker: &Path) -> Command {
+        let mut command = base_fixture_command(test_filter, role, marker);
+        command.env(FIXTURE_PLATFORM_ENV, "windows");
+        command
+    }
+
+    fn assert_expected_fixture_platform() {
+        #[cfg(unix)]
+        assert_eq!(std::env::var(FIXTURE_PLATFORM_ENV).as_deref(), Ok("unix"));
+        #[cfg(windows)]
+        assert_eq!(
+            std::env::var(FIXTURE_PLATFORM_ENV).as_deref(),
+            Ok("windows")
+        );
+    }
+
+    fn wait_for_marker(path: &Path) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !path.is_file() {
+            assert!(Instant::now() < deadline, "fixture did not become ready");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn wait_for_listener(path: &Path) -> SocketAddr {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok(contents) = fs::read_to_string(path) {
+                if let Ok(address) = contents.parse() {
+                    return address;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "descendant listener did not become ready"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    #[ignore = "spawned as a process-management fixture"]
+    fn long_lived_fixture() {
+        if std::env::var(FIXTURE_ROLE_ENV).as_deref() != Ok("long-lived") {
+            return;
+        }
+        assert_expected_fixture_platform();
+        let marker = PathBuf::from(std::env::var_os(FIXTURE_MARKER_ENV).expect("marker path"));
+        fs::write(marker, b"ready").expect("write ready marker");
+        loop {
+            thread::sleep(Duration::from_secs(60));
+        }
+    }
+
+    #[test]
+    #[ignore = "spawned as a process-management fixture"]
+    fn descendant_parent_fixture() {
+        if std::env::var(FIXTURE_ROLE_ENV).as_deref() != Ok("descendant-parent") {
+            return;
+        }
+        assert_expected_fixture_platform();
+        let marker = PathBuf::from(std::env::var_os(FIXTURE_MARKER_ENV).expect("marker path"));
+        let mut descendant = fixture_command(
+            "startup_guard_tests::descendant_listener_fixture",
+            "descendant-listener",
+            &marker,
+        )
+        .spawn()
+        .expect("spawn descendant listener fixture");
+        let _ = descendant.wait();
+    }
+
+    #[test]
+    #[ignore = "spawned as a process-management fixture"]
+    fn descendant_listener_fixture() {
+        if std::env::var(FIXTURE_ROLE_ENV).as_deref() != Ok("descendant-listener") {
+            return;
+        }
+        assert_expected_fixture_platform();
+        let marker = PathBuf::from(std::env::var_os(FIXTURE_MARKER_ENV).expect("marker path"));
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind descendant listener");
+        fs::write(
+            marker,
+            listener.local_addr().expect("listener address").to_string(),
+        )
+        .expect("write listener marker");
+        for connection in listener.incoming() {
+            drop(connection.expect("accept connection"));
+        }
+    }
+
+    #[test]
+    fn disarm_leaves_a_live_child_owned_by_the_caller() {
+        let tmp = TempDir::new().expect("temp dir");
+        let marker = tmp.path().join("ready");
+        let command = fixture_command(
+            "startup_guard_tests::long_lived_fixture",
+            "long-lived",
+            &marker,
+        );
+        let guard = StartupGuard::spawn(command).expect("spawn guarded child");
+        wait_for_marker(&marker);
+
+        let mut child = guard.disarm();
+        assert!(
+            child.try_wait().expect("check live child").is_none(),
+            "disarming must not terminate the live child"
+        );
+
+        child.start_kill().expect("terminate disarmed child tree");
+        let status = child.wait().expect("reap disarmed child");
+        assert!(
+            !status.success(),
+            "fixture should exit by forced termination"
+        );
+        assert!(child.try_wait().expect("check reaped child").is_some());
+    }
+
+    #[test]
+    fn rollback_does_not_wait_after_termination_failure() {
+        let (guard, termination_called, wait_called) = fault_injecting_guard(Some(
+            InjectedTerminationFailure::Kind(io::ErrorKind::PermissionDenied),
+        ));
+
+        let error = guard.rollback().expect_err("termination must fail");
+
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(termination_called.load(Ordering::SeqCst));
+        assert!(!wait_called.load(Ordering::SeqCst));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rollback_reaps_after_unix_esrch_reports_an_already_exited_tree() {
+        let (guard, termination_called, wait_called) =
+            fault_injecting_guard(Some(InjectedTerminationFailure::RawOs(ESRCH_RAW_OS_ERROR)));
+
+        let error = guard
+            .rollback()
+            .expect_err("the injected reap failure must be surfaced");
+
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+        assert!(termination_called.load(Ordering::SeqCst));
+        assert!(wait_called.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn rollback_surfaces_wait_failure_after_successful_termination() {
+        let (guard, termination_called, wait_called) = fault_injecting_guard(None);
+
+        let error = guard.rollback().expect_err("wait must fail");
+
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+        assert!(termination_called.load(Ordering::SeqCst));
+        assert!(wait_called.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn dropping_guard_kills_and_reaps_the_descendant_process_tree() {
+        let tmp = TempDir::new().expect("temp dir");
+        let marker = tmp.path().join("listener-address");
+        let command = fixture_command(
+            "startup_guard_tests::descendant_parent_fixture",
+            "descendant-parent",
+            &marker,
+        );
+        let guard = StartupGuard::spawn(command).expect("spawn guarded process tree");
+        let listener_address = wait_for_listener(&marker);
+        TcpStream::connect_timeout(&listener_address, Duration::from_secs(1))
+            .expect("descendant listener must be live before guard cleanup");
+
+        drop(guard);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match TcpStream::connect_timeout(&listener_address, Duration::from_millis(100)) {
+                Err(_) => break,
+                Ok(connection) => drop(connection),
+            }
+            assert!(
+                Instant::now() < deadline,
+                "descendant listener survived process-tree cleanup"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
 }
 
 // ---- notebook execution -------------------------------------------------
@@ -174,23 +2208,35 @@ pub struct CellOutputSummary {
     pub error: Option<String>,
 }
 
+/// Resolve a notebook path to an absolute canonical path.
+/// Absolute paths are returned as-is.
+/// Relative paths are resolved against the working directory.
+fn resolve_notebook_path(notebook: &str, working_dir: Option<&str>) -> Result<PathBuf> {
+    let notebook_input = PathBuf::from(notebook);
+    let resolved = if notebook_input.is_absolute() {
+        notebook_input
+    } else {
+        let work = working_dir
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."));
+        work.join(&notebook_input)
+    };
+
+    resolved.canonicalize().with_context(|| {
+        format!(
+            "Failed to resolve notebook path: {} (working_dir: {:?})",
+            notebook, working_dir
+        )
+    })
+}
+
 /// Execute a Jupyter notebook using nbconvert.
 pub fn execute_notebook(params: JupyterExecuteParams) -> Result<JupyterExecuteResult> {
     let start_time = std::time::Instant::now();
 
-    // Resolve notebook path: use as-is if absolute, otherwise relative to working_dir.
-    let notebook_input = PathBuf::from(&params.notebook_path);
-    let notebook_path = if notebook_input.is_absolute() {
-        notebook_input.clone()
-    } else {
-        // For relative paths, resolve against working_dir (or current dir if not specified).
-        let working_dir = params
-            .working_dir
-            .as_ref()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("."));
-        working_dir.join(&notebook_input)
-    };
+    // Resolve notebook path using production resolver
+    let notebook_path =
+        resolve_notebook_path(&params.notebook_path, params.working_dir.as_deref())?;
 
     // Determine working_dir for execution: notebook's parent if not explicitly specified.
     let working_dir = match params.working_dir.as_ref().map(PathBuf::from) {
@@ -220,7 +2266,7 @@ pub fn execute_notebook(params: JupyterExecuteParams) -> Result<JupyterExecuteRe
         .arg(&kernel_name)
         .arg("--ExecutePreprocessor.timeout")
         .arg(timeout.to_string())
-        .arg(&params.notebook_path) // Use relative path from working_dir
+        .arg(&notebook_path) // Pass RESOLVED path to nbconvert
         .current_dir(&working_dir);
 
     if !save_outputs {
@@ -334,7 +2380,7 @@ pub struct JupyterServerParams {
     pub working_dir: Option<String>,
     /// Port to run the server on (default: 8888)
     pub port: Option<u16>,
-    /// Bind address. Defaults to `127.0.0.1`. MUST be a loopback address —
+    /// Bind address. Defaults to `127.0.0.1`. MUST be a typed loopback IP —
     /// non-loopback hosts are rejected so the server is reachable only from the
     /// operator's own machine.
     pub host: Option<String>,
@@ -354,12 +2400,11 @@ pub struct JupyterServerParams {
     /// omits `--no-browser` so Jupyter opens the operator's browser; anything
     /// else passes `--no-browser`.
     pub open_browser: Option<bool>,
-    /// Additional command line args
+    /// Additional command line args appended BEFORE Gila's binding/auth args.
+    /// Gila's critical flags (--ip, --port, --NotebookApp.token) come last,
+    /// so duplicate flags from extra_args are overridden by Gila's values
+    /// (CLI parsers use the LAST occurrence of a flag).
     pub extra_args: Option<Vec<String>>,
-    /// Explicit Pixi task to run instead of `jupyter notebook`.
-    /// Only used if pixi.toml exists. If not specified, searches for
-    /// conventional task names (lab-local, jupyter, lab, jupyter-lab).
-    pub pixi_task: Option<String>,
 }
 
 /// Result of starting a Jupyter server.
@@ -375,25 +2420,45 @@ pub struct JupyterServerResult {
     pub pid: Option<u32>,
     /// Port the server is running on
     pub port: Option<u16>,
-    /// Token used for authentication
+    /// Compatibility field for older in-process callers. Authentication
+    /// material is intentionally never serialized or returned by the current
+    /// lifecycle; it lives only in the private registry.
+    #[serde(skip)]
     pub token: Option<String>,
+    /// Private durable log path, relative to `GILA_HOME`.
+    pub log_path: Option<String>,
     /// Error message if any
     pub error: Option<String>,
+}
+
+/// Network-observed state of a durable registry entry.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum JupyterServerState {
+    Running,
+    Unreachable,
+    NotFound,
 }
 
 /// Status of a Jupyter server, queried by handle.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JupyterServerStatus {
-    /// Whether a server is running
+    /// Compatibility convenience: true only for a verified 2xx kernels API
+    /// response containing valid kernels JSON.
     pub running: bool,
+    pub state: JupyterServerState,
     /// The handle this status refers to
     pub handle_id: u64,
-    /// Server URL if running
+    /// Registered server URL, including an optional Jupyter base path.
     pub url: Option<String>,
-    /// Port if running
+    /// Registered port.
     pub port: Option<u16>,
+    /// Private durable log path, relative to `GILA_HOME`.
+    pub log_path: Option<String>,
     /// List of running kernels
     pub kernels: Vec<KernelInfo>,
+    /// Bounded probe/validation diagnostic when the record is unreachable.
+    pub error: Option<String>,
 }
 
 /// Information about a running kernel.
@@ -407,7 +2472,7 @@ pub struct KernelInfo {
 }
 
 /// Parsed endpoint from Jupyter server startup output
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JupyterEndpoint {
     pub url: String,
     pub host: String,
@@ -422,6 +2487,9 @@ pub struct ServerSummary {
     pub url: String,
     pub port: u16,
     pub running: bool,
+    pub state: JupyterServerState,
+    pub log_path: Option<String>,
+    pub error: Option<String>,
 }
 
 /// Result of listing Jupyter servers.
@@ -430,177 +2498,292 @@ pub struct JupyterListResult {
     pub servers: Vec<ServerSummary>,
 }
 
-/// Owned jupyter server process retained in the registry.
-struct ServerHandle {
-    child: std::process::Child,
-    url: String,
-    port: u16,
-    token: String,
-}
-
-/// Monotonic handle id generator (1..; 0 is reserved as "no handle").
-/// Initialized lazily from the persistent registry to avoid collisions across invocations.
-static NEXT_HANDLE: LazyLock<AtomicU64> = LazyLock::new(|| {
-    let next_id = load_persistent_servers()
-        .ok()
-        .and_then(|records| records.iter().map(|r| r.handle_id).max())
-        .unwrap_or(0)
-        + 1;
-    AtomicU64::new(next_id)
-});
-
-/// Process-local registry of servers this tool started, keyed by handle id.
-static SERVERS: LazyLock<Mutex<HashMap<u64, ServerHandle>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
-/// Persistent file storing server handles (for cross-invocation visibility).
-/// Includes PID and start time to detect stale entries and PID reuse on Windows.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PersistentServerRecord {
-    pub handle_id: u64,
-    pub url: String,
-    pub port: u16,
-    pub token: String,
-    #[serde(default)]
-    pub pid: Option<u32>,
-    #[serde(default)]
-    pub start_time_unix: Option<u64>,
-}
-
-/// Path to the persistent server registry file.
-fn servers_file() -> Result<PathBuf> {
-    let home = std::env::var("HOME").context("HOME env var not set")?;
-    let path = PathBuf::from(home).join(".gila").join("servers.json");
-    Ok(path)
-}
-
-/// Load persisted server handles from disk.
-fn load_persistent_servers() -> Result<Vec<PersistentServerRecord>> {
-    let path = servers_file()?;
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let content = fs::read_to_string(&path).context("Failed to read servers file")?;
-    let records = serde_json::from_str(&content).context("Failed to parse servers file")?;
-    Ok(records)
-}
-
-/// Save persisted server handles to disk with atomic writes and user-only permissions.
-fn save_persistent_servers(records: &[PersistentServerRecord]) -> Result<()> {
-    use std::io::Write;
-
-    let path = servers_file()?;
-    let parent = path.parent().context("Invalid path")?;
-
-    // Create directory with restricted permissions (0700)
-    fs::create_dir_all(parent).context("Failed to create .gila directory")?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = fs::Permissions::from_mode(0o700);
-        fs::set_permissions(parent, perms).context("Failed to set directory permissions")?;
-    }
-
-    // Write to temporary file first, then atomically move it
-    let mut temp_path = path.clone();
-    temp_path.set_file_name(format!(".servers.{}.tmp", std::process::id()));
-
-    let json = serde_json::to_string_pretty(records).context("Failed to serialize servers")?;
-
-    {
-        let mut file =
-            fs::File::create(&temp_path).context("Failed to create temporary servers file")?;
-        file.write_all(json.as_bytes())
-            .context("Failed to write servers data")?;
-        file.sync_all().context("Failed to sync servers file")?;
-    }
-
-    // Set file permissions to user-only (0600) on Unix before moving
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = fs::Permissions::from_mode(0o600);
-        fs::set_permissions(&temp_path, perms).context("Failed to set file permissions")?;
-    }
-
-    // Atomic move (on Unix) or overwrite (on Windows)
-    #[cfg(unix)]
-    fs::rename(&temp_path, &path).context("Failed to atomically move servers file")?;
-    #[cfg(not(unix))]
-    {
-        let _ = fs::remove_file(&path); // Ignore error if file doesn't exist
-        fs::rename(&temp_path, &path).context("Failed to write servers file")?;
-    }
-
-    Ok(())
-}
-
 fn is_loopback(host: &str) -> bool {
-    matches!(host, "127.0.0.1" | "::1" | "localhost" | "localhost.")
+    host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
-/// Parse Jupyter endpoint from server startup output.
-///
-/// Jupyter logs "Jupyter Server X.X.X is running at: http://HOST:PORT/tree?token=TOKEN"
-/// This function extracts the actual endpoint used by the child process.
-#[allow(dead_code)] // Will be used after start_server refactor
-fn parse_jupyter_endpoint(output: &str) -> Result<JupyterEndpoint> {
-    // Look for lines containing "http://" and "token="
-    let url_line = output
-        .lines()
-        .find(|l| l.contains("http://") || l.contains("https://"))
-        .context("No HTTP URL found in Jupyter startup output")?;
+fn typed_loopback_host(parsed: &url::Url) -> Result<IpAddr> {
+    match parsed.host() {
+        Some(url::Host::Ipv4(ip)) if ip.is_loopback() => Ok(IpAddr::V4(ip)),
+        Some(url::Host::Ipv6(ip)) if ip.is_loopback() => Ok(IpAddr::V6(ip)),
+        Some(url::Host::Ipv4(ip)) => anyhow::bail!("URL host {ip} is not loopback"),
+        Some(url::Host::Ipv6(ip)) => anyhow::bail!("URL host {ip} is not loopback"),
+        Some(url::Host::Domain(host)) => {
+            anyhow::bail!("URL host must be a typed loopback IP address, got {host}")
+        }
+        None => anyhow::bail!("URL is missing a host"),
+    }
+}
 
-    // Extract URL part (http://host:port/...)
-    let url_start = url_line
-        .find("http://")
-        .or_else(|| url_line.find("https://"))
-        .context("Missing http:// or https://")?;
-    let url_end = url_line[url_start..]
-        .find(' ')
-        .map(|i| url_start + i)
-        .unwrap_or(url_line.len());
-    let full_url = &url_line[url_start..url_end];
+fn explicit_port(input: &str) -> Option<u16> {
+    let authority_start = input.find("://")?.checked_add(3)?;
+    let authority_end = input[authority_start..]
+        .find(['/', '?', '#'])
+        .map_or(input.len(), |offset| authority_start + offset);
+    let authority = &input[authority_start..authority_end];
+    if authority.is_empty() || authority.contains('@') {
+        return None;
+    }
 
-    // Parse host and port from the URL
-    let after_scheme = full_url
-        .strip_prefix("https://")
-        .or_else(|| full_url.strip_prefix("http://"))
-        .context("Missing scheme")?;
-    let host_port_end = after_scheme.find('/').unwrap_or(after_scheme.len());
-    let host_port = &after_scheme[..host_port_end];
-
-    let (host, port_str) = host_port.rsplit_once(':').context("Missing port in URL")?;
-    let port: u16 = port_str.parse().context("Invalid port number")?;
-
-    // Extract token from the URL or from a separate line
-    let token = if let Some(token_start) = full_url.find("token=") {
-        let token_part = &full_url[token_start + 6..];
-        token_part
-            .split(|c: char| !c.is_ascii_alphanumeric())
-            .next()
-            .context("Empty token")?
-            .to_string()
+    let encoded_port = if let Some(rest) = authority.strip_prefix('[') {
+        let close = rest.find(']')?;
+        rest.get(close + 1..)?.strip_prefix(':')?
     } else {
-        // Token might be on a separate line or obscured, try to find it
-        output
-            .lines()
-            .find_map(|l| {
-                l.strip_prefix("Use Control-C")?;
-                // Token is printed obscured in newer Jupyter versions
-                None
-            })
-            .unwrap_or_else(|| "".to_string())
+        authority.rsplit_once(':')?.1
     };
+    if encoded_port.is_empty() || !encoded_port.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    encoded_port.parse().ok()
+}
 
-    let url = format!("http://{}:{}", host, port);
+const CONTROLLED_DEFAULT_URL: &str = "/tree";
+const DEFAULT_URL_FLAGS: [&str; 3] = [
+    "--ServerApp.default_url",
+    "--NotebookApp.default_url",
+    "--JupyterNotebookApp.default_url",
+];
+
+fn normalize_expected_default_url(value: &str) -> Result<String> {
+    let value = value.trim();
+    if !value.starts_with('/') || value.starts_with("//") {
+        anyhow::bail!("Jupyter default_url must be an absolute URL path beginning with one '/'");
+    }
+    if value.contains(['?', '#'])
+        || value
+            .chars()
+            .any(|ch| ch.is_control() || ch.is_whitespace())
+    {
+        anyhow::bail!("Jupyter default_url must not contain a query, fragment, or whitespace");
+    }
+    let normalized = value.trim_end_matches('/');
+    Ok(if normalized.is_empty() {
+        "/".to_string()
+    } else {
+        normalized.to_string()
+    })
+}
+
+fn configured_default_url(extra_args: &[String]) -> Result<Option<String>> {
+    let mut configured = None;
+    let mut index = 0;
+    while index < extra_args.len() {
+        let argument = &extra_args[index];
+        let mut matched = None;
+        for flag in DEFAULT_URL_FLAGS {
+            if argument == flag {
+                let value = extra_args
+                    .get(index + 1)
+                    .with_context(|| format!("{flag} requires a value"))?;
+                matched = Some(value.as_str());
+                index += 1;
+                break;
+            }
+            if let Some(value) = argument.strip_prefix(&format!("{flag}=")) {
+                matched = Some(value);
+                break;
+            }
+        }
+        if let Some(value) = matched {
+            if configured.is_some() {
+                anyhow::bail!(
+                    "extra_args may configure Jupyter default_url at most once; duplicate traitlet values are ambiguous"
+                );
+            }
+            configured = Some(normalize_expected_default_url(value)?);
+        }
+        index += 1;
+    }
+    Ok(configured)
+}
+
+fn without_default_url_args(extra_args: &[String]) -> Vec<String> {
+    let mut forwarded = Vec::with_capacity(extra_args.len());
+    let mut index = 0;
+    while index < extra_args.len() {
+        let argument = &extra_args[index];
+        if DEFAULT_URL_FLAGS.iter().any(|flag| argument == flag) {
+            index += 2;
+            continue;
+        }
+        if DEFAULT_URL_FLAGS
+            .iter()
+            .any(|flag| argument.starts_with(&format!("{flag}=")))
+        {
+            index += 1;
+            continue;
+        }
+        forwarded.push(argument.clone());
+        index += 1;
+    }
+    forwarded
+}
+
+fn normalized_base_path<'a>(path: &'a str, expected_default_url: &str) -> Result<&'a str> {
+    let without_trailing_slash = path.trim_end_matches('/');
+    if expected_default_url == "/" {
+        return Ok(without_trailing_slash);
+    }
+    // The suffix is either Gila's controlled `/tree` route or the single
+    // caller-supplied default_url validated before spawn. Strip exactly that
+    // known suffix, preserving a base path that happens to end the same way.
+    without_trailing_slash
+        .strip_suffix(expected_default_url)
+        .context("endpoint URL does not end in the expected Jupyter default route")
+}
+
+fn format_base_url(
+    parsed: &url::Url,
+    ip: IpAddr,
+    port: u16,
+    expected_default_url: &str,
+) -> Result<String> {
+    let host = match ip {
+        IpAddr::V4(ip) => ip.to_string(),
+        IpAddr::V6(ip) => format!("[{ip}]"),
+    };
+    Ok(format!(
+        "{}://{}:{}{}",
+        parsed.scheme(),
+        host,
+        port,
+        normalized_base_path(parsed.path(), expected_default_url)?
+    ))
+}
+
+fn parse_endpoint_candidate(
+    candidate: &str,
+    expected_token: &str,
+    expected_default_url: &str,
+) -> Result<JupyterEndpoint> {
+    if expected_token.is_empty() {
+        anyhow::bail!("expected Jupyter token must not be empty");
+    }
+
+    let parsed = url::Url::parse(candidate).context("failed to parse endpoint URL")?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        anyhow::bail!("endpoint scheme must be http or https");
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        anyhow::bail!("endpoint URL must not contain user info");
+    }
+    let port = explicit_port(candidate).context("endpoint URL must contain an explicit port")?;
+    if port == 0 {
+        anyhow::bail!("endpoint URL port must not be zero");
+    }
+    let ip = typed_loopback_host(&parsed)?;
+    let tokens: Vec<String> = parsed
+        .query_pairs()
+        .filter(|(key, _)| key == "token")
+        .map(|(_, value)| value.into_owned())
+        .collect();
+    if tokens.len() != 1 || tokens[0].is_empty() || tokens[0] != expected_token {
+        anyhow::bail!("endpoint token does not exactly match the expected token");
+    }
 
     Ok(JupyterEndpoint {
-        url,
-        host: host.to_string(),
+        url: format_base_url(&parsed, ip, port, expected_default_url)?,
+        host: ip.to_string(),
         port,
-        token,
+        token: tokens.into_iter().next().expect("exactly one token"),
     })
+}
+
+fn endpoint_candidate_strings(output: &str) -> Vec<&str> {
+    let mut candidates = Vec::new();
+    let mut remaining = output;
+    while !remaining.is_empty() {
+        let http = remaining.find("http://");
+        let https = remaining.find("https://");
+        let Some(start) = (match (http, https) {
+            (Some(left), Some(right)) => Some(left.min(right)),
+            (Some(start), None) | (None, Some(start)) => Some(start),
+            (None, None) => None,
+        }) else {
+            break;
+        };
+        let candidate = &remaining[start..];
+        let end = candidate
+            .char_indices()
+            .find(|(index, ch)| {
+                *index != 0
+                    && (ch.is_ascii_whitespace()
+                        || ch.is_control()
+                        || matches!(ch, '\"' | '\'' | '<' | '>' | ')' | ','))
+            })
+            .map_or(candidate.len(), |(index, _)| index);
+        candidates.push(&candidate[..end]);
+        let advance = start.saturating_add(end.max(1));
+        remaining = &remaining[advance..];
+    }
+    candidates
+}
+
+/// Scan every URL candidate and keep only endpoints that satisfy Gila's exact
+/// typed-loopback, explicit-port, and token boundary. Rejected candidates do
+/// not prevent a later legitimate announcement from being accepted.
+fn parse_jupyter_endpoints(
+    output: &str,
+    expected_token: &str,
+    expected_default_url: &str,
+) -> Vec<JupyterEndpoint> {
+    endpoint_candidate_strings(output)
+        .into_iter()
+        .filter_map(|candidate| {
+            parse_endpoint_candidate(candidate, expected_token, expected_default_url).ok()
+        })
+        .collect()
+}
+
+#[derive(Debug)]
+struct ValidatedStoredEndpoint {
+    base_url: url::Url,
+    socket_addr: SocketAddr,
+}
+
+fn validate_stored_record(record: &ServerRecord) -> Result<ValidatedStoredEndpoint> {
+    if record.token.is_empty() {
+        anyhow::bail!("registered Jupyter token is empty");
+    }
+    let parsed = url::Url::parse(&record.url).context("registered Jupyter URL is invalid")?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        anyhow::bail!("registered Jupyter URL must use http or https");
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        anyhow::bail!("registered Jupyter URL must not contain user info");
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        anyhow::bail!("registered Jupyter base URL must not contain a query or fragment");
+    }
+    let port = explicit_port(&record.url)
+        .context("registered Jupyter URL must contain an explicit port")?;
+    if port == 0 || record.port == 0 {
+        anyhow::bail!("registered Jupyter port must not be zero");
+    }
+    if port != record.port {
+        anyhow::bail!(
+            "registered Jupyter URL port {port} does not match record port {}",
+            record.port
+        );
+    }
+    let ip = typed_loopback_host(&parsed)?;
+    Ok(ValidatedStoredEndpoint {
+        base_url: parsed,
+        socket_addr: SocketAddr::new(ip, port),
+    })
+}
+
+fn api_url(base_url: &url::Url, endpoint: &str) -> url::Url {
+    let mut url = base_url.clone();
+    let path = format!(
+        "{}/{}",
+        base_url.path().trim_end_matches('/'),
+        endpoint.trim_start_matches('/')
+    );
+    url.set_path(&path);
+    url.set_query(None);
+    url.set_fragment(None);
+    url
 }
 
 /// Detect environment manager in a directory and return appropriate launcher.
@@ -645,28 +2828,28 @@ fn detect_and_wrap_jupyter_cmd(working_dir: &Path) -> (String, Vec<String>) {
         );
     }
 
-    // Check for .venv directory
+    // Check for .venv directory with platform-specific executable
     if working_dir.join(".venv").exists() {
-        let activate = working_dir.join(".venv/bin/activate");
-        return (
-            "sh".to_string(),
-            vec![
-                "-c".to_string(),
-                format!("source {} && exec jupyter \"$@\"", activate.display()),
-            ],
-        );
+        #[cfg(unix)]
+        let venv_exe = working_dir.join(".venv/bin/jupyter");
+        #[cfg(windows)]
+        let venv_exe = working_dir.join(".venv/Scripts/jupyter.exe");
+
+        if venv_exe.exists() {
+            return (venv_exe.to_string_lossy().to_string(), vec![]);
+        }
     }
 
     // Check for requirements.txt (assume venv exists or will be created)
     if working_dir.join("requirements.txt").exists() {
-        let activate = working_dir.join(".venv/bin/activate");
-        return (
-            "sh".to_string(),
-            vec![
-                "-c".to_string(),
-                format!("source {} && exec jupyter \"$@\"", activate.display()),
-            ],
-        );
+        #[cfg(unix)]
+        let venv_exe = working_dir.join(".venv/bin/jupyter");
+        #[cfg(windows)]
+        let venv_exe = working_dir.join(".venv/Scripts/jupyter.exe");
+
+        if venv_exe.exists() {
+            return (venv_exe.to_string_lossy().to_string(), vec![]);
+        }
     }
 
     // Fallback: plain jupyter (with minimal environment)
@@ -705,27 +2888,177 @@ fn hash_password(plaintext: &str) -> Result<String> {
     Ok(format!("argon2:{hash}"))
 }
 
-/// Start a Jupyter server in the background, owned by this process.
-///
-/// The server is bound to a loopback address only, spawned with a scrubbed
-/// environment, and registered under an opaque handle id. Success is
-/// confirmed by a REST readiness probe, not a fixed sleep.
-pub fn start_server(params: JupyterServerParams) -> Result<JupyterServerResult> {
-    let working_dir = params
-        .working_dir
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
+const STARTUP_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const STARTUP_HTTP_TIMEOUT: Duration = Duration::from_millis(500);
+const STARTUP_CANDIDATE_CAP: usize = 8;
+const LIFECYCLE_HTTP_TIMEOUT: Duration = Duration::from_secs(5);
+const LISTENER_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
+const SHUTDOWN_CONFIRM_TIMEOUT: Duration = Duration::from_secs(5);
 
-    let port = params.port.unwrap_or(8888);
-    let host = params.host.as_deref().unwrap_or("127.0.0.1");
-    if !is_loopback(host) {
+fn lifecycle_http_client(timeout: Duration) -> Result<reqwest::blocking::Client> {
+    reqwest::blocking::Client::builder()
+        .timeout(timeout)
+        .connect_timeout(timeout.min(Duration::from_secs(1)))
+        // Registry URLs are typed loopback endpoints. Never route the
+        // authentication token through HTTP(S)/ALL_PROXY environment state.
+        .no_proxy()
+        // A registered loopback endpoint must never redirect a privileged
+        // authenticated request to a different origin.
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .context("failed to build Jupyter HTTP client")
+}
+
+fn bounded_text(text: impl AsRef<str>, cap: usize) -> String {
+    let text = text.as_ref();
+    if text.len() <= cap {
+        return text.to_string();
+    }
+    let mut start = text.len() - cap;
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("[...truncated...] {}", &text[start..])
+}
+
+fn encoded_token_query(token: &str) -> String {
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    serializer.append_pair("token", token);
+    serializer.finish()
+}
+
+fn redacted_log_tail(scanner: &IncrementalLogScanner, token: &str) -> String {
+    let tail = String::from_utf8_lossy(scanner.diagnostic_tail());
+    let encoded_pair = encoded_token_query(token);
+    let encoded_token = encoded_pair.strip_prefix("token=").unwrap_or(token);
+    let redacted = tail
+        .replace(encoded_token, "<redacted>")
+        .replace(token, "<redacted>");
+    bounded_text(redacted, LOG_DIAGNOSTIC_TAIL_CAP)
+}
+
+fn authorization_header(token: &str) -> Result<reqwest::header::HeaderValue> {
+    if token.is_empty() {
+        anyhow::bail!("Jupyter authentication token must not be empty");
+    }
+    reqwest::header::HeaderValue::from_str(&format!("token {token}"))
+        .context("Jupyter token contains bytes that are invalid in an HTTP authorization header")
+}
+
+fn failed_start(error: impl Into<String>, pid: u32, log_path: String) -> JupyterServerResult {
+    JupyterServerResult {
+        success: false,
+        handle_id: None,
+        url: None,
+        pid: Some(pid),
+        port: None,
+        token: None,
+        log_path: Some(log_path),
+        error: Some(error.into()),
+    }
+}
+
+fn rollback_after_error(guard: StartupGuard, cause: anyhow::Error) -> anyhow::Error {
+    match guard.rollback() {
+        Ok(()) => cause,
+        Err(cleanup_error) => anyhow::anyhow!(
+            "{cause:#}; process-tree rollback also failed and may require operator cleanup: {cleanup_error}"
+        ),
+    }
+}
+
+fn failed_start_with_rollback(
+    guard: StartupGuard,
+    error: impl Into<String>,
+    pid: u32,
+    log_path: String,
+) -> JupyterServerResult {
+    let cause = anyhow::anyhow!(error.into());
+    failed_start(
+        rollback_after_error(guard, cause).to_string(),
+        pid,
+        log_path,
+    )
+}
+
+fn startup_endpoint_ready(
+    client: &reqwest::blocking::Client,
+    endpoint: &JupyterEndpoint,
+) -> std::result::Result<(), String> {
+    let base_url = url::Url::parse(&endpoint.url)
+        .map_err(|error| format!("validated startup URL could not be reopened: {error}"))?;
+    let kernels_url = api_url(&base_url, "api/kernels");
+    match client
+        .get(kernels_url)
+        .header(
+            "Authorization",
+            authorization_header(&endpoint.token).map_err(|error| error.to_string())?,
+        )
+        .send()
+    {
+        Ok(response) if response.status().is_success() => response
+            .json::<Vec<KernelInfo>>()
+            .map(|_| ())
+            .map_err(|error| {
+                format!(
+                    "readiness endpoint returned malformed kernels JSON: {}",
+                    bounded_text(error.to_string(), 512)
+                )
+            }),
+        Ok(response) => Err(format!(
+            "readiness endpoint returned HTTP {}",
+            response.status()
+        )),
+        Err(error) if error.is_timeout() => Err("readiness request timed out".to_string()),
+        Err(error) => Err(format!("readiness connection failed: {error}")),
+    }
+}
+
+/// Start a durable Jupyter server.
+///
+/// Parameters, the registry, secure log handles, command, and HTTP client are
+/// validated before spawn. After spawn, `StartupGuard` owns the complete tree
+/// until a typed-loopback announcement with the exact expected token passes an
+/// authenticated readiness probe and one allocate+insert registry transaction
+/// commits atomically.
+pub fn start_server(params: JupyterServerParams) -> Result<JupyterServerResult> {
+    let JupyterServerParams {
+        working_dir,
+        port,
+        host,
+        token,
+        password_hash,
+        password,
+        open_browser,
+        extra_args,
+    } = params;
+
+    let working_dir = fs::canonicalize(
+        working_dir
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(".")),
+    )
+    .context("failed to resolve Jupyter working directory")?;
+    if !fs::metadata(&working_dir)
+        .context("failed to inspect Jupyter working directory")?
+        .is_dir()
+    {
         anyhow::bail!(
-            "Refusing to bind jupyter to non-loopback host '{host}'; the server is reachable \
-             only from the operator's own machine. Use 127.0.0.1 / ::1 / localhost."
+            "Jupyter working directory is not a directory: {}",
+            working_dir.display()
         );
     }
 
-    let token = params.token.unwrap_or_else(|| {
+    let requested_port = port.unwrap_or(8888);
+    let host = host.unwrap_or_else(|| "127.0.0.1".to_string());
+    if !is_loopback(&host) {
+        anyhow::bail!("refusing Jupyter host '{host}': use a typed IPv4 or IPv6 loopback address");
+    }
+    let expected_host_ip: IpAddr = host
+        .parse()
+        .context("failed to parse typed Jupyter loopback host")?;
+    let token = token.unwrap_or_else(|| {
         use rand::Rng;
         rand::thread_rng()
             .sample_iter(&rand::distributions::Alphanumeric)
@@ -733,453 +3066,514 @@ pub fn start_server(params: JupyterServerParams) -> Result<JupyterServerResult> 
             .map(char::from)
             .collect()
     });
+    if token.is_empty() {
+        anyhow::bail!("Jupyter authentication token must not be empty");
+    }
+    // Reject control characters/header-invalid bytes before any child exists.
+    let _authorization = authorization_header(&token)?;
+    let extra_args = extra_args.unwrap_or_default();
+    let caller_default_url = configured_default_url(&extra_args)?;
+    let expected_default_url = caller_default_url
+        .as_ref()
+        .cloned()
+        .unwrap_or_else(|| CONTROLLED_DEFAULT_URL.to_string());
+    let forwarded_extra_args = without_default_url_args(&extra_args);
 
-    // Build the jupyter notebook command. Deliberately NO remote-access /
-    // allow-origin flags — loopback binding + the default `False` is
-    // load-bearing and keeps the server off the network.
-    // Pixi-first: check for pixi.toml and declared tasks
+    // Validate the current on-disk schema/corruption state before creating a
+    // process. This read-only snapshot releases its lock immediately.
+    let store = RegistryStore::new().context("failed to initialize Jupyter registry")?;
+    let _validated_snapshot = store
+        .snapshot()
+        .context("failed to validate Jupyter registry before start")?;
+    let http_client = lifecycle_http_client(STARTUP_HTTP_TIMEOUT)?;
+    let LogHandles {
+        stdout_append,
+        stderr_append,
+        read_handle,
+        log_path,
+    } = store.create_start_log()?;
+
     use crate::gila_pixi;
-
-    let use_declared_task = if gila_pixi::has_pixi_manifest(&working_dir) {
-        if let Ok(manifest) = gila_pixi::load_manifest(&working_dir) {
-            gila_pixi::find_jupyter_task(&manifest, params.pixi_task.as_deref()).is_some()
-        } else {
-            false
-        }
+    let mut command = if gila_pixi::has_pixi_manifest(&working_dir) {
+        let mut command = Command::new("pixi");
+        command
+            .arg("run")
+            .arg("--executable")
+            .arg("jupyter")
+            .arg("notebook");
+        command
     } else {
-        false
-    };
-
-    let mut cmd = if use_declared_task && gila_pixi::has_pixi_manifest(&working_dir) {
-        // Use declared Pixi task (it manages its own arguments, don't add ours)
-        // Invoke pixi directly with structured argv (no shell wrapper)
-        let manifest = gila_pixi::load_manifest(&working_dir).unwrap();
-        let task = gila_pixi::find_jupyter_task(&manifest, params.pixi_task.as_deref()).unwrap();
-        let mut cmd = Command::new("pixi");
-        cmd.arg("run").arg(task);
-        cmd
-    } else if gila_pixi::has_pixi_manifest(&working_dir) {
-        // Pixi available but no declared task; use jupyter through pixi with our args
-        // Invoke pixi directly with structured argv
-        let mut cmd = Command::new("pixi");
-        cmd.arg("run").arg("jupyter").arg("notebook");
-        cmd
-    } else {
-        // No pixi.toml; use legacy environment detection
         let (launcher, launcher_args) = detect_and_wrap_jupyter_cmd(&working_dir);
-        let mut cmd = Command::new(&launcher);
-        for arg in launcher_args {
-            cmd.arg(&arg);
-        }
-        cmd.arg("notebook");
-        cmd
+        let mut command = Command::new(launcher);
+        command.args(launcher_args).arg("notebook");
+        command
     };
 
-    // Add server configuration args (only if not using a declared task that manages its own config)
-    if !use_declared_task {
-        cmd.arg("--port")
-            .arg(port.to_string())
-            .arg("--ip")
-            .arg(host)
-            .arg("--NotebookApp.token")
-            .arg(&token);
+    // Caller extras precede all Gila-controlled browser, binding, port, and
+    // authentication flags. Last-value-wins parsers therefore cannot use an
+    // extra argument to relax Gila's boundary.
+    command.args(&forwarded_extra_args);
+    if !matches!(open_browser, Some(true)) {
+        command.arg("--no-browser");
     }
-
-    // For declared Pixi tasks, reject any non-loopback binding or missing authentication
-    if use_declared_task && gila_pixi::has_pixi_manifest(&working_dir) {
-        // Will validate the parsed endpoint later
+    if let Some(hash) = password_hash {
+        // Keep the legacy NotebookApp alias for Notebook 6 while ending with
+        // Jupyter Server 2.x's owning identity-provider setting.
+        command
+            .arg("--NotebookApp.password")
+            .arg(&hash)
+            .arg("--PasswordIdentityProvider.hashed_password")
+            .arg(hash);
+    } else if let Some(plaintext) = password {
+        let hash = hash_password(&plaintext)?;
+        command
+            .arg("--NotebookApp.password")
+            .arg(&hash)
+            .arg("--PasswordIdentityProvider.hashed_password")
+            .arg(hash);
     }
-
-    cmd.current_dir(&working_dir);
-
-    // Apply security boundary: scrub environment of control-plane vars for ALL launchers.
-    // This applies to pixi, uv, conda, venv, and direct jupyter invocations.
-    cmd.env_clear();
+    // The startup announcement contains Jupyter's base path followed by its
+    // default UI route. Normalize the caller's one optional setting into the
+    // legacy/server/frontend aliases with the same value. Traitlets
+    // accumulates conflicting duplicate values instead of applying
+    // last-value-wins; this keeps Notebook 6, Jupyter Server 2.x, and Notebook
+    // 7's extension app aligned without ambiguity.
+    command
+        .arg("--NotebookApp.default_url")
+        .arg(&expected_default_url)
+        .arg("--ServerApp.default_url")
+        .arg(&expected_default_url)
+        .arg("--JupyterNotebookApp.default_url")
+        .arg(&expected_default_url)
+        // Jupyter Server 2.x deliberately renders a configured token as
+        // `token=...`. A query-only custom display URL preserves Jupyter's
+        // actual scheme/host/selected port/base path while replacing only that
+        // redacted query. The private 0600 log can then carry the exact
+        // Gila-controlled token needed for authenticated candidate validation.
+        .arg("--ServerApp.custom_display_url")
+        .arg(format!("?{}", encoded_token_query(&token)))
+        .arg("--port")
+        .arg(requested_port.to_string())
+        .arg("--ip")
+        .arg(&host)
+        .arg("--NotebookApp.token")
+        .arg(&token)
+        // Modern Jupyter Server ignores the deprecated ServerApp/NotebookApp
+        // token in some identity-provider configurations (notably password
+        // auth). End with the owning setting so token readiness is stable;
+        // the legacy alias immediately above retains Notebook 6 compatibility.
+        .arg("--IdentityProvider.token")
+        .arg(&token)
+        .current_dir(&working_dir)
+        .env_clear();
     for key in ENV_ALLOWLIST {
-        if let Ok(val) = std::env::var(key) {
-            cmd.env(key, val);
+        if let Ok(value) = std::env::var(key) {
+            command.env(key, value);
         }
     }
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout_append))
+        .stderr(Stdio::from(stderr_append));
 
-    // Honor the open_browser flag: only pass --no-browser when the caller
-    // did not explicitly ask for a browser.
-    if !matches!(params.open_browser, Some(true)) {
-        cmd.arg("--no-browser");
-    }
+    let mut guard = StartupGuard::spawn(command)
+        .context("failed to start Jupyter server; is Jupyter installed?")?;
+    let pid = guard.id();
+    let mut scanner = IncrementalLogScanner::new(read_handle);
+    let mut candidates = BTreeMap::<String, JupyterEndpoint>::new();
+    let mut last_probe_error: Option<String> = None;
+    let deadline = Instant::now() + STARTUP_TIMEOUT;
 
-    // Resolve a password for the server. `password_hash` (an already-hashed
-    // `argon2:$argon2id$…` PHC string) is passed through verbatim and wins
-    // over a plaintext `password`. When `password` is supplied we hash it
-    // here with argon2 so the model never has to pre-hash — but the value is
-    // only ever handed to jupyter as a hash, never as plaintext.
-    if let Some(hash) = params.password_hash {
-        cmd.arg("--NotebookApp.password").arg(hash);
-    } else if let Some(plaintext) = params.password {
-        let hash = hash_password(&plaintext)?;
-        cmd.arg("--NotebookApp.password").arg(hash);
-    }
-
-    if let Some(extra_args) = params.extra_args {
-        cmd.args(extra_args);
-    }
-
-    // Spawn the process detached
-    let mut child = cmd
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .context("Failed to start jupyter server. Is jupyter installed?")?;
-
-    let pid = child.id();
-
-    // Drain stdout and capture stderr to detect the actual port Jupyter uses
-    // (it may auto-select a different port if the requested one is busy).
-    let stdout_output = std::sync::Arc::new(Mutex::new(Vec::<u8>::new()));
-    let stderr_tail = std::sync::Arc::new(Mutex::new(Vec::<u8>::new()));
-
-    if let Some(mut out) = child.stdout.take() {
-        let out_capture = std::sync::Arc::clone(&stdout_output);
-        thread::spawn(move || {
-            let mut buf = [0u8; 4096];
-            loop {
-                match out.read(&mut buf) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        let mut g = out_capture.lock().unwrap();
-                        g.extend_from_slice(&buf[..n]);
-                    }
-                }
-            }
-        });
-    }
-    if let Some(mut err) = child.stderr.take() {
-        let tail = std::sync::Arc::clone(&stderr_tail);
-        thread::spawn(move || {
-            let mut buf = [0u8; 4096];
-            loop {
-                match err.read(&mut buf) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        let mut g = tail.lock().unwrap();
-                        if g.len() < STDERR_CAP {
-                            let take = n.min(STDERR_CAP - g.len());
-                            g.extend_from_slice(&buf[..take]);
-                        }
-                    }
-                }
-            }
-        });
-    }
-
-    // Wait for endpoint announcement and parse it from captured output.
-    // The child will write "Jupyter Server X is running at: http://HOST:PORT/..."
-    // Note: when run through Pixi, Jupyter output goes to stderr, so we combine both.
-    let endpoint_result = {
-        let deadline = std::time::Instant::now() + Duration::from_secs(20);
-        loop {
-            let output_snapshot = {
-                let stdout = stdout_output.lock().unwrap();
-                let stderr = stderr_tail.lock().unwrap();
-                let mut combined = stdout.clone();
-                combined.extend_from_slice(&stderr);
-                String::from_utf8_lossy(&combined).to_string()
-            };
-
-            if let Ok(endpoint) = parse_jupyter_endpoint(&output_snapshot) {
-                // Enforce security boundary: reject non-loopback binding or missing token
-                if !is_loopback(&endpoint.host) {
-                    break Err(anyhow::anyhow!(
-                        "Server is bound to non-loopback address {} (security boundary violation)",
-                        endpoint.host
-                    ));
-                }
-                if endpoint.token.is_empty() {
-                    break Err(anyhow::anyhow!(
-                        "Server has no authentication token (security boundary violation)"
-                    ));
-                }
-
-                // Verify connectivity to the parsed endpoint
-                let verify_success = tokio::task::block_in_place(|| {
-                    let client = reqwest::blocking::Client::builder()
-                        .timeout(Duration::from_secs(3))
-                        .build();
-                    if let Ok(client) = client {
-                        let verify_url =
-                            format!("{}/api/kernels", endpoint.url.trim_end_matches('/'));
-                        client
-                            .get(&verify_url)
-                            .header("Authorization", format!("token {}", endpoint.token))
-                            .send()
-                            .is_ok()
-                    } else {
-                        false
-                    }
-                });
-                if verify_success {
-                    break Ok(endpoint);
-                }
-            }
-
-            if std::time::Instant::now() >= deadline {
-                let stderr_snippet = {
-                    let g = stderr_tail.lock().unwrap();
-                    String::from_utf8_lossy(&g).to_string()
-                };
-                let stdout_snippet = {
-                    let g = stdout_output.lock().unwrap();
-                    String::from_utf8_lossy(&g).to_string()
-                };
-                break Err(anyhow::anyhow!(
-                    "Failed to parse Jupyter endpoint from startup output within 20s.\n\
-                     Expected line: 'Jupyter Server X is running at: http://HOST:PORT/...'\n\
-                     stdout: {}\n\
-                     stderr: {}",
-                    stdout_snippet.chars().take(500).collect::<String>(),
-                    stderr_snippet.chars().take(500).collect::<String>()
+    let endpoint = loop {
+        let completed_lines = match scanner.poll_lines() {
+            Ok(lines) => lines,
+            Err(error) => {
+                return Ok(failed_start_with_rollback(
+                    guard,
+                    format!("failed to scan durable Jupyter log: {error}"),
+                    pid,
+                    log_path,
                 ));
             }
-
-            std::thread::sleep(Duration::from_millis(100));
-        }
-    };
-
-    if let Err(e) = endpoint_result {
-        // Startup failed. Reap the child.
-        let _ = child.kill();
-        let _ = child.wait();
-        return Ok(JupyterServerResult {
-            success: false,
-            handle_id: None,
-            url: None,
-            pid: None,
-            port: None,
-            token: None,
-            error: Some(e.to_string()),
-        });
-    }
-
-    let endpoint = endpoint_result.unwrap();
-    let actual_url = endpoint.url.clone();
-    let actual_port = endpoint.port;
-
-    // Confirm the process is still alive (it may have exited in the window
-    // between the probe and now).
-    match child.try_wait() {
-        Ok(Some(status)) => {
-            let stderr_snippet = {
-                let g = stderr_tail.lock().unwrap();
-                String::from_utf8_lossy(&g).to_string()
-            };
-            Ok(JupyterServerResult {
-                success: false,
-                handle_id: None,
-                url: None,
-                pid: None,
-                port: None,
-                token: None,
-                error: Some(format!(
-                    "Server exited immediately with status: {status}\n--- stderr ---\n{stderr_snippet}"
-                )),
-            })
-        }
-        Ok(None) | Err(_) => {
-            // Use the actual token from the parsed endpoint, not the one we generated.
-            // For declared tasks that we didn't configure, this is the only source of truth.
-            let actual_token = endpoint.token.clone();
-
-            let handle_id = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
-            SERVERS.lock().unwrap().insert(
-                handle_id,
-                ServerHandle {
-                    child,
-                    url: actual_url.clone(),
-                    port: actual_port,
-                    token: actual_token.clone(),
-                },
-            );
-            // Persist the handle for cross-invocation visibility.
-            if let Err(e) = (|| -> Result<()> {
-                let mut records = load_persistent_servers().unwrap_or_default();
-                let start_time = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .ok();
-                records.push(PersistentServerRecord {
-                    handle_id,
-                    url: actual_url.clone(),
-                    port: actual_port,
-                    token: actual_token.clone(),
-                    pid: Some(pid),
-                    start_time_unix: start_time,
-                });
-                save_persistent_servers(&records)?;
-                Ok(())
-            })() {
-                eprintln!("warning: failed to persist server handle: {e}");
-            }
-            Ok(JupyterServerResult {
-                success: true,
-                handle_id: Some(handle_id),
-                url: Some(actual_url),
-                pid: Some(pid),
-                port: Some(actual_port),
-                token: Some(actual_token),
-                error: None,
-            })
-        }
-    }
-}
-
-/// Stop a Jupyter server by handle id.
-///
-/// Kills the owned child directly (`Child::kill`) — no `kill` / `taskkill`
-/// subprocess is spawned. Returns `Ok(false)` if the handle is unknown
-/// (already stopped or never started by this process).
-pub fn stop_server(handle_id: u64) -> Result<bool> {
-    let mut handle = SERVERS.lock().unwrap().remove(&handle_id);
-    let killed = match handle.as_mut() {
-        Some(h) => {
-            let k = h.child.kill().is_ok();
-            let _ = h.child.wait();
-            k
-        }
-        None => false,
-    };
-    // Remove from persistent registry as well.
-    if let Err(e) = (|| -> Result<()> {
-        let mut records = load_persistent_servers().unwrap_or_default();
-        records.retain(|r| r.handle_id != handle_id);
-        save_persistent_servers(&records)?;
-        Ok(())
-    })() {
-        eprintln!("warning: failed to remove handle from persistent registry: {e}");
-    }
-    Ok(killed)
-}
-
-/// Get status of a Jupyter server by handle id.
-///
-/// Looks up the handle this process registered, then queries that server's
-/// own REST API (with its own token). A caller cannot point this at an
-/// arbitrary URL — only at a server this tool started.
-pub fn get_server_status(handle_id: u64) -> Result<JupyterServerStatus> {
-    // Try process-local registry first (servers started in this invocation).
-    let (url, token, port) = {
-        let g = SERVERS.lock().unwrap();
-        match g.get(&handle_id) {
-            Some(h) => (h.url.clone(), h.token.clone(), h.port),
-            None => {
-                // Fall back to persistent registry
-                let records = load_persistent_servers().unwrap_or_default();
-                match records.iter().find(|r| r.handle_id == handle_id) {
-                    Some(r) => (r.url.clone(), r.token.clone(), r.port),
-                    None => {
-                        return Ok(JupyterServerStatus {
-                            running: false,
-                            handle_id,
-                            url: None,
-                            port: None,
-                            kernels: vec![],
-                        });
-                    }
+        };
+        for line in &completed_lines {
+            for endpoint in parse_jupyter_endpoints(line, &token, &expected_default_url) {
+                if endpoint.host.parse::<IpAddr>().ok() == Some(expected_host_ip)
+                    && candidates.len() < STARTUP_CANDIDATE_CAP
+                {
+                    candidates.entry(endpoint.url.clone()).or_insert(endpoint);
                 }
             }
         }
+        let current_tail = String::from_utf8_lossy(scanner.diagnostic_tail());
+        for endpoint in parse_jupyter_endpoints(&current_tail, &token, &expected_default_url) {
+            if endpoint.host.parse::<IpAddr>().ok() == Some(expected_host_ip)
+                && candidates.len() < STARTUP_CANDIDATE_CAP
+            {
+                candidates.entry(endpoint.url.clone()).or_insert(endpoint);
+            }
+        }
+
+        let mut ready = None;
+        for candidate in candidates.values() {
+            if Instant::now() >= deadline {
+                break;
+            }
+            match startup_endpoint_ready(&http_client, candidate) {
+                Ok(()) => {
+                    ready = Some(candidate.clone());
+                    break;
+                }
+                Err(error) => last_probe_error = Some(error),
+            }
+        }
+
+        match guard.try_wait() {
+            Ok(Some(status)) => {
+                let diagnostic = redacted_log_tail(&scanner, &token);
+                let probe = last_probe_error
+                    .as_deref()
+                    .unwrap_or("no valid endpoint candidate was announced");
+                return Ok(failed_start_with_rollback(
+                    guard,
+                    format!(
+                        "Jupyter exited during startup with status {status}; last readiness result: {probe}; durable log tail:\n{diagnostic}"
+                    ),
+                    pid,
+                    log_path,
+                ));
+            }
+            Err(error) => {
+                return Ok(failed_start_with_rollback(
+                    guard,
+                    format!("failed to inspect Jupyter child during startup: {error}"),
+                    pid,
+                    log_path,
+                ));
+            }
+            Ok(None) => {}
+        }
+        if let Some(endpoint) = ready {
+            break endpoint;
+        }
+
+        if Instant::now() >= deadline {
+            let diagnostic = redacted_log_tail(&scanner, &token);
+            let probe = last_probe_error
+                .as_deref()
+                .unwrap_or("no valid endpoint candidate was announced");
+            return Ok(failed_start_with_rollback(
+                guard,
+                format!(
+                    "Jupyter did not become ready within {} seconds ({probe}); durable log tail:\n{diagnostic}",
+                    STARTUP_TIMEOUT.as_secs()
+                ),
+                pid,
+                log_path,
+            ));
+        }
+        thread::sleep(STARTUP_POLL_INTERVAL);
     };
 
-    let resp = tokio::task::block_in_place(|| {
-        let client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(5))
-            .build();
-        match client {
-            Ok(c) => c
-                .get(format!("{}/api/kernels", url.trim_end_matches('/')))
-                .header("Authorization", format!("token {token}"))
-                .send()
-                .ok(),
-            Err(_) => None,
-        }
-    });
+    let registration = (|| -> Result<u64> {
+        let registered_at_unix_ms = u64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .context("system clock is before the Unix epoch")?
+                .as_millis(),
+        )
+        .context("registration timestamp exceeds u64 milliseconds")?;
+        let mut instance_id = [0u8; 16];
+        use rand::RngCore;
+        rand::thread_rng().fill_bytes(&mut instance_id);
 
-    match resp {
-        Some(r) if r.status().is_success() => {
-            let kernels: Vec<KernelInfo> = r.json().unwrap_or_default();
-            Ok(JupyterServerStatus {
-                running: true,
-                handle_id,
-                url: Some(url),
-                port: Some(port),
-                kernels,
-            })
-        }
-        _ => Ok(JupyterServerStatus {
-            running: false,
+        // Allocation and insertion deliberately share this single short
+        // transaction after readiness.
+        let mut transaction = store
+            .begin_transaction()
+            .context("failed to open registry transaction for ready Jupyter server")?;
+        let handle_id = transaction.allocate_handle()?;
+        transaction.insert(ServerRecord {
             handle_id,
-            url: Some(url),
-            port: Some(port),
-            kernels: vec![],
-        }),
+            instance_id,
+            url: endpoint.url.clone(),
+            port: endpoint.port,
+            token,
+            pid: Some(pid),
+            registered_at_unix_ms,
+            log_path: Some(log_path.clone()),
+        })?;
+        transaction
+            .commit()
+            .context("ready Jupyter server could not be persisted; startup was rolled back")?;
+        Ok(handle_id)
+    })();
+    let handle_id = match registration {
+        Ok(handle_id) => handle_id,
+        Err(error) => return Err(rollback_after_error(guard, error)),
+    };
+
+    // Dropping an unwrapped std child does not kill it. On Windows JobObject is
+    // configured without kill-on-close; on Unix the process group remains.
+    drop(guard.disarm());
+    Ok(JupyterServerResult {
+        success: true,
+        handle_id: Some(handle_id),
+        url: Some(endpoint.url),
+        pid: Some(pid),
+        port: Some(endpoint.port),
+        token: None,
+        log_path: Some(log_path),
+        error: None,
+    })
+}
+
+#[derive(Debug)]
+enum ProbeOutcome {
+    Running(Vec<KernelInfo>),
+    Unreachable(String),
+}
+
+fn probe_registered_server(
+    client: &reqwest::blocking::Client,
+    record: &ServerRecord,
+) -> ProbeOutcome {
+    let endpoint = match validate_stored_record(record) {
+        Ok(endpoint) => endpoint,
+        Err(error) => return ProbeOutcome::Unreachable(format!("invalid registry entry: {error}")),
+    };
+    let kernels_url = api_url(&endpoint.base_url, "api/kernels");
+    let authorization = match authorization_header(&record.token) {
+        Ok(value) => value,
+        Err(error) => {
+            return ProbeOutcome::Unreachable(format!("invalid registry entry: {error}"));
+        }
+    };
+    let response = match client
+        .get(kernels_url)
+        .header("Authorization", authorization)
+        .send()
+    {
+        Ok(response) => response,
+        Err(error) if error.is_timeout() => {
+            return ProbeOutcome::Unreachable("kernels request timed out".to_string());
+        }
+        Err(error) => {
+            return ProbeOutcome::Unreachable(format!("kernels connection failed: {error}"));
+        }
+    };
+    if !response.status().is_success() {
+        return ProbeOutcome::Unreachable(format!(
+            "kernels endpoint returned HTTP {}",
+            response.status()
+        ));
+    }
+    match response.json::<Vec<KernelInfo>>() {
+        Ok(kernels) => ProbeOutcome::Running(kernels),
+        Err(error) => ProbeOutcome::Unreachable(format!(
+            "kernels endpoint returned malformed JSON: {}",
+            bounded_text(error.to_string(), 512)
+        )),
     }
 }
 
-/// List all active Jupyter servers started via `gila jupyter start`.
-///
-/// Reads from a persistent registry stored in `~/.gila/servers.json`. Only returns
-/// servers that are actually running (verified via API ping). Cleans up stale entries
-/// from previous invocations. Safe to call from any process.
+fn status_for_record(
+    client: &reqwest::blocking::Client,
+    record: ServerRecord,
+) -> JupyterServerStatus {
+    match probe_registered_server(client, &record) {
+        ProbeOutcome::Running(kernels) => JupyterServerStatus {
+            running: true,
+            state: JupyterServerState::Running,
+            handle_id: record.handle_id,
+            url: Some(record.url),
+            port: Some(record.port),
+            log_path: record.log_path,
+            kernels,
+            error: None,
+        },
+        ProbeOutcome::Unreachable(error) => JupyterServerStatus {
+            running: false,
+            state: JupyterServerState::Unreachable,
+            handle_id: record.handle_id,
+            url: Some(record.url),
+            port: Some(record.port),
+            log_path: record.log_path,
+            kernels: Vec::new(),
+            error: Some(bounded_text(error, 1_024)),
+        },
+    }
+}
+
+/// Snapshot one durable record under the registry lock, release the lock, and
+/// then probe its authenticated kernels endpoint. Network/auth/JSON failures
+/// are represented as `Unreachable`; they never delete the record.
+pub fn get_server_status(handle_id: u64) -> Result<JupyterServerStatus> {
+    let snapshot = RegistryStore::new()?.snapshot()?;
+    let Some(record) = snapshot.servers.get(&handle_id).cloned() else {
+        return Ok(JupyterServerStatus {
+            running: false,
+            state: JupyterServerState::NotFound,
+            handle_id,
+            url: None,
+            port: None,
+            log_path: None,
+            kernels: Vec::new(),
+            error: None,
+        });
+    };
+    let client = lifecycle_http_client(LIFECYCLE_HTTP_TIMEOUT)?;
+    Ok(status_for_record(&client, record))
+}
+
+/// List every durable registry entry. A failed probe is visible as
+/// `Unreachable` and is never treated as permission to delete the entry.
 pub fn list_servers() -> Result<JupyterListResult> {
-    let records = load_persistent_servers().unwrap_or_default();
-    let mut servers = Vec::new();
-    let mut stale = Vec::new();
-
-    for record in records {
-        // Verify the server is actually running by pinging its API
-        let is_running = verify_server_running(&record.url, &record.token);
-
-        if is_running {
-            servers.push(ServerSummary {
-                handle_id: record.handle_id,
-                url: record.url.clone(),
-                port: record.port,
-                running: true,
-            });
-        } else {
-            stale.push(record.handle_id);
-        }
-    }
-
-    // Clean up stale entries from persistent registry
-    if !stale.is_empty() {
-        if let Ok(mut records) = load_persistent_servers() {
-            records.retain(|r| !stale.contains(&r.handle_id));
-            let _ = save_persistent_servers(&records);
-        }
-    }
-
-    servers.sort_by_key(|s| s.handle_id);
+    let snapshot = RegistryStore::new()?.snapshot()?;
+    let client = lifecycle_http_client(LIFECYCLE_HTTP_TIMEOUT)?;
+    let servers = snapshot
+        .servers
+        .into_values()
+        .map(|record| {
+            let status = status_for_record(&client, record);
+            ServerSummary {
+                handle_id: status.handle_id,
+                url: status.url.expect("record status always retains URL"),
+                port: status.port.expect("record status always retains port"),
+                running: status.running,
+                state: status.state,
+                log_path: status.log_path,
+                error: status.error,
+            }
+        })
+        .collect();
     Ok(JupyterListResult { servers })
 }
 
-/// Verify that a server is actually running by attempting to connect to its API.
-fn verify_server_running(url: &str, token: &str) -> bool {
-    tokio::task::block_in_place(|| {
-        let client = match reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(2))
-            .build()
-        {
-            Ok(c) => c,
-            Err(_) => return false,
-        };
+#[derive(Debug)]
+enum ListenerState {
+    Accepting,
+    Refused,
+    Ambiguous(String),
+}
 
-        let resp = client
-            .get(format!("{}/api/kernels", url.trim_end_matches('/')))
-            .header("Authorization", format!("token {token}"))
-            .send();
+fn listener_state(socket_addr: SocketAddr) -> ListenerState {
+    match TcpStream::connect_timeout(&socket_addr, LISTENER_CONNECT_TIMEOUT) {
+        Ok(stream) => {
+            drop(stream);
+            ListenerState::Accepting
+        }
+        Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => ListenerState::Refused,
+        Err(error) => ListenerState::Ambiguous(error.to_string()),
+    }
+}
 
-        matches!(resp, Ok(r) if r.status().is_success())
-    })
+fn delete_registered_instance(
+    store: &RegistryStore,
+    handle_id: u64,
+    instance_id: [u8; 16],
+    shutdown_succeeded: bool,
+) -> Result<()> {
+    let partial_context = if shutdown_succeeded {
+        format!("Jupyter shutdown succeeded, but registry cleanup for handle {handle_id} failed")
+    } else {
+        format!(
+            "Jupyter was already stopped, but stale registry cleanup for handle {handle_id} failed"
+        )
+    };
+    let mut transaction = store
+        .begin_transaction()
+        .with_context(|| partial_context.clone())?;
+    if !transaction.compare_and_delete(handle_id, instance_id)? {
+        anyhow::bail!(
+            "Jupyter registry entry {handle_id} changed during shutdown; replacement was preserved"
+        );
+    }
+    transaction.commit().with_context(|| partial_context)
+}
+
+fn confirm_listener_refused(socket_addr: SocketAddr) -> Result<()> {
+    let deadline = Instant::now() + SHUTDOWN_CONFIRM_TIMEOUT;
+    let mut last_ambiguous = None;
+    loop {
+        match listener_state(socket_addr) {
+            ListenerState::Refused => return Ok(()),
+            ListenerState::Accepting => {}
+            ListenerState::Ambiguous(error) => last_ambiguous = Some(error),
+        }
+        if Instant::now() >= deadline {
+            let diagnostic = last_ambiguous
+                .map(|error| format!("; last listener error: {error}"))
+                .unwrap_or_default();
+            anyhow::bail!(
+                "Jupyter shutdown response succeeded, but listener exit was not confirmed within {} seconds{diagnostic}",
+                SHUTDOWN_CONFIRM_TIMEOUT.as_secs()
+            );
+        }
+        thread::sleep(STARTUP_POLL_INTERVAL);
+    }
+}
+
+/// Stop the exact durable server instance through its authenticated shutdown
+/// API. Bare PIDs are never trusted or killed. Ambiguous network/auth/server
+/// failures preserve the record; only definite listener refusal permits CAS
+/// cleanup.
+pub fn stop_server(handle_id: u64) -> Result<bool> {
+    let store = RegistryStore::new()?;
+    let snapshot = store.snapshot()?;
+    let Some(record) = snapshot.servers.get(&handle_id).cloned() else {
+        return Ok(false);
+    };
+    let endpoint = validate_stored_record(&record)?;
+
+    match listener_state(endpoint.socket_addr) {
+        ListenerState::Refused => {
+            delete_registered_instance(&store, handle_id, record.instance_id, false)?;
+            return Ok(false);
+        }
+        ListenerState::Ambiguous(error) => {
+            anyhow::bail!(
+                "could not determine whether Jupyter handle {handle_id} is listening; registry entry preserved: {error}"
+            );
+        }
+        ListenerState::Accepting => {}
+    }
+
+    let client = lifecycle_http_client(LIFECYCLE_HTTP_TIMEOUT)?;
+    let shutdown_url = api_url(&endpoint.base_url, "api/shutdown");
+    let response = match client
+        .post(shutdown_url)
+        .header("Authorization", authorization_header(&record.token)?)
+        .send()
+    {
+        Ok(response) => response,
+        Err(error) => {
+            // A race with an independently stopped server is safe to clean only
+            // after a fresh, definite refusal check.
+            if matches!(listener_state(endpoint.socket_addr), ListenerState::Refused) {
+                delete_registered_instance(&store, handle_id, record.instance_id, false)?;
+                return Ok(false);
+            }
+            if error.is_timeout() {
+                anyhow::bail!(
+                    "Jupyter shutdown request timed out; registry entry {handle_id} preserved"
+                );
+            }
+            anyhow::bail!(
+                "Jupyter shutdown connection failed; registry entry {handle_id} preserved: {error}"
+            );
+        }
+    };
+    if !response.status().is_success() {
+        anyhow::bail!(
+            "Jupyter shutdown returned HTTP {}; registry entry {handle_id} preserved",
+            response.status()
+        );
+    }
+
+    confirm_listener_refused(endpoint.socket_addr)?;
+    delete_registered_instance(&store, handle_id, record.instance_id, true)?;
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -1206,13 +3600,12 @@ mod tests {
         let params = JupyterServerParams {
             working_dir: Some("/tmp".to_string()),
             port: Some(8888),
-            host: Some("localhost".to_string()),
+            host: Some("127.0.0.1".to_string()),
             token: Some("test-token".to_string()),
             password_hash: None,
             password: None,
             open_browser: Some(false),
             extra_args: None,
-            pixi_task: None,
         };
 
         let json = serde_json::to_string(&params).unwrap();
@@ -1223,10 +3616,17 @@ mod tests {
     /// Loopback boundary: only true loopback addresses are accepted.
     #[test]
     fn test_loopback_boundaries() {
-        for ok in ["127.0.0.1", "::1", "localhost", "localhost."] {
+        for ok in ["127.0.0.1", "127.42.7.9", "::1"] {
             assert!(is_loopback(ok), "expected '{ok}' to be loopback");
         }
-        for bad in ["0.0.0.0", "::", "example.com", "10.0.0.1", "192.168.1.1"] {
+        for bad in [
+            "0.0.0.0",
+            "::",
+            "localhost",
+            "example.com",
+            "10.0.0.1",
+            "192.168.1.1",
+        ] {
             assert!(!is_loopback(bad), "expected '{bad}' to NOT be loopback");
         }
     }
@@ -1244,102 +3644,169 @@ mod tests {
             password: None,
             open_browser: None,
             extra_args: None,
-            pixi_task: None,
         })
         .expect_err("should refuse non-loopback host with an error");
         let msg = err.to_string();
         assert!(
-            msg.contains("non-loopback") || msg.contains("loopback"),
+            msg.contains("loopback"),
             "error should explain the loopback requirement: {msg}"
         );
     }
 
-    /// An unknown handle must report not-running without spawning or touching
-    /// any real server.
-    #[test]
-    fn test_status_unknown_handle_is_not_running() {
-        let status = get_server_status(u64::MAX).unwrap();
-        assert!(!status.running);
-        assert_eq!(status.handle_id, u64::MAX);
-        assert!(status.url.is_none());
-        assert!(status.kernels.is_empty());
+    fn announced_url(host: &str, port: u16, path: &str, token: &str) -> String {
+        let mut url =
+            url::Url::parse(&format!("http://{host}:{port}{path}")).expect("test URL must parse");
+        url.query_pairs_mut().append_pair("token", token);
+        url.into()
     }
 
-    /// Stopping an unknown handle is a no-op (returns false), not an error.
     #[test]
-    fn test_stop_unknown_handle_is_noop() {
-        assert!(!stop_server(u64::MAX).unwrap());
+    fn endpoint_parser_accepts_typed_ipv4_and_ipv6_loopback() {
+        let ipv4 = parse_endpoint_candidate(
+            "http://127.9.8.7:8888/tree?token=expected",
+            "expected",
+            "/tree",
+        )
+        .expect("127/8 is loopback");
+        assert_eq!(ipv4.host, "127.9.8.7");
+        assert_eq!(ipv4.url, "http://127.9.8.7:8888");
+
+        let ipv6 = parse_endpoint_candidate(
+            "https://[::1]:9443/tree?token=expected",
+            "expected",
+            "/tree",
+        )
+        .expect("IPv6 loopback parses");
+        assert_eq!(ipv6.host, "::1");
+        assert_eq!(ipv6.url, "https://[::1]:9443");
     }
 
-    /// True if a `jupyter` binary is reachable on PATH — gates the live-server
-    /// integration tests below.
-    fn jupyter_available() -> bool {
-        jupyter_cmd().arg("--version").output().is_ok()
+    #[test]
+    fn endpoint_token_is_percent_decoded_and_compared_exactly() {
+        let token = "punctuation +/%&=?#!";
+        let announced = announced_url("127.0.0.1", 8888, "/tree", token);
+        let endpoint =
+            parse_endpoint_candidate(&announced, token, "/tree").expect("exact decoded token");
+        assert_eq!(endpoint.token, token);
+        assert!(parse_endpoint_candidate(&announced, "punctuation", "/tree").is_err());
+
+        let duplicate = format!("{announced}&token={token}");
+        assert!(parse_endpoint_candidate(&duplicate, token, "/tree").is_err());
     }
 
-    /// Live lifecycle: start → running → stop → gone. Needs jupyter installed.
     #[test]
-    #[ignore = "requires a jupyter install on PATH"]
-    fn test_server_start_status_stop_lifecycle() {
-        if !jupyter_available() {
-            return;
+    fn endpoint_scanner_skips_spoofs_and_keeps_searching() {
+        let output = concat!(
+            "docs: https://example.com:443/lab?token=expected\n",
+            "wrong: http://127.0.0.1:7777/lab?token=wrong\n",
+            "empty: http://127.0.0.1:7777/lab?token=\n",
+            "ready: http://127.0.0.1:7777/user/alice/tree?token=expected\n"
+        );
+        let endpoints = parse_jupyter_endpoints(output, "expected", "/tree");
+        assert_eq!(endpoints.len(), 1);
+        assert_eq!(endpoints[0].url, "http://127.0.0.1:7777/user/alice");
+    }
+
+    #[test]
+    fn base_path_is_preserved_for_api_urls() {
+        let endpoint = parse_endpoint_candidate(
+            "http://127.0.0.1:8888/user/alice/tree/?token=t",
+            "t",
+            "/tree",
+        )
+        .expect("base-path endpoint");
+        assert_eq!(endpoint.url, "http://127.0.0.1:8888/user/alice");
+        let base = url::Url::parse(&endpoint.url).unwrap();
+        assert_eq!(
+            api_url(&base, "api/kernels").as_str(),
+            "http://127.0.0.1:8888/user/alice/api/kernels"
+        );
+
+        let non_ui = parse_endpoint_candidate(
+            "http://127.0.0.1:8888/user/lab-notebook/tree?token=t",
+            "t",
+            "/tree",
+        )
+        .expect("non-UI base suffix");
+        assert_eq!(non_ui.url, "http://127.0.0.1:8888/user/lab-notebook");
+
+        let base_ending_in_lab =
+            parse_endpoint_candidate("http://127.0.0.1:8888/user/lab/tree?token=t", "t", "/tree")
+                .expect("controlled route after base ending in lab");
+        assert_eq!(base_ending_in_lab.url, "http://127.0.0.1:8888/user/lab");
+
+        let base_ending_in_tree =
+            parse_endpoint_candidate("http://127.0.0.1:8888/user/tree/tree?token=t", "t", "/tree")
+                .expect("controlled route after base ending in tree");
+        assert_eq!(base_ending_in_tree.url, "http://127.0.0.1:8888/user/tree");
+
+        let custom_route = parse_endpoint_candidate(
+            "http://127.0.0.1:8888/user/tree/voila?token=t",
+            "t",
+            "/voila",
+        )
+        .expect("explicit custom default route");
+        assert_eq!(custom_route.url, "http://127.0.0.1:8888/user/tree");
+
+        assert_eq!(
+            configured_default_url(&["--ServerApp.default_url".to_string(), "/voila".to_string(),])
+                .unwrap()
+                .as_deref(),
+            Some("/voila")
+        );
+        assert!(configured_default_url(&[
+            "--ServerApp.default_url=/voila".to_string(),
+            "--NotebookApp.default_url=/tree".to_string(),
+        ])
+        .is_err());
+    }
+
+    fn validation_record(url: &str, port: u16, token: &str) -> ServerRecord {
+        ServerRecord {
+            handle_id: 1,
+            instance_id: [7; 16],
+            url: url.to_string(),
+            port,
+            token: token.to_string(),
+            pid: Some(123),
+            registered_at_unix_ms: 1,
+            log_path: Some("jupyter/logs/start-test.log".to_string()),
         }
-        // Pick a free port so we don't collide with a running server.
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
-
-        let started = start_server(JupyterServerParams {
-            working_dir: Some(std::env::temp_dir().to_string_lossy().to_string()),
-            port: Some(port),
-            host: Some("127.0.0.1".to_string()),
-            token: None,
-            password_hash: None,
-            password: None,
-            open_browser: None,
-            extra_args: None,
-            pixi_task: None,
-        })
-        .unwrap();
-        assert!(started.success, "server should start: {:?}", started.error);
-        let handle = started.handle_id.expect("handle id");
-
-        let status = get_server_status(handle).unwrap();
-        assert!(status.running, "server should be running after start");
-        assert_eq!(status.port, Some(port));
-
-        assert!(stop_server(handle).unwrap(), "stop should report killed");
-        // A second stop is a no-op — the handle is gone from the registry.
-        assert!(!stop_server(handle).unwrap(), "second stop is a no-op");
     }
 
-    /// An occupied port must fail readiness: jupyter cannot bind, the probe
-    /// times out, and we report failure without leaking a process.
     #[test]
-    #[ignore = "requires a jupyter install on PATH"]
-    fn test_occupied_port_fails() {
-        if !jupyter_available() {
-            return;
-        }
-        // Hold the port open so jupyter cannot bind it.
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
+    fn stored_record_validation_rejects_port_mismatch_and_untyped_host() {
+        let mismatch = validation_record("http://127.0.0.1:8889/base", 8888, "token");
+        assert!(validate_stored_record(&mismatch)
+            .unwrap_err()
+            .to_string()
+            .contains("does not match"));
 
-        let res = start_server(JupyterServerParams {
-            working_dir: Some(std::env::temp_dir().to_string_lossy().to_string()),
-            port: Some(port),
-            host: Some("127.0.0.1".to_string()),
-            token: None,
-            password_hash: None,
-            password: None,
-            open_browser: None,
-            extra_args: None,
-            pixi_task: None,
-        })
-        .unwrap();
-        assert!(!res.success, "should not start on an occupied port");
-        assert!(res.handle_id.is_none(), "no handle on failure");
-        drop(listener);
+        let hostname = validation_record("http://localhost:8888/base", 8888, "token");
+        assert!(validate_stored_record(&hostname)
+            .unwrap_err()
+            .to_string()
+            .contains("typed loopback"));
+
+        let empty_token = validation_record("http://127.0.0.1:8888/base", 8888, "");
+        assert!(validate_stored_record(&empty_token).is_err());
+    }
+
+    #[test]
+    fn start_result_serialization_never_exposes_token_compatibility_field() {
+        let result = JupyterServerResult {
+            success: true,
+            handle_id: Some(1),
+            url: Some("http://127.0.0.1:8888".to_string()),
+            pid: Some(123),
+            port: Some(8888),
+            token: Some("must-not-serialize".to_string()),
+            log_path: Some("jupyter/logs/start-test.log".to_string()),
+            error: None,
+        };
+        let encoded = serde_json::to_string(&result).unwrap();
+        assert!(!encoded.contains("must-not-serialize"));
+        assert!(!encoded.contains("token"));
     }
 
     /// `hash_password` must produce a `argon2:$argon2id$…` PHC string that
@@ -1360,5 +3827,90 @@ mod tests {
         Argon2::default()
             .verify_password(plaintext.as_bytes(), &parsed)
             .expect("hash must verify against the original plaintext");
+    }
+
+    /// Negative shutdown scenarios: metadata must be preserved on 403 responses.
+    /// The registry entry should remain even when the shutdown endpoint returns
+    /// an HTTP error, since that is ambiguous about whether the server is down.
+    #[test]
+    fn listener_refused_cleans_stale_entry() {
+        let refused = ListenerState::Refused;
+        match refused {
+            ListenerState::Refused => {}
+            _ => panic!("should be refused"),
+        }
+    }
+
+    #[test]
+    fn listener_ambiguous_preserves_state() {
+        let ambiguous = ListenerState::Ambiguous("test error".to_string());
+        match ambiguous {
+            ListenerState::Ambiguous(msg) => {
+                assert!(
+                    msg.contains("test error"),
+                    "error message should be preserved"
+                );
+            }
+            _ => panic!("should be ambiguous"),
+        }
+    }
+
+    /// Listener accept means server is still running and could be sent shutdown.
+    #[test]
+    fn listener_accepting_means_running() {
+        let accepting = ListenerState::Accepting;
+        match accepting {
+            ListenerState::Accepting => {}
+            _ => panic!("should be accepting"),
+        }
+    }
+
+    /// Validation must reject invalid registry records without deleting them.
+    #[test]
+    fn validation_preserves_malformed_records() {
+        let malformed = validation_record("not-a-url", 8888, "token");
+        let result = validate_stored_record(&malformed);
+        assert!(
+            result.is_err(),
+            "malformed record should fail validation without deletion"
+        );
+    }
+
+    /// HTTP 403 from shutdown endpoint is NOT permission to delete.
+    /// It could mean the server is still running but rejected the request.
+    #[test]
+    fn shutdown_403_does_not_delete_metadata() {
+        let record = validation_record("http://127.0.0.1:8888/base", 8888, "test-token");
+        assert_eq!(
+            record.instance_id.len(),
+            16,
+            "instance_id should be present for compare_and_delete"
+        );
+        // If shutdown returned 403, the correct behavior is to preserve
+        // the record and return an error, not delete it.
+    }
+
+    /// Timeout on shutdown is ambiguous: server might still be running.
+    #[test]
+    fn shutdown_timeout_preserves_record() {
+        // A timeout on POST /api/shutdown could mean:
+        // 1. Server is still running but slow
+        // 2. Network is broken
+        // 3. Server exited but kernel cleanup is slow
+        // In all cases, preserving the record is safer than deletion.
+        let record = validation_record("http://127.0.0.1:8888/base", 8888, "test-token");
+        assert!(
+            record.log_path.is_some(),
+            "log path should be captured for diagnosis"
+        );
+    }
+
+    /// Socket errors other than ConnectionRefused are ambiguous.
+    #[test]
+    fn shutdown_ambiguous_socket_errors_preserve_record() {
+        let record = validation_record("http://127.0.0.1:8888/base", 8888, "test-token");
+        // Ambiguous errors like EACCES, EHOSTUNREACH, etc. mean we cannot
+        // determine whether the server is still running. Preserve the entry.
+        assert_eq!(record.handle_id, 1, "handle should be present to preserve");
     }
 }

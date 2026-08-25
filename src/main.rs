@@ -566,17 +566,27 @@ async fn run(command: Command, prepared_solve: Option<solve::PreparedSolve>) -> 
         // this arm as they gain their own `Command` variant.
         // Jupyter notebook tooling — compiled out unless `--features jupyter`.
         #[cfg(feature = "jupyter")]
-        Command::Jupyter { action } => run_jupyter(action),
+        Command::Jupyter { action } => run_jupyter(action).await,
         Command::External(args) => run_delegate(&args),
     }
 }
 
 /// `gila jupyter …` — dispatch the jupyter subcommand to its gila-native impl.
+/// All blocking I/O (process spawning, network, filesystem) runs on a dedicated thread.
 #[cfg(feature = "jupyter")]
-fn run_jupyter(action: gilamonster_agent::gila_jupyter::JupyterCmd) -> Result<(), anyhow::Error> {
+async fn run_jupyter(
+    action: gilamonster_agent::gila_jupyter::JupyterCmd,
+) -> Result<(), anyhow::Error> {
+    tokio::task::spawn_blocking(move || run_jupyter_blocking(action)).await?
+}
+
+#[cfg(feature = "jupyter")]
+fn run_jupyter_blocking(
+    action: gilamonster_agent::gila_jupyter::JupyterCmd,
+) -> Result<(), anyhow::Error> {
     use gilamonster_agent::gila_jupyter::{
         execute_notebook, get_server_status, list_servers, start_server, stop_server, JupyterCmd,
-        JupyterExecuteParams, JupyterServerParams,
+        JupyterExecuteParams, JupyterServerParams, JupyterServerState,
     };
     match action {
         JupyterCmd::Execute {
@@ -606,6 +616,14 @@ fn run_jupyter(action: gilamonster_agent::gila_jupyter::JupyterCmd) -> Result<()
             if let Some(e) = res.error {
                 eprintln!("error: {e}");
             }
+            // Return error if execution failed, so CLI exits nonzero
+            if !res.success {
+                anyhow::bail!(
+                    "Notebook execution failed: {} cells executed, {} failed",
+                    res.cells_executed,
+                    res.cells_failed
+                );
+            }
             Ok(())
         }
         JupyterCmd::Start {
@@ -617,7 +635,6 @@ fn run_jupyter(action: gilamonster_agent::gila_jupyter::JupyterCmd) -> Result<()
             password_hash,
             open_browser,
             extra,
-            task,
         } => {
             let params = JupyterServerParams {
                 working_dir,
@@ -628,7 +645,6 @@ fn run_jupyter(action: gilamonster_agent::gila_jupyter::JupyterCmd) -> Result<()
                 password,
                 open_browser: Some(open_browser),
                 extra_args: extra,
-                pixi_task: task,
             };
             let res = start_server(params)?;
             if res.success {
@@ -638,9 +654,17 @@ fn run_jupyter(action: gilamonster_agent::gila_jupyter::JupyterCmd) -> Result<()
                     res.url.as_deref().unwrap_or("?"),
                     res.pid.unwrap_or(0),
                 );
+                if let Some(log_path) = res.log_path {
+                    println!("  log: {log_path}");
+                }
             } else {
-                eprintln!(
-                    "jupyter server failed: {}",
+                let log = res
+                    .log_path
+                    .as_deref()
+                    .map(|path| format!("; log: {path}"))
+                    .unwrap_or_default();
+                anyhow::bail!(
+                    "jupyter server failed: {}{log}",
                     res.error.as_deref().unwrap_or("unknown"),
                 );
             }
@@ -656,15 +680,23 @@ fn run_jupyter(action: gilamonster_agent::gila_jupyter::JupyterCmd) -> Result<()
         }
         JupyterCmd::Status { handle_id } => {
             let st = get_server_status(handle_id)?;
-            println!(
-                "handle {handle_id}: {}",
-                if st.running { "running" } else { "not running" },
-            );
+            let state = match st.state {
+                JupyterServerState::Running => "running",
+                JupyterServerState::Unreachable => "unreachable",
+                JupyterServerState::NotFound => "not found",
+            };
+            println!("handle {handle_id}: {state}");
+            if let Some(error) = st.error {
+                println!("  error: {error}");
+            }
             if let Some(url) = st.url {
                 println!("  url:  {url}");
             }
             if let Some(port) = st.port {
                 println!("  port: {port}");
+            }
+            if let Some(log_path) = st.log_path {
+                println!("  log:  {log_path}");
             }
             for k in &st.kernels {
                 println!(
@@ -677,18 +709,29 @@ fn run_jupyter(action: gilamonster_agent::gila_jupyter::JupyterCmd) -> Result<()
         JupyterCmd::List => {
             let result = list_servers()?;
             if result.servers.is_empty() {
-                println!("no active jupyter servers");
+                println!("no registered jupyter servers");
             } else {
                 println!(
-                    "{} active server{}:",
+                    "{} registered server{}:",
                     result.servers.len(),
                     if result.servers.len() == 1 { "" } else { "s" }
                 );
                 for server in result.servers {
+                    let state = match server.state {
+                        JupyterServerState::Running => "running",
+                        JupyterServerState::Unreachable => "unreachable",
+                        JupyterServerState::NotFound => "not found",
+                    };
                     println!(
-                        "  handle {} at {} (port {})",
-                        server.handle_id, server.url, server.port,
+                        "  handle {}: {} at {} (port {})",
+                        server.handle_id, state, server.url, server.port,
                     );
+                    if let Some(error) = server.error {
+                        println!("    error: {error}");
+                    }
+                    if let Some(log_path) = server.log_path {
+                        println!("    log: {log_path}");
+                    }
                 }
             }
             Ok(())
