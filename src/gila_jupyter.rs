@@ -748,7 +748,9 @@ mod instance_id_serde {
         }
 
         let mut bytes = [0u8; 16];
-        for (index, pair) in s.as_bytes().chunks_exact(2).enumerate() {
+        let (pairs, remainder) = s.as_bytes().as_chunks::<2>();
+        debug_assert!(remainder.is_empty());
+        for (index, pair) in pairs.iter().enumerate() {
             bytes[index] = (nibble(pair[0]) << 4) | nibble(pair[1]);
         }
         Ok(bytes)
