@@ -52,9 +52,13 @@ entry point is `gilamonster_agent::gila_jupyter::execute_notebook`.
 | `save_outputs` | `--no-save-outputs` | boolean | true (saved) | Whether to save executed notebook with outputs |
 | `kernel_name` | `--kernel` | string | "python3" | Kernel name to use for execution |
 
-## Returns
+## Results
 
-A `JupyterExecuteResult` (printed as JSON by the CLI) containing:
+The CLI prints one concise human-readable line with the notebook path, executed
+and failed cell counts, elapsed time, and `ok` or `FAILED`. It exits nonzero and
+prints the top-level error on failure; it does not print JSON.
+
+The Rust API returns a `JupyterExecuteResult` containing:
 - `success` (bool): Whether execution succeeded
 - `notebook_path` (string): Path to the executed notebook
 - `cells_executed` (int): Number of code cells executed (markdown/raw excluded)

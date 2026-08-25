@@ -22,7 +22,7 @@ python-bridge = ["dep:pyo3"]
 # Compile the Jupyter notebook execution + server-management tool
 # (`src/gila_jupyter.rs`, surfaced as `gila jupyter …`). Off by default so the
 # lean airframe build does not pull nbformat/reqwest/rand/argon2.
-jupyter = ["dep:nbformat", "dep:reqwest", "dep:url", "dep:directories", "dep:fs4", "dep:atomicwrites", "dep:process-wrap", "dep:rand", "dep:argon2"]
+jupyter = ["dep:nbformat", "dep:reqwest", "dep:url", "dep:directories", "dep:fs4", "dep:atomicwrites", "dep:process-wrap", "dep:rand", "dep:argon2", "dep:windows-sys"]
 # Test-only feature: builds the gila-jupyter-fixture binary for fixture-based tests
 jupyter-test-fixture = ["jupyter"]
 
@@ -153,8 +153,8 @@ pyo3 = { version = "0.28", features = ["auto-initialize"], optional = true }
 # Gila ports newt-agent's `newt-tools/src/jupyter.rs` into its own tree as
 # `src/gila_jupyter.rs` (the extension point is a separate binary, not a
 # plugin slot — so the jupyter surface lives HERE, not behind a newt rev bump).
-# All four deps are `optional = true` and ride the `jupyter` feature below, so
-# a default `cargo build` stays strictly free of jupyter-only deps.
+# Every Jupyter-only dependency below is optional and rides the `jupyter`
+# feature, so a default `cargo build` stays strictly free of this stack.
 nbformat = { version = "0.7", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls-native-roots"], optional = true }
 url = { version = "2", optional = true }
@@ -164,6 +164,18 @@ atomicwrites = { version = "0.4.4", optional = true }
 process-wrap = { version = "=10.0.0", default-features = false, features = ["std", "process-group", "job-object"], optional = true }
 rand = { version = "0.8", optional = true }
 argon2 = { version = "0.5", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+# Windows has no Unix mode bits.  Jupyter state is protected explicitly with
+# current-user-only DACLs, and open-handle file IDs close replacement races.
+windows-sys = { version = "0.61.2", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 # CLI integration tests: run the real `gila` binary and assert on its output.

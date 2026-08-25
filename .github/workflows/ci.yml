@@ -2,7 +2,9 @@ name: CI
 
 # HOOK PARITY: the lint/test/coverage jobs are mirrored by .githooks/pre-push.
 # When editing those, update the push hook to match.
-# EXCEPTION: the `windows` job is CI-only — no local Windows dev box.
+# EXCEPTIONS: the Windows/macOS OS lanes and top-level compatibility-pinned
+# real-Jupyter profiles are
+# CI-only; the hook runs their deterministic fixture coverage locally.
 #
 # Mirrored from newt-agent's CI (gila inherits newt's gate: fmt + clippy -D
 # warnings + test + an 80% line-coverage floor). gila is a single-package crate
@@ -16,6 +18,12 @@ on:
   pull_request:
     branches: ["main"]
 
+# A branch push and its pull_request event share one group, so expensive
+# Jupyter/coverage matrices do not run twice for superseded commits.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
+
 env:
   RUST_BACKTRACE: 1
   CARGO_TERM_COLOR: always
@@ -28,6 +36,7 @@ jobs:
   lint:
     name: Rust lint (fmt + clippy)
     runs-on: ${{ vars.GMF_LINUX_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -69,6 +78,12 @@ jobs:
       - name: clippy --features jupyter-test-fixture
         if: always()
         run: cargo clippy --all-targets --features jupyter-test-fixture -- -D warnings
+      - name: Jupyter feature isolation
+        if: always()
+        run: cargo check --no-default-features --features jupyter
+      - name: strict headless Jupyter fixture lint
+        if: always()
+        run: cargo clippy --no-default-features --features jupyter-test-fixture --all-targets -- -D warnings
       - name: headless dependency gate
         if: always()
         run: |
@@ -77,6 +92,7 @@ jobs:
   headless-portability:
     name: Headless portability (Debian 12)
     runs-on: ${{ vars.GMF_LINUX_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 20
     container: rust:1.88-bookworm
     steps:
       - uses: actions/checkout@v4
@@ -94,6 +110,7 @@ jobs:
   test:
     name: Rust tests
     runs-on: ${{ vars.GMF_LINUX_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -114,7 +131,19 @@ jobs:
         run: cargo test --features jupyter
       - name: jupyter test-fixture tests
         if: always()
-        run: cargo test --features jupyter-test-fixture
+        run: cargo test --features jupyter-test-fixture,native-git
+      - name: headless Jupyter library tests
+        if: always()
+        run: cargo test --no-default-features --features jupyter-test-fixture --lib
+      - name: headless Jupyter lifecycle tests
+        if: always()
+        run: cargo test --no-default-features --features jupyter-test-fixture --test test_cross_process_lifecycle
+      - name: headless Jupyter execute tests
+        if: always()
+        run: cargo test --no-default-features --features jupyter-test-fixture --test test_jupyter_execute
+      - name: headless Jupyter Pixi tests
+        if: always()
+        run: cargo test --no-default-features --features jupyter-test-fixture --test test_jupyter_pixi_integration
       - name: native headless solve tests
         if: always()
         run: cargo test --no-default-features --test solve
@@ -122,6 +151,7 @@ jobs:
   harbor-adapter:
     name: Harbor 0.20 adapter
     runs-on: ${{ vars.GMF_LINUX_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -137,6 +167,7 @@ jobs:
   coverage:
     name: Coverage (cargo-llvm-cov, >= 80% lines)
     runs-on: ${{ vars.GMF_LINUX_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -164,7 +195,7 @@ jobs:
       # caught it silently exit-0'ing on a sub-floor commit. We parse the TOTAL
       # line out of `report --summary-only` and gate in shell.
       - name: Generate coverage data (no report yet)
-        run: cargo llvm-cov --no-report
+        run: cargo llvm-cov --features jupyter-test-fixture,native-git --no-report
 
       - name: Export lcov
         run: cargo llvm-cov report --lcov --output-path lcov.info
@@ -209,6 +240,7 @@ jobs:
   windows:
     name: Windows build + test
     runs-on: windows-latest
+    timeout-minutes: 60
     # CI-ONLY job — not mirrored by .githooks/pre-push (no local Windows box).
     env:
       # Windows pyo3: point at setup-python's python.exe (no bin/ dir there).
@@ -238,6 +270,15 @@ jobs:
       - name: clippy --features jupyter-test-fixture
         if: always()
         run: cargo clippy --all-targets --features jupyter-test-fixture -- -D warnings
+      - name: Jupyter feature isolation
+        if: always()
+        run: cargo check --no-default-features --features jupyter
+      - name: strict headless Jupyter fixture lint
+        if: always()
+        run: cargo clippy --no-default-features --features jupyter-test-fixture --all-targets -- -D warnings
+      - name: headless dependency gate
+        if: always()
+        run: cargo clippy --no-default-features --bin gila-headless -- -D warnings
       - name: cargo test
         if: always()
         run: cargo test
@@ -246,4 +287,87 @@ jobs:
         run: cargo test --features jupyter
       - name: jupyter test-fixture tests
         if: always()
-        run: cargo test --features jupyter-test-fixture
+        run: cargo test --features jupyter-test-fixture,native-git
+      - name: headless Jupyter library tests
+        if: always()
+        run: cargo test --no-default-features --features jupyter-test-fixture --lib
+      - name: headless Jupyter lifecycle tests
+        if: always()
+        run: cargo test --no-default-features --features jupyter-test-fixture --test test_cross_process_lifecycle
+      - name: headless Jupyter execute tests
+        if: always()
+        run: cargo test --no-default-features --features jupyter-test-fixture --test test_jupyter_execute
+      - name: headless Jupyter Pixi tests
+        if: always()
+        run: cargo test --no-default-features --features jupyter-test-fixture --test test_jupyter_pixi_integration
+      - name: Windows private ACL and replacement behavior
+        if: always()
+        run: cargo test --no-default-features --features jupyter-test-fixture --lib durable_log_tests::windows_ -- --nocapture
+      - name: native headless solve tests
+        if: always()
+        run: cargo test --no-default-features --test solve
+
+  macos-jupyter:
+    name: macOS Jupyter process lifecycle
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-jupyter
+      - name: Jupyter feature isolation
+        run: cargo check --no-default-features --features jupyter
+      - name: strict fixture lint
+        run: cargo clippy --no-default-features --features jupyter-test-fixture --all-targets -- -D warnings
+      - name: process-tree and lifecycle behavior
+        run: cargo test --no-default-features --features jupyter-test-fixture --test test_cross_process_lifecycle
+
+  real-jupyter:
+    name: Real Jupyter lifecycle (${{ matrix.profile }})
+    runs-on: ${{ vars.GMF_LINUX_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: Notebook 7 / Server 2
+            packages: notebook==7.6.2 jupyter-server==2.20.0 traitlets==5.16.1
+            runtime_prefix: jpserver-
+            parser_regression: true
+          - profile: Notebook 6 / Server 1
+            packages: notebook==6.5.7 jupyter-server==1.24.0 traitlets==5.9.0
+            runtime_prefix: nbserver-
+            # Notebook 6 owns NotebookApp.ip directly; it has no deprecated
+            # NotebookApp -> ServerApp migration to demonstrate.  The exact
+            # Gila rejection table still runs for this profile, while
+            # the migration regression is pinned to Notebook 7 / Server 2.
+            parser_regression: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: real-jupyter-${{ matrix.runtime_prefix }}
+      # These are top-level compatibility pins. Pip may still resolve patched
+      # transitive dependencies, so they are not a deterministic full lock.
+      - name: install top-level compatibility-pinned Jupyter profile
+        run: python -m pip install --disable-pip-version-check ${{ matrix.packages }}
+      - name: exact extra-argument rejection table
+        run: cargo test --no-default-features --features jupyter-test-fixture --lib extra_argument_surface_rejects_traitlets_aliases_abbreviations_and_positionals
+      - name: Traitlets deprecated-alias regression
+        if: matrix.parser_regression
+        env:
+          GILA_REQUIRE_REAL_JUPYTER: "1"
+        run: cargo test --no-default-features --features jupyter-test-fixture --test test_cross_process_lifecycle real_traitlets_parser_demonstrates_deprecated_notebook_ip_alias_bypass
+      - name: start, authenticate, status, and stop real Jupyter
+        env:
+          GILA_REQUIRE_REAL_JUPYTER_LIFECYCLE: "1"
+          GILA_EXPECT_RUNTIME_PREFIX: ${{ matrix.runtime_prefix }}
+        run: cargo test --no-default-features --features jupyter-test-fixture --test test_cross_process_lifecycle real_jupyter_lifecycle_uses_private_runtime_metadata

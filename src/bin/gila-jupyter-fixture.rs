@@ -8,7 +8,7 @@
 //! scrubs them.
 
 use std::env;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -21,12 +21,12 @@ struct Config {
     ip: IpAddr,
     port: u16,
     token: String,
+    token_file: PathBuf,
     base_path: String,
     default_url: String,
-    display_query: Option<String>,
+    runtime_dir: PathBuf,
     break_registry: Option<PathBuf>,
     descendant_port: Option<u16>,
-    spoof_candidates: bool,
     invalid_only: bool,
 }
 
@@ -45,9 +45,21 @@ fn main() {
     }
 
     let config = parse_config(&args);
+    if config.invalid_only {
+        eprintln!("fixture exited before publishing runtime metadata");
+        return;
+    }
     let listener = TcpListener::bind(SocketAddr::new(config.ip, config.port))
         .unwrap_or_else(|error| panic!("fixture failed to bind loopback listener: {error}"));
     let actual_addr = listener.local_addr().expect("fixture local address");
+    fs::write(
+        cwd.join(".fixture-listener-ready"),
+        actual_addr.port().to_string(),
+    )
+    .expect("fixture listener readiness marker");
+    #[cfg(windows)]
+    fs::write(cwd.join(".fixture-winsock-ready"), b"ready")
+        .expect("fixture WinSock readiness marker");
 
     if let Some(port) = config.descendant_port {
         spawn_descendant(&cwd, port);
@@ -56,35 +68,55 @@ fn main() {
         fs::create_dir_all(path).expect("fixture failed to break registry path");
     }
 
-    if config.spoof_candidates {
-        println!("http://203.0.113.9:6553/lab?token={}", config.token);
-        println!("http://127.0.0.1:6553/lab?token=wrong-token");
-    }
-    if config.invalid_only {
-        println!("http://203.0.113.9:6553/lab?token={}", config.token);
-        std::io::stdout().flush().ok();
-        return;
-    }
-
     let host = match actual_addr.ip() {
         IpAddr::V4(ip) => ip.to_string(),
         IpAddr::V6(ip) => format!("[{ip}]"),
     };
-    let mut announced = url::Url::parse(&format!(
-        "http://{host}:{}{}{}",
-        actual_addr.port(),
-        config.base_path,
-        config.default_url
-    ))
-    .expect("fixture announcement URL");
-    // Match modern Jupyter Server: configured tokens are redacted unless the
-    // caller supplies a custom display query. Production Gila supplies a
-    // query-only custom URL so the actual host/port/base path remain intact.
-    if let Some(query) = &config.display_query {
-        announced.set_query(Some(query.trim_start_matches('?')));
-    } else {
-        announced.query_pairs_mut().append_pair("token", "...");
+    let base_url = format!("http://{host}:{}{}", actual_addr.port(), config.base_path);
+    let runtime_file = write_runtime_metadata(&config, actual_addr, &base_url);
+    if fs::read_to_string(cwd.join(".fixture-mode"))
+        .is_ok_and(|mode| mode.trim() == "replace-instance-directory")
+    {
+        let instance_dir = config
+            .token_file
+            .parent()
+            .expect("fixture token has instance parent");
+        #[cfg(not(windows))]
+        fs::remove_dir_all(instance_dir).expect("fixture remove owned instance directory");
+        #[cfg(windows)]
+        {
+            // Gila deliberately retains handles to the secret files on
+            // Windows. Removing the tree would leave delete-pending directory
+            // entries until those handles close, so model an attacker using
+            // the operation Windows can perform with delete sharing enabled:
+            // rename the exact tree out of the controlled path, then replace
+            // that path with an unrelated directory.
+            let name = instance_dir
+                .file_name()
+                .expect("fixture instance directory name")
+                .to_string_lossy();
+            let retained = instance_dir.with_file_name(format!("{name}.fixture-retained"));
+            fs::rename(instance_dir, &retained)
+                .expect("fixture retain exact owned instance directory");
+        }
+        fs::create_dir(instance_dir).expect("fixture create unowned replacement directory");
+        fs::write(instance_dir.join("replacement-sentinel"), b"preserve")
+            .expect("fixture replacement sentinel");
     }
+    if fs::read_to_string(cwd.join(".fixture-mode"))
+        .is_ok_and(|mode| mode.trim() == "cleanup-token-dir")
+    {
+        #[cfg(not(windows))]
+        fs::remove_file(&config.token_file).expect("fixture replace token file");
+        #[cfg(windows)]
+        fs::rename(
+            &config.token_file,
+            config.token_file.with_extension("fixture-retained"),
+        )
+        .expect("fixture retain exact token file");
+        fs::create_dir(&config.token_file).expect("fixture create token cleanup obstacle");
+    }
+    let announced = format!("{}{}", base_url, config.default_url.trim_start_matches('/'));
     println!("[I 2026-08-24 12:00:00.000 ServerApp] Jupyter Server is running at:");
     println!("[I 2026-08-24 12:00:00.000 ServerApp] {announced}");
     std::io::stdout().flush().ok();
@@ -112,7 +144,13 @@ fn main() {
             Err(error) => panic!("fixture accept failed: {error}"),
         }
     }
+    if fs::read_to_string(&mode_path).is_ok_and(|mode| mode.trim() == "shutdown-barrier") {
+        fs::write(cwd.join(".fixture-shutdown-received"), b"received")
+            .expect("fixture shutdown marker");
+        thread::sleep(Duration::from_millis(750));
+    }
     drop(listener);
+    let _ = fs::remove_file(runtime_file);
     let _ = fs::write(cwd.join(".fixture-stopped"), b"stopped");
 }
 
@@ -121,12 +159,14 @@ fn parse_config(args: &[String]) -> Config {
         ip: "127.0.0.1".parse().unwrap(),
         port: 8888,
         token: String::new(),
-        base_path: String::new(),
+        token_file: PathBuf::new(),
+        base_path: "/".to_string(),
         default_url: "/lab".to_string(),
-        display_query: None,
+        runtime_dir: PathBuf::from(
+            env::var_os("JUPYTER_RUNTIME_DIR").expect("fixture JUPYTER_RUNTIME_DIR"),
+        ),
         break_registry: None,
         descendant_port: None,
-        spoof_candidates: false,
         invalid_only: false,
     };
     let mut index = 1;
@@ -140,23 +180,11 @@ fn parse_config(args: &[String]) -> Config {
                 index += 1;
                 config.port = args[index].parse().expect("fixture --port");
             }
-            "--NotebookApp.token" | "--IdentityProvider.token" => {
-                index += 1;
-                config.token = args[index].clone();
-            }
-            "--fixture-base-path" => {
-                index += 1;
-                config.base_path = normalize_base_path(&args[index]);
-            }
             "--NotebookApp.default_url"
             | "--ServerApp.default_url"
             | "--JupyterNotebookApp.default_url" => {
                 index += 1;
                 config.default_url = normalize_default_url(&args[index]);
-            }
-            "--ServerApp.custom_display_url" => {
-                index += 1;
-                config.display_query = Some(args[index].clone());
             }
             "--fixture-break-registry" => {
                 index += 1;
@@ -166,22 +194,33 @@ fn parse_config(args: &[String]) -> Config {
                 index += 1;
                 config.descendant_port = Some(args[index].parse().expect("descendant port"));
             }
-            "--fixture-spoof-candidates" => config.spoof_candidates = true,
+            "--fixture-spoof-candidates" => {}
             "--fixture-invalid-only" => config.invalid_only = true,
             _ => {}
         }
         index += 1;
     }
+    let token_path =
+        PathBuf::from(env::var_os("JUPYTER_TOKEN_FILE").expect("fixture JUPYTER_TOKEN_FILE"));
+    config.token = fs::read_to_string(&token_path).expect("fixture read token file");
+    config.token_file = token_path;
+    let config_path = PathBuf::from(value_after(args, "--config").expect("fixture --config"));
+    let protected_config = fs::read_to_string(config_path).expect("fixture read protected config");
+    config.base_path = config_string_value(&protected_config, "c.ServerApp.base_url")
+        .expect("fixture ServerApp.base_url config");
     config
 }
 
-fn normalize_base_path(path: &str) -> String {
-    let path = path.trim();
-    if path.is_empty() || path == "/" {
-        String::new()
-    } else {
-        format!("/{}", path.trim_matches('/'))
-    }
+fn config_string_value(config: &str, key: &str) -> Option<String> {
+    config.lines().find_map(|line| {
+        let value = line
+            .trim()
+            .strip_prefix(key)?
+            .trim()
+            .strip_prefix('=')?
+            .trim();
+        serde_json::from_str(value).ok()
+    })
 }
 
 fn normalize_default_url(path: &str) -> String {
@@ -193,13 +232,141 @@ fn normalize_default_url(path: &str) -> String {
     }
 }
 
+fn secure_create(path: &Path, contents: &[u8]) -> File {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path).expect("fixture create runtime file");
+    file.write_all(contents)
+        .expect("fixture write runtime file");
+    file.flush().expect("fixture flush runtime file");
+    file
+}
+
+fn write_runtime_metadata(config: &Config, actual_addr: SocketAddr, base_url: &str) -> PathBuf {
+    let pid = std::process::id();
+    let mode = fs::read_to_string(
+        env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(".fixture-mode"),
+    )
+    .unwrap_or_default();
+    let mode = mode.trim();
+    let mut runtime_token = config.token.clone();
+    let mut runtime_base = config.base_path.clone();
+    let mut runtime_url = base_url.to_string();
+    let mut runtime_port = u64::from(actual_addr.port());
+    let mut runtime_pid = u64::from(pid);
+    match mode {
+        "runtime-token-mismatch" => runtime_token = "wrong-runtime-token".to_string(),
+        "runtime-base-mismatch" => runtime_base = "/wrong/".to_string(),
+        "runtime-url-mismatch" => {
+            runtime_url = format!("http://127.0.0.1:{}/wrong/", actual_addr.port())
+        }
+        "runtime-port-mismatch" => runtime_port = runtime_port.saturating_add(1),
+        "runtime-pid-mismatch" => runtime_pid = runtime_pid.saturating_add(1),
+        _ => {}
+    }
+    let encoded = serde_json::to_vec(&serde_json::json!({
+        "base_url": runtime_base,
+        "hostname": actual_addr.ip().to_string(),
+        "password": false,
+        "pid": runtime_pid,
+        "port": runtime_port,
+        "root_dir": env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        "secure": false,
+        "sock": "",
+        "token": runtime_token,
+        "url": runtime_url,
+        "version": "fixture"
+    }))
+    .expect("fixture encode runtime JSON");
+    let runtime_file = config.runtime_dir.join(format!("jpserver-{pid}.json"));
+
+    if mode == "runtime-flood" {
+        for index in 0..300usize {
+            let noise = config.runtime_dir.join(format!("noise-{index:04}"));
+            secure_create(&noise, b"noise");
+        }
+    }
+
+    match mode {
+        "runtime-symlink" => {
+            let target = config.runtime_dir.join("runtime-target");
+            #[cfg(unix)]
+            secure_create(&target, &encoded);
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&target, &runtime_file)
+                .expect("fixture create runtime symlink");
+            #[cfg(windows)]
+            {
+                fs::create_dir(&target).expect("fixture create junction target");
+                let system_root = env::var_os("SYSTEMROOT").expect("fixture SYSTEMROOT");
+                let output = Command::new(PathBuf::from(system_root).join("System32/cmd.exe"))
+                    .arg("/D")
+                    .arg("/C")
+                    .arg("mklink")
+                    .arg("/J")
+                    .arg(&runtime_file)
+                    .arg(&target)
+                    .output()
+                    .expect("fixture launch mklink junction");
+                assert!(
+                    output.status.success(),
+                    "fixture create runtime junction failed: stdout={} stderr={}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                fs::write(
+                    config.runtime_dir.join(".fixture-runtime-reparse-created"),
+                    b"ready",
+                )
+                .expect("fixture runtime reparse marker");
+            }
+        }
+        "runtime-oversized" => {
+            secure_create(&runtime_file, &vec![b'x'; 65 * 1024]);
+        }
+        "runtime-partial" => {
+            secure_create(&runtime_file, b"{");
+            thread::sleep(Duration::from_millis(250));
+            let mut file = OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(&runtime_file)
+                .expect("fixture reopen partial runtime file");
+            file.write_all(&encoded)
+                .expect("fixture complete runtime JSON");
+            file.flush().expect("fixture flush completed runtime JSON");
+        }
+        _ => {
+            secure_create(&runtime_file, &encoded);
+        }
+    }
+
+    if mode == "runtime-multiple" {
+        let second = config
+            .runtime_dir
+            .join(format!("nbserver-{}.json", pid.saturating_add(1)));
+        secure_create(&second, &encoded);
+    }
+    runtime_file
+}
+
 fn record_invocation(cwd: &Path, args: &[String]) {
     let _ = fs::write(cwd.join(".fixture-argv"), args.join("\n"));
-    let mut environment: Vec<_> = env::vars().collect();
+    // `vars()` panics when a deliberately allowed OS value is not Unicode.
+    // Capture lossily only at this diagnostic fixture boundary so the real
+    // child-environment code remains fully OsString-safe.
+    let mut environment: Vec<_> = env::vars_os().collect();
     environment.sort_by(|left, right| left.0.cmp(&right.0));
     let encoded = environment
         .into_iter()
-        .map(|(key, value)| format!("{key}={value}"))
+        .map(|(key, value)| format!("{}={}", key.to_string_lossy(), value.to_string_lossy()))
         .collect::<Vec<_>>()
         .join("\n");
     let _ = fs::write(cwd.join(".fixture-env"), encoded);
@@ -242,7 +409,8 @@ fn listener_only(args: &[String]) {
         .expect("listener-only numeric port");
     let ready = PathBuf::from(value_after(args, "--fixture-ready-file").expect("ready file"));
     let listener = TcpListener::bind(("127.0.0.1", port)).expect("descendant bind");
-    fs::write(ready, b"ready").expect("descendant ready file");
+    let actual_port = listener.local_addr().expect("descendant address").port();
+    fs::write(ready, actual_port.to_string()).expect("descendant ready file");
     loop {
         if let Ok((mut stream, _)) = listener.accept() {
             let _ = stream.write_all(b"fixture descendant\n");
@@ -284,14 +452,34 @@ fn handle_request(stream: &mut TcpStream, token: &str, base_path: &str, mode_pat
             name.eq_ignore_ascii_case("authorization") && value.trim() == format!("token {token}")
         });
     let mode = fs::read_to_string(mode_path).unwrap_or_default();
-    let kernels_path = format!("{base_path}/api/kernels");
-    let shutdown_path = format!("{base_path}/api/shutdown");
+    if let Some(directory) = mode_path.parent() {
+        let request_log = directory.join(".fixture-requests");
+        if let Ok(mut log) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(request_log)
+        {
+            let _ = writeln!(log, "{method} {path} authorization={authorized}");
+        }
+    }
+    let kernels_path = format!("{}/api/kernels", base_path.trim_end_matches('/'));
+    let shutdown_path = format!("{}/api/shutdown", base_path.trim_end_matches('/'));
 
     if method == "GET" && path == kernels_path {
+        if mode.trim() == "kernels-delay" {
+            thread::sleep(Duration::from_millis(1_200));
+        }
         if !authorized || mode.trim() == "kernels-403" {
             write_response(stream, "403 Forbidden", b"");
         } else if mode.trim() == "kernels-503" {
             write_response(stream, "503 Service Unavailable", b"");
+        } else if mode.trim() == "kernels-oversized" {
+            // Production must reject this response from its declared length,
+            // before buffering or decoding any body bytes. Sending only the
+            // header keeps the regression deterministic under instrumented,
+            // parallel coverage runs instead of making a 500 ms readiness
+            // request wait for a deliberately irrelevant 128 KiB write.
+            write_response_headers(stream, "200 OK", 128 * 1024);
         } else if matches!(mode.trim(), "kernels-malformed" | "kernels-malformed-exit") {
             write_response(stream, "200 OK", b"not-json");
         } else {
@@ -322,11 +510,16 @@ fn handle_request(stream: &mut TcpStream, token: &str, base_path: &str, mode_pat
 }
 
 fn write_response(stream: &mut TcpStream, status: &str, body: &[u8]) {
+    write_response_headers(stream, status, body.len());
+    let _ = stream.write_all(body);
+    let _ = stream.flush();
+}
+
+fn write_response_headers(stream: &mut TcpStream, status: &str, content_length: usize) {
     let headers = format!(
         "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        body.len()
+        content_length
     );
     let _ = stream.write_all(headers.as_bytes());
-    let _ = stream.write_all(body);
     let _ = stream.flush();
 }
