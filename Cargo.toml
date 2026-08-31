@@ -25,6 +25,13 @@ python-bridge = ["dep:pyo3"]
 jupyter = ["dep:nbformat", "dep:reqwest", "dep:url", "dep:directories", "dep:fs4", "dep:atomicwrites", "dep:process-wrap", "dep:rand", "dep:argon2", "dep:windows-sys"]
 # Test-only feature: builds the gila-jupyter-fixture binary for fixture-based tests
 jupyter-test-fixture = ["jupyter"]
+# Compile the built-in voice interface (`src/gila_voice.rs`, surfaced as
+# `gila voice say|listen|devices`) — agent-voice "Path B": the facade crate
+# built into gila. Off by default so the lean airframe build pulls no audio /
+# ONNX / whisper.cpp deps. NOTE: building with this feature requires the
+# default `target-dir = "target"` (see .cargo/config.toml.template) — a global
+# CARGO_TARGET_DIR override breaks piper-phonemize's embedded-data build step.
+voice = ["dep:agent-voice"]
 
 [[bin]]
 name = "gila"
@@ -70,6 +77,13 @@ newt-core = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev 
 # The object-capability identity layer — signed, attenuation-only AgentKey
 # caveats. Shared with newt so the whole matrix runs under one capability model.
 newt-identity = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev = "a46d001430f4c3b9713fa5254beb9838a0777968" }
+
+# --- Voice (agent-voice "Path B", feature `voice`) ----------------------------
+# The agent-voice facade crate: VoiceStack (listen/say/transcribe) over local
+# Piper TTS + Whisper STT + Silero VAD. Sibling-repo git dep pinned by rev,
+# same shape as the newt-* deps; the .cargo/config.toml.template overlay points
+# it at a local checkout for dev. See agent-voice's docs/GILA_PLUGIN.md.
+agent-voice = { git = "https://github.com/Gilamonster-Foundation/agent-voice", rev = "1abad1830067ea0f69ed1f871ef4610d43385ce0", optional = true }
 
 # --- Local ---------------------------------------------------------------------
 anyhow = "1"

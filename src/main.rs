@@ -567,6 +567,9 @@ async fn run(command: Command, prepared_solve: Option<solve::PreparedSolve>) -> 
         // Jupyter notebook tooling — compiled out unless `--features jupyter`.
         #[cfg(feature = "jupyter")]
         Command::Jupyter { action } => run_jupyter(action).await,
+        // Voice interface — compiled out unless `--features voice`.
+        #[cfg(feature = "voice")]
+        Command::Voice { cmd } => gilamonster_agent::gila_voice::run(cmd).await,
         Command::External(args) => run_delegate(&args),
     }
 }

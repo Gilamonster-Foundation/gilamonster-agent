@@ -52,3 +52,21 @@ plugins-protocol = { path = "../newt-agent/plugins-protocol" }
 # [env]
 # PYO3_PYTHON = { value = "../venv/bin/python", relative = false }
 
+
+# --- Voice feature (agent-voice "Path B") -------------------------------------
+# `--features voice` compiles the agent-voice facade in (git dep pinned by rev
+# in Cargo.toml). For LOCAL development against a sibling agent-voice checkout,
+# uncomment the patch below — same discipline as the newt patch above.
+#
+# [patch."https://github.com/Gilamonster-Foundation/agent-voice"]
+# agent-voice = { path = "../agent-voice/agent-voice" }
+#
+# The voice build also requires cargo's default target dir: agent-voice's
+# piper-phonemize dependency locates its embedded espeak-ng data by finding a
+# build directory literally named "target". Pinning target-dir here overrides
+# a user-global CONFIG-file target-dir; note a CARGO_TARGET_DIR environment
+# variable outranks all config files and must be left unset for voice builds.
+# (Harmless otherwise — "target" is already cargo's default.)
+#
+# [build]
+# target-dir = "target"

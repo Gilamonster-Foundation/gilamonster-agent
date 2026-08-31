@@ -63,6 +63,8 @@ pub mod gila_status;
 pub mod gila_todos;
 pub mod gila_update;
 pub mod gila_version;
+#[cfg(feature = "voice")]
+pub mod gila_voice;
 pub mod gila_worktree;
 pub mod gila_wsl;
 pub mod hotseat;
@@ -362,6 +364,16 @@ pub enum Command {
     Jupyter {
         #[command(subcommand)]
         action: gila_jupyter::JupyterCmd,
+    },
+    /// Voice interface (compiled with `--features voice`): speak, listen, and
+    /// list audio devices via the built-in agent-voice stack (local Piper TTS
+    /// + Whisper STT + Silero VAD — "Path B" in agent-voice's
+    /// docs/GILA_PLUGIN.md). Compiled out by default; `gila voice` is only
+    /// present when the `voice` feature is on.
+    #[cfg(feature = "voice")]
+    Voice {
+        #[command(subcommand)]
+        cmd: gila_voice::VoiceCmd,
     },
     /// Shell-delegate fallback: any subcommand gilamonster-agent has not yet
     /// ported from gilabot (Python). clap's `external_subcommand` catch-all
