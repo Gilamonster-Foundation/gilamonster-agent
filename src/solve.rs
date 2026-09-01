@@ -114,8 +114,21 @@ fn apply_context_window(driver: &mut TurnDriverConfig, context_window: u32) {
     driver.num_ctx = Some(context_window);
 }
 
-fn runtime_posture(config: &Config, model: &str) -> RuntimeSettingsSnapshot {
-    newt_core::tenacity::attribute_active_family(config.tenacity.as_ref(), model);
+/// Resolve the posture snapshot WITHOUT attributing a model family.
+///
+/// newt's card pivot (#1818/#1819) made model names labels, never evidence,
+/// and #1820 deleted `attribute_active_family` — the function this called —
+/// because it looked a card up BY MODEL NAME. `newt-core`'s
+/// `tenacity_exact_family_ratchet` now guards the seam: a model merely
+/// *named* `my-nemotron-alias` must get NO family unless a card says so.
+///
+/// gila has only the model name here, so the honest value is `None`: no
+/// family, rather than one inferred from a string. Family-derived tenacity
+/// returns when gila resolves capability cards and can pass typed metadata
+/// through `set_active_model_family`, the way `newt-cli/src/solve.rs:172`
+/// does. Tracked separately; this is deliberately not a name-shaped guess.
+fn runtime_posture(config: &Config, _model: &str) -> RuntimeSettingsSnapshot {
+    newt_core::tenacity::set_active_model_family(None);
     RuntimeSettingsSnapshot::resolve(config, None, None)
 }
 
