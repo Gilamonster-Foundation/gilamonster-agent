@@ -252,11 +252,8 @@ pub async fn check(name: &str) -> Result<()> {
     let leash = Config::resolve()
         .unwrap_or_default()
         .mcp_probe_caveats(&workspace);
-    // Newt's admission witness makes disabled/untrusted entries
-    // unrepresentable at the spawn boundary. Gila-created entries are enabled
-    // and trusted, but still pass through the same gate as the inherited TUI.
     let admitted = newt_core::mcp::admit(&entry)
-        .map_err(|denied| anyhow::anyhow!("MCP server admission denied: {denied}"))?;
+        .map_err(|e| anyhow::anyhow!("capability '{name}' MCP entry not admitted: {e}"))?;
     let transport = StdioTransport::spawn(&admitted, &leash).with_context(|| {
         format!(
             "spawning `{} mcp {name}` — is the caps venv set up? \
