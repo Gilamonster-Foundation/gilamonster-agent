@@ -260,3 +260,108 @@ fs_read = "none"
 fs_write = "none"
 exec = "none"
 net = "none"
+
+[[tree.subtask]]
+id = "node-17"
+instruction = "Herder cockpit ph1 — PaneBackend + PTY panes, gila cockpit confined shell pane"
+deps = []
+parallel_ok = false
+context = []
+status = "pending"
+kind = "phase"
+
+[tree.subtask.caveat_policy]
+fs_read = "none"
+fs_write = "none"
+exec = "none"
+net = "none"
+
+[[tree.subtask]]
+id = "node-18"
+instruction = "Herder cockpit ph2 — ChatPaneBackend, tabs, agents.toml palette, spawn newt/claude/codex"
+deps = []
+parallel_ok = false
+context = []
+status = "pending"
+kind = "phase"
+
+[tree.subtask.caveat_policy]
+fs_read = "none"
+fs_write = "none"
+exec = "none"
+net = "none"
+
+[[tree.subtask]]
+id = "node-19"
+instruction = "Herder cockpit ph3 — default entry point flip, gila code/--inline, non-TTY fallback"
+deps = []
+parallel_ok = false
+context = []
+status = "pending"
+kind = "phase"
+
+[tree.subtask.caveat_policy]
+fs_read = "none"
+fs_write = "none"
+exec = "none"
+net = "none"
+
+[[tree.subtask]]
+id = "node-20"
+instruction = "Herder cockpit ph4 — supervisor.rs watch/herd modes over PaneBackend observations"
+deps = []
+parallel_ok = false
+context = []
+status = "pending"
+kind = "phase"
+
+[tree.subtask.caveat_policy]
+fs_read = "none"
+fs_write = "none"
+exec = "none"
+net = "none"
+
+[[tree.subtask]]
+id = "node-21"
+instruction = "Herder cockpit ph5 — voice conversation loop, VAD turn-taking, TTS, barge-in (--features voice)"
+deps = []
+parallel_ok = false
+context = []
+status = "pending"
+kind = "phase"
+
+[tree.subtask.caveat_policy]
+fs_read = "none"
+fs_write = "none"
+exec = "none"
+net = "none"
+
+[[tree.subtask]]
+id = "node-22"
+instruction = "Herder cockpit ph6 — OpenShellPaneBackend, palette openshell:<agent> entries (--features openshell)"
+deps = []
+parallel_ok = false
+context = []
+status = "pending"
+kind = "phase"
+
+[tree.subtask.caveat_policy]
+fs_read = "none"
+fs_write = "none"
+exec = "none"
+net = "none"
+
+[[tree.subtask]]
+id = "node-23"
+instruction = "Herder cockpit ph7 — steering ratchet, confirm-gated agent-proposed pane input"
+deps = []
+parallel_ok = false
+context = []
+status = "pending"
+kind = "phase"
+
+[tree.subtask.caveat_policy]
+fs_read = "none"
+fs_write = "none"
+exec = "none"
+net = "none"
