@@ -25,12 +25,14 @@ use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 
+pub mod agents_manifest;
 pub mod authority;
 pub mod build_info;
 pub mod capabilities;
 #[cfg(feature = "langchain")]
 pub mod chain;
 pub mod cockpit;
+pub mod cockpit_app;
 pub mod cowork;
 pub mod delegate;
 pub mod fleet;
@@ -66,6 +68,7 @@ pub mod keys;
 pub mod launch;
 pub mod layout;
 pub mod manifest;
+pub mod pane_backend;
 pub mod pty;
 #[cfg(feature = "python-bridge")]
 pub mod python_bridge;
@@ -191,9 +194,11 @@ pub enum Command {
     },
     /// Open the **cockpit** — the tmux-semantics multiplexer: tabs + panes with
     /// prefix keybindings (`Ctrl+B c` new chat tab, `Ctrl+B "` shell pane, arrows
-    /// to move focus, `z` zoom). This first slice renders the tab/pane layout and
-    /// responds to the keys; live per-pane drivers + the ambient shell PTY land
-    /// in the next ratchet. Companion chat panes are clamped by `authority`.
+    /// to move focus, `z` zoom, `x` close pane, `Ctrl+Q` quit). Every pane is
+    /// live: a chat pane drives its own `TurnDriver` and a shell pane hosts your
+    /// real `$SHELL` on a pty. Chat panes are clamped by `authority` — a
+    /// companion pane can speak but cannot act, and a shell pane has no driver
+    /// at all.
     Cockpit {
         /// Optional working path the cockpit session runs against.
         path: Option<PathBuf>,

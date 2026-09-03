@@ -755,44 +755,102 @@ fn run_scrybe(server_uri: &str, doc_path: Option<&str>) -> anyhow::Result<()> {
 }
 
 /// The cockpit raw render/event loop (binary-owned, the by-design-uncovered tty
-/// surface). Wires the tested [`Cockpit`](gilamonster_agent::cockpit::Cockpit)
-/// model + the [`keys`](gilamonster_agent::keys) dispatcher to a real terminal;
-/// all decision logic (the action state machine, key routing, tab bar, pane
-/// labels) is unit-tested in `cockpit.rs`.
-fn run_cockpit(_path: Option<std::path::PathBuf>) -> anyhow::Result<()> {
+/// surface). Everything it decides is decided elsewhere and unit-tested: the
+/// action state machine in [`cockpit`](gilamonster_agent::cockpit), the
+/// action→backend bridge in
+/// [`cockpit_app`](gilamonster_agent::cockpit_app), the pane backends in
+/// [`pane_backend`](gilamonster_agent::pane_backend). This arm owns only the
+/// ratatui frame, the crossterm event source, and the terminal guard.
+///
+/// The backend profile is resolved the same way `run_cowork` resolves its
+/// driver — the operator's first configured newt backend — so every cockpit
+/// chat pane talks to the same inference endpoint as the rest of the airframe.
+/// The clamp, though, is minted only through `authority::driver_config` inside
+/// `ChatPaneBackend`: this function never builds a `TurnDriverConfig`.
+fn run_cockpit(path: Option<std::path::PathBuf>) -> anyhow::Result<()> {
     use crossterm::event::{self, Event, KeyEventKind};
-    use gilamonster_agent::cockpit::{route_cockpit_key, tab_bar, Cockpit, CockpitKey};
+    use gilamonster_agent::cockpit::tab_bar;
+    use gilamonster_agent::cockpit_app::{route_app_key, AppKey, BackendProfile, CockpitApp};
     use gilamonster_agent::cowork::to_key_combo;
-    use gilamonster_agent::keys::KeyDispatcher;
     use gilamonster_agent::layout::Rect as LRect;
+    use gilamonster_agent::pty::pty_shell_program;
     use ratatui::backend::CrosstermBackend;
-    use ratatui::layout::{Alignment, Rect};
+    use ratatui::layout::Rect;
     use ratatui::style::{Color, Modifier, Style};
+    use ratatui::text::Text;
     use ratatui::widgets::{Block, Borders, Paragraph};
     use ratatui::Terminal;
 
-    let mut cockpit = Cockpit::new();
-    let mut dispatcher = KeyDispatcher::default();
+    // --- resolve the operator's backend (same shape as run_cowork) -----------
+    let cfg = newt_core::Config::resolve()?;
+    let backend = cfg.backends.first().ok_or_else(|| {
+        anyhow::anyhow!("no inference backend configured — set one up in newt's config first")
+    })?;
+    let workspace = match &path {
+        Some(p) => p.display().to_string(),
+        None => std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| ".".to_string()),
+    };
+    // newt #1128 made `model`/`kind` optional ("probe at session start"); the
+    // cockpit has no probe step, so an unset model fails loud and an unset kind
+    // adopts newt's OpenAI wire default.
+    let model = backend.effective_model().ok_or_else(|| {
+        anyhow::anyhow!(
+            "backend `{}` has no model (set model = in the [[backends]] entry)",
+            backend.name
+        )
+    })?;
+    let profile = BackendProfile {
+        endpoint: backend.endpoint.clone(),
+        model: model.to_string(),
+        kind: backend.kind.unwrap_or(newt_core::BackendKind::Openai),
+        api_key: backend.resolve_api_key(),
+        workspace,
+    };
 
+    // Shell panes start where the cockpit was launched, not wherever a bare
+    // `CommandBuilder` would land them (portable-pty falls back to the user's
+    // home when handed no cwd, so `gila cockpit` with no path argument opened
+    // every shell in `~` instead of the project you are sitting in).
+    let pane_cwd = path.clone().or_else(|| std::env::current_dir().ok());
+    let mut app = CockpitApp::new(profile, pty_shell_program(), pane_cwd);
+
+    // --- terminal setup under an RAII guard (restored on EVERY exit) ---------
     setup_terminal()?;
     let mut guard = TerminalGuard::new(restore_terminal);
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
 
-    let mut quit = false;
+    // Last rendered rect per pane token, so a pty is resized only on a real
+    // change (a resize every frame would SIGWINCH the shell continuously).
+    let mut last_areas: std::collections::HashMap<u64, Rect> = std::collections::HashMap::new();
+
     let loop_result: anyhow::Result<()> = (|| {
-        while !quit {
+        while !app.should_quit() {
+            // 1. Step every backend: poll the drivers, notice a dead child.
+            app.tick();
+
+            // 2. Draw the tab bar and every pane of the active tab.
+            let mut frame_areas: Vec<(u64, Rect)> = Vec::new();
             terminal.draw(|frame| {
                 let area = frame.area();
-                // Top row: the tab bar. Everything below: the panes.
-                let bar = tab_bar(&cockpit.tab_titles(), cockpit.active_tab());
+                let bar = tab_bar(&app.cockpit().tab_titles(), app.cockpit().active_tab());
                 frame.render_widget(
                     Paragraph::new(bar).style(Style::default().fg(Color::Cyan)),
                     Rect::new(area.x, area.y, area.width, 1),
                 );
                 let panes_area = LRect::new(0, 1, area.width, area.height.saturating_sub(1));
-                let focused = cockpit.focused_pane();
-                for (pane, r) in cockpit.rects(panes_area) {
-                    let role = cockpit.pane_role(pane);
+                app.set_spawn_area(Rect::new(
+                    panes_area.x,
+                    panes_area.y,
+                    panes_area.w,
+                    panes_area.h,
+                ));
+                let focused = app.cockpit().focused_pane();
+                for (pane, r) in app.cockpit().rects(panes_area) {
+                    let Some(token) = app.cockpit().pane_token(pane) else {
+                        continue;
+                    };
                     let is_focused = pane == focused;
                     let border = if is_focused {
                         Style::default()
@@ -801,35 +859,84 @@ fn run_cockpit(_path: Option<std::path::PathBuf>) -> anyhow::Result<()> {
                     } else {
                         Style::default().fg(Color::DarkGray)
                     };
-                    let label = role
-                        .map(|role| gilamonster_agent::cockpit::pane_label(role, pane, is_focused))
-                        .unwrap_or_default();
-                    let widget = Paragraph::new(label)
-                        .alignment(Alignment::Center)
-                        .block(Block::default().borders(Borders::ALL).border_style(border));
-                    frame.render_widget(widget, Rect::new(r.x, r.y, r.w, r.h));
+                    let rect = Rect::new(r.x, r.y, r.w, r.h);
+                    frame_areas.push((token, rect));
+                    // The interior is the rect minus its one-cell border — the
+                    // same geometry `pty_size_for` uses for the vt100 grid.
+                    let (iw, ih) = (
+                        rect.width.saturating_sub(2).max(1),
+                        rect.height.saturating_sub(2).max(1),
+                    );
+                    let (title, lines) = match app.backend_mut(token) {
+                        Some(b) => (b.title(), b.render_lines(iw, ih)),
+                        None => ("(no backend)".to_string(), Vec::new()),
+                    };
+                    let block = Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(border)
+                        .title(format!(" {title} "));
+                    frame.render_widget(Paragraph::new(Text::from(lines)).block(block), rect);
                 }
             })?;
 
+            // 3. Resize the backends whose pane rect actually changed.
+            for (token, rect) in &frame_areas {
+                if last_areas.get(token) != Some(rect) {
+                    if let Some(b) = app.backend_mut(*token) {
+                        b.resize(*rect);
+                    }
+                    last_areas.insert(*token, *rect);
+                }
+            }
+            last_areas.retain(|t, _| frame_areas.iter().any(|(ft, _)| ft == t));
+
+            // 4. Poll input non-blocking (short timeout keeps the tick cadence).
             if event::poll(Duration::from_millis(50))? {
                 if let Event::Key(key) = event::read()? {
                     if key.kind != KeyEventKind::Release {
-                        if let Some(combo) = to_key_combo(key.code, key.modifiers) {
-                            match route_cockpit_key(
-                                &mut dispatcher,
-                                combo,
-                                std::time::Instant::now(),
-                            ) {
-                                CockpitKey::Quit => quit = true,
-                                CockpitKey::Do(action) => {
-                                    cockpit.apply(action);
+                        // Keys the dispatcher has no vocabulary for still belong
+                        // to the focused pane (function keys, media keys, …) —
+                        // they cannot be a prefix binding, so forwarding them is
+                        // safe and keeps a hosted program fully usable. But NOT
+                        // while a prefix is armed: `to_key_combo` returns None
+                        // for Delete/Insert/BackTab, which `encode_key` happily
+                        // turns into PTY bytes, so forwarding one after a bare
+                        // prefix would be a post-prefix miss that reaches the
+                        // shell — the exact leak `keys.rs` calls its single most
+                        // important rule. Absorb them instead, and disarm so the
+                        // next keystroke resolves in the Root table.
+                        match to_key_combo(key.code, key.modifiers) {
+                            Some(combo) => {
+                                match route_app_key(
+                                    app.dispatcher(),
+                                    combo,
+                                    std::time::Instant::now(),
+                                ) {
+                                    AppKey::Quit => app.request_quit(),
+                                    AppKey::Do(action) => {
+                                        app.apply(action);
+                                    }
+                                    AppKey::Forward => app.handle_key(key.code, key.modifiers),
+                                    // Absorbed: a bare prefix or a post-prefix
+                                    // miss reaches NOTHING — the leak guard.
+                                    AppKey::Absorbed => {}
                                 }
-                                CockpitKey::Ignore => {}
                             }
+                            None if app.dispatcher().is_armed() => {
+                                app.dispatcher().disarm();
+                            }
+                            None => app.handle_key(key.code, key.modifiers),
                         }
                     }
                 }
             }
+
+            // 5. Drain each pane's buffered output (dropped until supervision
+            //    lands in phase 4) so an unread pane cannot grow without bound.
+            app.drain_observations();
+
+            // 6. Close panes whose program exited on its own.
+            app.reap_closed();
         }
         Ok(())
     })();
