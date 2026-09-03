@@ -90,9 +90,9 @@ impl AgentManifest {
         Ok(manifest)
     }
 
-    /// Load from `path`. A **missing** file returns [`Self::defaults`] (shell
-    /// + newt + claude + codex), not an error, the palette must never be
-    /// empty just because the operator has not written a manifest yet.
+    /// Load from `path`. A **missing** file returns [`Self::defaults`]
+    /// (shell, newt, claude, codex) rather than an error: the palette must
+    /// never be empty just because the operator has not written a manifest.
     pub fn load(path: &Path) -> Result<Self> {
         match std::fs::read_to_string(path) {
             Ok(s) => Self::parse(&s),
@@ -113,7 +113,7 @@ impl AgentManifest {
 
     /// [`defaults`](Self::defaults) over an injected `$SHELL` value.
     ///
-    /// Pure, so the palette's shell entry is testable without `set_var` , 
+    /// Pure, so the palette's shell entry is testable without `set_var`:
     /// mutating the process environment races every other test in the binary
     /// (cargo runs them as threads in one process). Resolution goes through
     /// [`crate::pty::resolve_shell`], the same lookup the cockpit's shell panes

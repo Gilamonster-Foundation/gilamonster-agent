@@ -48,26 +48,32 @@ pub trait PaneBackend {
     fn render_lines(&mut self, width: u16, height: u16) -> Vec<Line<'static>>;
 
     /// Handle one key the loop routed here (this pane has focus and the prefix
-    /// dispatcher did not claim the key).
-    fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers);
+    /// dispatcher did not claim the key). Defaults to ignoring it, which is
+    /// what an inert pane wants.
+    fn handle_key(&mut self, _code: KeyCode, _mods: KeyModifiers) {}
 
     /// The pane's rect changed, resize whatever the backend owns (a pty's
-    /// kernel size and parser grid; a chat pane re-wraps on the next render, so
-    /// it has nothing to do).
-    fn resize(&mut self, area: Rect);
+    /// kernel size and parser grid). Defaults to nothing: a pane with no live
+    /// resource re-wraps on its next render.
+    fn resize(&mut self, _area: Rect) {}
 
     /// One non-blocking step per frame: poll the driver, notice a dead child.
-    /// Must never block the render loop.
-    fn tick(&mut self);
+    /// Must never block the render loop. Defaults to nothing.
+    fn tick(&mut self) {}
 
     /// New output this pane produced since the last call, for the supervision
-    /// channel. `None` when there is nothing new (or the pane produces no
-    /// observations at all).
-    fn observation(&mut self) -> Option<String>;
+    /// channel. Defaults to `None`: a pane that consumes observations is never
+    /// also a source, since feeding its own output back would be a loop.
+    fn observation(&mut self) -> Option<String> {
+        None
+    }
 
-    /// Whether the pane has ended on its own (the human typed `exit`); the loop
-    /// closes such panes on the next frame.
-    fn is_closed(&mut self) -> bool;
+    /// Whether the pane ended on its own (the human typed `exit`); the loop
+    /// closes such panes on the next frame. Defaults to `false`, for a pane
+    /// that only the operator can close.
+    fn is_closed(&mut self) -> bool {
+        false
+    }
 }
 
 // ── chat panes ──────────────────────────────────────────────────────────────
@@ -246,11 +252,6 @@ impl PaneBackend for ChatPaneBackend {
         }
     }
 
-    fn resize(&mut self, _area: Rect) {
-        // The transcript re-wraps to the new width on the next `render_lines`;
-        // there is no live resource to tell about the change.
-    }
-
     fn tick(&mut self) {
         // The same non-blocking poll `CoworkApp::pump` runs, folding the one-shot
         // TurnStatus into the sticky state the title shows. An errored turn comes
@@ -271,16 +272,6 @@ impl PaneBackend for ChatPaneBackend {
             }
             TurnStatus::Failed(why) => self.status = TurnState::Failed(why),
         }
-    }
-
-    fn observation(&mut self) -> Option<String> {
-        // A chat pane is the *consumer* of observations, never a source: feeding
-        // its own transcript back in would be a loop.
-        None
-    }
-
-    fn is_closed(&mut self) -> bool {
-        false
     }
 }
 
@@ -416,16 +407,6 @@ impl PaneBackend for FailedPaneBackend {
             .map(|l| Line::styled(l.to_string(), Style::default().fg(Color::Red)))
             .collect()
     }
-
-    fn handle_key(&mut self, _code: KeyCode, _mods: KeyModifiers) {}
-    fn resize(&mut self, _area: Rect) {}
-    fn tick(&mut self) {}
-    fn observation(&mut self) -> Option<String> {
-        None
-    }
-    fn is_closed(&mut self) -> bool {
-        false
-    }
 }
 
 #[cfg(test)]
@@ -440,6 +421,10 @@ mod tests {
             api_key: None,
             workspace: ".".to_string(),
         }
+    }
+
+    fn chat() -> ChatPaneBackend {
+        ChatPaneBackend::new(PaneKind::Companion, &profile("http://localhost:1".into())).unwrap()
     }
 
     // --- chat panes ---------------------------------------------------------
@@ -460,16 +445,13 @@ mod tests {
 
     #[test]
     fn chat_pane_title_names_the_kind_and_status() {
-        let b = ChatPaneBackend::new(PaneKind::Companion, &profile("http://localhost:1".into()))
-            .unwrap();
+        let b = chat();
         assert_eq!(b.title(), "companion chat — idle");
     }
 
     #[test]
     fn chat_keys_edit_the_input_line() {
-        let mut b =
-            ChatPaneBackend::new(PaneKind::Companion, &profile("http://localhost:1".into()))
-                .unwrap();
+        let mut b = chat();
         for c in "hi!".chars() {
             b.handle_key(KeyCode::Char(c), KeyModifiers::NONE);
         }
@@ -487,9 +469,7 @@ mod tests {
     /// letters into the prompt. Mirrors `cowork::forward`'s CONTROL check.
     #[test]
     fn chat_ignores_ctrl_chords_instead_of_typing_them() {
-        let mut b =
-            ChatPaneBackend::new(PaneKind::Companion, &profile("http://localhost:1".into()))
-                .unwrap();
+        let mut b = chat();
         for c in ['o', 'a', 'e', 'k'] {
             b.handle_key(KeyCode::Char(c), KeyModifiers::CONTROL);
         }
@@ -505,9 +485,7 @@ mod tests {
 
     #[test]
     fn a_blank_submit_is_a_noop() {
-        let mut b =
-            ChatPaneBackend::new(PaneKind::Companion, &profile("http://localhost:1".into()))
-                .unwrap();
+        let mut b = chat();
         b.handle_key(KeyCode::Char(' '), KeyModifiers::NONE);
         b.handle_key(KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(b.status(), &TurnState::Idle, "no empty turns");
@@ -515,9 +493,7 @@ mod tests {
 
     #[test]
     fn chat_render_reserves_the_last_row_for_the_prompt_and_shows_the_tail() {
-        let mut b =
-            ChatPaneBackend::new(PaneKind::Companion, &profile("http://localhost:1".into()))
-                .unwrap();
+        let mut b = chat();
         b.handle_key(KeyCode::Char('x'), KeyModifiers::NONE);
         let lines = b.render_lines(40, 3);
         assert!(lines.len() <= 3, "render fits the pane interior");
@@ -689,13 +665,8 @@ mod tests {
     fn every_backend_is_object_safe_behind_the_trait() {
         // The raw loop stores these as `Box<dyn PaneBackend>` keyed by token;
         // this is the compile-time proof that all three fit that map.
-        let panes: Vec<Box<dyn PaneBackend>> = vec![
-            Box::new(FailedPaneBackend::new("a")),
-            Box::new(
-                ChatPaneBackend::new(PaneKind::Companion, &profile("http://localhost:1".into()))
-                    .unwrap(),
-            ),
-        ];
+        let panes: Vec<Box<dyn PaneBackend>> =
+            vec![Box::new(FailedPaneBackend::new("a")), Box::new(chat())];
         assert_eq!(panes.len(), 2);
     }
 }

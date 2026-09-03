@@ -33,8 +33,8 @@ pub use crate::pane_backend::BackendProfile;
 /// The distinction that matters is [`Forward`](AppKey::Forward) vs
 /// [`Absorbed`](AppKey::Absorbed): a forwarded key reaches the focused pane's
 /// backend (and, for a shell pane, its PTY), while an absorbed one reaches
-/// **nothing**. A bare prefix and a post-prefix miss must both be absorbed , 
-/// that is the leak guard `cowork::route_key` established, kept here.
+/// **nothing**. A bare prefix and a post-prefix miss must both be absorbed.
+/// That is the leak guard `cowork::route_key` established, kept here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppKey {
     /// Leave the cockpit.
@@ -191,9 +191,10 @@ impl CockpitApp {
     /// attach a backend for a new pane, drop the backend(s) of a closed pane or
     /// tab. Returns the effect so a caller (or a test) can assert on it.
     pub fn apply(&mut self, action: Action) -> Effect {
-        // `prefix prefix` types a LITERAL prefix key into the focused pane , 
-        // how you reach a nested shell's or tmux's own Ctrl+B. The model has no
-        // state to change for it, so it is delivered here as an ordinary key
+        // `prefix prefix` types a LITERAL prefix key into the focused pane.
+        // That is how you reach a nested shell's or tmux's own Ctrl+B. The
+        // model has no state to change for it, so it arrives here as an
+        // ordinary key
         // and the pane's backend encodes it (a PTY pane emits 0x02; a chat pane
         // ignores the Ctrl chord). Without this, the binding silently does
         // nothing and a nested multiplexer is unreachable.
@@ -566,8 +567,8 @@ mod tests {
         }
     }
 
-    /// `prefix prefix` must reach the focused pane as a literal keystroke , 
-    /// that is the only way to type a real Ctrl+B into a nested shell or tmux.
+    /// `prefix prefix` must reach the focused pane as a literal keystroke,
+    /// the only way to type a real Ctrl+B into a nested shell or tmux.
     /// A chat pane, by contrast, treats the Ctrl chord as a control key and
     /// types nothing.
     #[test]
