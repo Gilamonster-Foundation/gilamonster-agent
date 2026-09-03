@@ -1,3 +1,9 @@
+# Python 3.14+ systems only: pyo3 0.22.6 predates 3.14 and its build script
+# errors out. CI does not need this (it pins Python 3.11 via PYO3_PYTHON), so
+# it lives here rather than in a committed config.
+[env]
+PYO3_USE_ABI3_FORWARD_COMPATIBILITY = "1"
+
 # Local-dev cargo overlay for gilamonster-agent  (TEMPLATE — copy, don't commit)
 # =============================================================================
 #

@@ -14,6 +14,12 @@ description = "The Gilamonster agent matrix — inherits newt-agent's chat + age
 repository = "https://github.com/Gilamonster-Foundation/gilamonster-agent"
 keywords = ["gilamonster", "agent", "matrix", "ocap", "coding-agent"]
 
+# Cargo.lock is committed: this crate ships the `gila` and `gila-headless`
+# binaries, so a reproducible resolve is the point. It also holds tinyvec at
+# 1.12.0 — 1.12 builds, 1.13.0 fails on rustc 1.98 with "cannot find macro
+# `vec`" (it arrives transitively via hickory-proto). Re-test before letting
+# `cargo update` move it.
+
 [features]
 default = ["langchain", "native-git", "python-bridge"]
 langchain = ["dep:langchain-rust"]
