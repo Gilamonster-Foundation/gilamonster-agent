@@ -12,19 +12,6 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
-/// How a pane spawned from this entry is confined.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Posture {
-    /// Spawned through `agent_bridle_core::spawn_confined_subprocess`, the
-    /// safe default (matches the cockpit's `ambient_native_shell_default`
-    /// decision for non-shell panes).
-    #[default]
-    Confined,
-    /// Spawned with no leash. Requires an explicit opt-in per entry.
-    Ambient,
-}
-
 /// One `[[agents]]` entry, a palette-spawnable agent harness or shell.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct AgentEntry {
@@ -42,9 +29,6 @@ pub struct AgentEntry {
     /// Nothing else reaches it, the external-boundary invariant.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env: Vec<String>,
-    /// Confinement posture for panes spawned from this entry.
-    #[serde(default)]
-    pub posture: Posture,
 }
 
 impl AgentEntry {
@@ -129,7 +113,6 @@ impl AgentManifest {
                     description: "The user's real shell".to_string(),
                     cwd: None,
                     env: Vec::new(),
-                    posture: Posture::Confined,
                 },
                 AgentEntry {
                     name: "newt".to_string(),
@@ -137,7 +120,6 @@ impl AgentManifest {
                     description: "newt-agent, in a PTY pane".to_string(),
                     cwd: None,
                     env: Vec::new(),
-                    posture: Posture::Confined,
                 },
                 AgentEntry {
                     name: "claude".to_string(),
@@ -145,7 +127,6 @@ impl AgentManifest {
                     description: "Claude Code, in a PTY pane".to_string(),
                     cwd: None,
                     env: Vec::new(),
-                    posture: Posture::Confined,
                 },
                 AgentEntry {
                     name: "codex".to_string(),
@@ -153,7 +134,6 @@ impl AgentManifest {
                     description: "codex, in a PTY pane".to_string(),
                     cwd: None,
                     env: Vec::new(),
-                    posture: Posture::Confined,
                 },
             ],
         }
@@ -203,7 +183,6 @@ argv = ["newt"]
 description = "newt-agent, in a PTY pane"
 # cwd = "/path/to/project"          # defaults to the cockpit's own cwd
 # env = ["OPENAI_API_KEY"]          # extra vars granted to the subprocess
-# posture = "confined"              # "confined" (default) or "ambient"
 
 [[agents]]
 name = "claude"
@@ -231,13 +210,11 @@ mod tests {
         description = "newt-agent, in a PTY pane"
         cwd = "/work"
         env = ["OPENAI_API_KEY=sk-abc"]
-        posture = "confined"
 
         [[agents]]
-        name = "trusted-shell"
+        name = "login-shell"
         argv = ["/bin/bash", "-l"]
-        description = "an ambient login shell"
-        posture = "ambient"
+        description = "a login shell"
     "#;
 
     #[test]
@@ -285,10 +262,11 @@ mod tests {
         assert_eq!(newt.argv, ["newt"]);
         assert_eq!(newt.cwd.as_deref(), Some("/work"));
         assert_eq!(newt.env, ["OPENAI_API_KEY=sk-abc"]);
-        assert_eq!(newt.posture, Posture::Confined);
 
-        let shell = m.entry("trusted-shell").unwrap();
-        assert_eq!(shell.posture, Posture::Ambient);
+        let shell = m.entry("login-shell").unwrap();
+        assert_eq!(shell.argv, ["/bin/bash", "-l"]);
+        assert_eq!(shell.cwd, None, "cwd defaults to the cockpit's own");
+        assert!(shell.env.is_empty(), "env defaults to nothing granted");
     }
 
     #[test]
