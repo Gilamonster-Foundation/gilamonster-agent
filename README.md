@@ -8,10 +8,10 @@
 
 `gila` embeds pinned Newt crates; it is not a Newt plugin. It adds a
 human-owned PTY, read-only observation, capability packages, and
-`cockpit`/FleetView previews. `gila` starts its coder with host filesystem,
-network, and command authority. `--ocap` uses Newt's configured OCAP posture.
-`cowork`, `follow`, `hotseat`, and companion panes do not inherit the ambient
-default. See the
+`cockpit`/FleetView previews. Every `gila` surface runs with the operator's
+own host filesystem, network, and command authority on the native shell.
+There is no OCAP mode: Gila trades confinement for pragmatism; Newt remains
+the confined airframe. See the
 [authority policy](docs/decisions/ambient_native_shell_default.md).
 
 ## Install
@@ -34,7 +34,6 @@ On Windows, set `PYO3_PYTHON` to `python.exe` and run `cargo install --path .`.
 ```bash
 gila                       # ambient coder in the current directory
 gila code ./project        # ambient coder in a project
-gila --ocap code ./project # Newt's configured OCAP posture
 gila cowork ./project      # agent chat above a PTY shell
 gila follow session.log    # read-only shell observer
 gila cap --help            # optional capability packages
