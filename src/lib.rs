@@ -353,6 +353,13 @@ pub enum Command {
     /// Jupyter notebook tooling (compiled with `--features jupyter`): execute
     /// notebooks and own the notebook-server lifecycle. Compiled out by
     /// default; `gila jupyter` is only present when the `jupyter` feature is on.
+    ///
+    /// Environment: GILA_HOME holds the server registry (default ~/.gila).
+    /// GILA_JUPYTER_REGISTRY_LOCK_TIMEOUT_SECS bounds how long one command
+    /// waits for the registry lock while other `gila jupyter` commands hold it
+    /// (whole seconds, default 5). GILA_JUPYTER_STARTUP_TIMEOUT_SECS bounds how
+    /// long `start` waits for the server to answer its readiness probe (whole
+    /// seconds, default 20).
     #[cfg(feature = "jupyter")]
     Jupyter {
         #[command(subcommand)]
