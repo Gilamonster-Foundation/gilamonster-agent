@@ -8,7 +8,7 @@ their historical tags **`v0.1.0`** ≡ v0.3.1 and **`v0.2.0`** ≡ v0.3.2). As o
 airframe (see the v0.4.0 entry and ROADMAP's renumbering note); the unshipped
 cockpit milestones continue inside 0.4.x.
 
-## v0.4.0 — Ambient airframe on newt v0.8.6 (unreleased)
+## v0.4.0 — Ambient airframe on newt v0.8.6 (2026-11-04)
 
 The first release where `Cargo.toml`, the tag, and `gila --version` agree —
 v0.1.0–v0.3.3 were tagged with the manifest still reading 0.1.0. It is also
