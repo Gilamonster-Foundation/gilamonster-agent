@@ -162,8 +162,13 @@ pub fn modulex_mcp_entry() -> McpServerEntry {
         url: None,
         headers: std::collections::BTreeMap::new(),
         request_timeout_secs: None,
+        login_argv: Vec::new(),
+        oauth_client_id: None,
+        oauth_scopes: None,
+        oauth_callback_port: None,
         // gila-owned wiring, minted here (not a borrowed overlay) — trusted.
         trust: McpTrust::Trusted,
+        origin: None,
     }
 }
 
@@ -458,7 +463,12 @@ mod tests {
             url: None,
             headers: std::collections::BTreeMap::new(),
             request_timeout_secs: None,
+            login_argv: Vec::new(),
+            oauth_client_id: None,
+            oauth_scopes: None,
+            oauth_callback_port: None,
             trust: McpTrust::Trusted,
+            origin: None,
         });
         let composed = compose_hotseat_config(base, "oncall-triage");
 

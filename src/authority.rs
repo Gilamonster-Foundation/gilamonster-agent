@@ -27,15 +27,15 @@
 //! | [`Reader`](PaneKind::Reader) | Read + a bounded call budget; `fs_write`/`exec`/`net` denied. The middle posture. |
 //! | [`Workbench`](PaneKind::Workbench) | Read + a call budget; **`exec`/`net`/`fs_write` still denied** — held at the floor until the upstream permission gate + grant modal land (v0.3.6). Lattice-deny, not policy-deny. |
 //!
-//! # The `NEWT_DISABLE_OCAP` refusal (ADR-bound)
+//! # Ambient everywhere
 //!
-//! The phase-0 verification of newt `agentic/tools.rs`
-//! (`docs/decisions/cockpit_tmux_multiplexer.md`) found that
-//! `NEWT_DISABLE_OCAP` makes `run_command` bypass the caveat-confined shell —
-//! `exec = Scope::none()` is never consulted. A cockpit driver's observe-only
-//! and default-deny guarantees therefore **do not hold** in that environment.
-//! So [`driver_config`] refuses to build any config while that variable is set,
-//! failing loud instead of minting a driver whose lattice is a lie.
+//! Gila runs every surface under newt's `NEWT_DISABLE_OCAP` ambient posture
+//! (`src/launch.rs`), where `run_command` dispatches on the native host shell
+//! and the `exec`/`fs_write`/`net` axes are not kernel-enforced. The caveats
+//! minted here are therefore a **product** posture, not a security boundary:
+//! `max_calls = 0` keeps a companion a commentator, and the pane kinds document
+//! the intended reach of each driver. The previous `NEWT_DISABLE_OCAP` refusal
+//! is gone — an ambient process must still be able to seat panes.
 //!
 //! MCP mounts are likewise **outside** this lattice at the pinned rev (tools
 //! carry no caveat leash), which is why companion/reader/workbench are `NoMcp`
@@ -44,11 +44,6 @@
 
 use newt_core::agentic::TurnDriverConfig;
 use newt_core::{BackendKind, Caveats, CountBound, Scope};
-
-/// The environment variable that disables newt's object-capability enforcement.
-/// Newt accepts the exact value `1` and freezes it at startup; the cockpit
-/// refuses to construct drivers when that frozen authority is active.
-pub const DISABLE_OCAP_ENV: &str = "NEWT_DISABLE_OCAP";
 
 /// A bounded, non-zero tool-call budget for the tool-capable postures. Small on
 /// purpose: a driven turn that needs more is a signal for the grant modal, not
@@ -72,29 +67,6 @@ pub enum PaneKind {
     /// an explicit grant in v0.3.6; here it clamps like a reader.
     Workbench,
 }
-
-/// Why a driver config could not be minted.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AuthorityError {
-    /// `NEWT_DISABLE_OCAP=1` was frozen at launch: the caveat lattice would not
-    /// actually bind a driven turn, so we refuse to build one.
-    OcapDisabled,
-}
-
-impl std::fmt::Display for AuthorityError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            AuthorityError::OcapDisabled => write!(
-                f,
-                "refusing to build a cockpit driver while {DISABLE_OCAP_ENV} is set — \
-                 the shell tool bypasses the caveat lattice, so a pane's observe-only / \
-                 default-deny posture would not actually bind. Unset {DISABLE_OCAP_ENV}."
-            ),
-        }
-    }
-}
-
-impl std::error::Error for AuthorityError {}
 
 /// The caveat clamp for a pane kind — the **only** place a pane's authority is
 /// decided. Built on [`Caveats::top`] and narrowed, so any capability axis
@@ -137,48 +109,17 @@ pub fn caveats_for(kind: PaneKind) -> Caveats {
 
 /// Build the [`TurnDriverConfig`] for a pane — the **sole** construction site
 /// in the crate. Stamps the pane's [`caveats_for`] clamp onto a fresh config.
-///
-/// # Errors
-/// [`AuthorityError::OcapDisabled`] when [`DISABLE_OCAP_ENV`] was frozen active
-/// at launch — see the module docs. Callers must surface this (fail-loud), never
-/// fall back to an unclamped driver.
+#[must_use]
 pub fn driver_config(
     kind: PaneKind,
     url: impl Into<String>,
     model: impl Into<String>,
     backend_kind: BackendKind,
     workspace: impl Into<String>,
-) -> Result<TurnDriverConfig, AuthorityError> {
-    driver_config_inner(ocap_disabled(), kind, url, model, backend_kind, workspace)
-}
-
-/// The pure core of [`driver_config`] with the OCAP-disabled state injected, so
-/// the refusal logic is unit-tested without mutating the process-global
-/// environment (which would race across parallel tests).
-fn driver_config_inner(
-    ocap_disabled: bool,
-    kind: PaneKind,
-    url: impl Into<String>,
-    model: impl Into<String>,
-    backend_kind: BackendKind,
-    workspace: impl Into<String>,
-) -> Result<TurnDriverConfig, AuthorityError> {
-    if ocap_disabled {
-        return Err(AuthorityError::OcapDisabled);
-    }
+) -> TurnDriverConfig {
     let mut config = TurnDriverConfig::new(url, model, backend_kind, workspace);
     config.caveats = caveats_for(kind);
-    Ok(config)
-}
-
-/// Whether newt's frozen launch authority has OCAP enforcement disabled.
-///
-/// Newt resolves the widening switch once at startup and accepts only the
-/// exact value `1`; consulting its frozen value keeps this pane guard aligned
-/// with the shell dispatch it is meant to describe.
-#[must_use]
-pub fn ocap_disabled() -> bool {
-    newt_core::agentic::ocap_disabled()
+    config
 }
 
 #[cfg(test)]
@@ -230,36 +171,31 @@ mod tests {
 
     #[test]
     fn driver_config_stamps_the_pane_caveats() {
-        // ocap enabled (false = not disabled): a config is minted, clamped.
         for kind in [PaneKind::Companion, PaneKind::Reader, PaneKind::Workbench] {
-            let cfg = driver_config_inner(
-                false,
+            let cfg = driver_config(
                 kind,
                 "http://localhost:1234",
                 "test-model",
                 BackendKind::Ollama,
                 "/ws",
-            )
-            .expect("ocap enabled → config built");
+            );
             assert_eq!(cfg.caveats, caveats_for(kind), "{kind:?}");
         }
     }
 
     #[test]
-    fn driver_config_refuses_when_ocap_is_disabled() {
-        // The ADR-bound refusal: no driver while NEWT_DISABLE_OCAP is set, since
-        // the shell tool would bypass the lattice (verified without touching the
-        // process-global env — the injected `true` stands in for it).
-        let err = driver_config_inner(
-            true,
+    fn driver_config_builds_under_the_ambient_posture() {
+        // Regression: `driver_config` used to refuse with `OcapDisabled` when
+        // NEWT_DISABLE_OCAP was set. Gila is ambient everywhere now, so the
+        // minting function takes no OCAP input and cannot fail.
+        std::env::set_var("NEWT_DISABLE_OCAP", "1");
+        let cfg = driver_config(
             PaneKind::Companion,
             "http://localhost:1234",
             "m",
             BackendKind::Ollama,
             "/ws",
-        )
-        .unwrap_err();
-        assert_eq!(err, AuthorityError::OcapDisabled);
-        assert!(err.to_string().contains(DISABLE_OCAP_ENV));
+        );
+        assert_eq!(cfg.caveats, caveats_for(PaneKind::Companion));
     }
 }

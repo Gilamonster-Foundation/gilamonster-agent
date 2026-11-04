@@ -1,7 +1,7 @@
 //! Portable evaluator entry point for `gila solve`.
 
 use clap::Parser;
-use gilamonster_agent::{solve, Cli, Command};
+use gilamonster_agent::{launch, solve, Cli, Command};
 
 fn main() -> anyhow::Result<()> {
     if let Some(code) = newt_core::maybe_dispatch() {
@@ -13,7 +13,6 @@ fn main() -> anyhow::Result<()> {
         .command
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("the headless binary requires `gila solve`"))?;
-    let posture = cli.launch_posture_for(command);
     let Command::Solve {
         cwd,
         instruction_file,
@@ -29,7 +28,7 @@ fn main() -> anyhow::Result<()> {
         anyhow::bail!("the headless binary only supports `gila solve`");
     };
     let prepared = solve::prepare(config)?;
-    posture.apply_and_freeze_with_config(Some(prepared.config()));
+    launch::apply_and_freeze_with_config(Some(prepared.config()));
 
     let clean = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

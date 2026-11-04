@@ -86,12 +86,6 @@ pub mod venv;
     about = "The Gilamonster agent matrix — inherits newt-agent, extends into a multi-agent matrix"
 )]
 pub struct Cli {
-    /// Use newt's object-capability-confined posture for `gila code`.
-    /// By default, the Gila coder has full ambient authority and executes
-    /// commands on the native host shell.
-    #[arg(long, global = true, default_value_t = false)]
-    pub ocap: bool,
-
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -119,8 +113,9 @@ pub enum Command {
         /// Exact served model ID. It must match the profile.
         #[arg(long)]
         model: String,
-        /// Permit unconfined host command execution. Required because headless
-        /// execution has no operator prompt.
+        /// Acknowledge host command execution. Gila is ambient everywhere, so
+        /// this changes nothing; it is required because headless execution has
+        /// no operator prompt and the evaluator must state the posture it ran.
         #[arg(long, required = true)]
         unsafe_host_exec: bool,
         /// Append the JSONL trace and Gila contract here.
@@ -535,32 +530,12 @@ pub enum CapabilitiesCmd {
         #[arg(long)]
         args: Option<String>,
     },
-    /// Interactively choose which capabilities load as agent tools (and which run
-    /// confined), writing `~/.gila/capabilities.toml`. The opt-in selector.
+    /// Interactively choose which capabilities load as agent tools, writing
+    /// `~/.gila/capabilities.toml`. The opt-in selector.
     Config,
 }
 
 impl Cli {
-    /// Returns the inherited coder's launch posture.
-    #[must_use]
-    pub fn launch_posture(&self) -> launch::LaunchPosture {
-        if self.ocap {
-            launch::LaunchPosture::Ocap
-        } else {
-            launch::LaunchPosture::Ambient
-        }
-    }
-
-    /// Returns the launch posture after applying the command allowlist.
-    #[must_use]
-    pub fn launch_posture_for(&self, command: &Command) -> launch::LaunchPosture {
-        if command.permits_ambient_agent() {
-            self.launch_posture()
-        } else {
-            launch::LaunchPosture::Ocap
-        }
-    }
-
     /// The effective command: defaulting a bare `gila` invocation to `code` in
     /// the current directory, mirroring newt's "no subcommand → TUI" behaviour.
     pub fn effective_command(self) -> Command {
@@ -568,22 +543,17 @@ impl Cli {
     }
 }
 
-impl Command {
-    /// Returns whether this command hosts an intentionally full-authority agent.
-    ///
-    /// Observer and triage surfaces keep their specialized clamps; ordinary
-    /// utility/delegate commands have no reason to inherit agent authority.
-    #[must_use]
-    pub fn permits_ambient_agent(&self) -> bool {
-        matches!(
-            self,
-            Self::Code { .. }
-                | Self::Solve {
-                    unsafe_host_exec: true,
-                    ..
-                }
-        )
-    }
+/// Print one newt config notice (a migration hint, a deprecation) to stderr.
+/// newt's `Config::resolve` / `Config::load` report through a callback so the
+/// caller owns the surface; gila has no TUI notice strip, so stderr it is.
+pub fn report_notice(notice: newt_core::tty::Notice<'static>) {
+    eprintln!("{}", notice.line());
+}
+
+/// `newt_core::Config::resolve` with notices routed to [`report_notice`] — the
+/// one call site shape every gila surface uses.
+pub fn resolve_config() -> anyhow::Result<newt_core::Config> {
+    Ok(newt_core::Config::resolve(&mut report_notice)?)
 }
 
 /// Render the line announcing where the inherited operator identity lives.
@@ -666,68 +636,23 @@ mod tests {
     #[test]
     fn bare_invocation_defaults_to_code_in_cwd() {
         let cli = Cli::parse_from(["gila"]);
-        assert_eq!(cli.launch_posture(), launch::LaunchPosture::Ambient);
         assert_eq!(cli.effective_command(), Command::Code { path: None });
     }
 
     #[test]
-    fn ocap_flag_is_global_and_preserves_the_code_invocation() {
-        // Gila's trust posture is the inverse of newt's: the explicit flag
-        // selects newt's confined OCAP launch while bare `gila` stays the
-        // full-ambient coder. It must work both before and after `code`.
+    fn ocap_flag_is_gone() {
+        // Regression: `--ocap` was a global flag selecting newt's confined
+        // posture. Gila is ambient everywhere; the flag must not parse.
         for argv in [
+            vec!["gila", "--ocap"],
             vec!["gila", "--ocap", "code", "/tmp/project"],
             vec!["gila", "code", "--ocap", "/tmp/project"],
         ] {
-            let cli = Cli::try_parse_from(argv).expect("--ocap is a global flag");
-            assert_eq!(cli.launch_posture(), launch::LaunchPosture::Ocap);
-            assert_eq!(
-                cli.effective_command(),
-                Command::Code {
-                    path: Some(PathBuf::from("/tmp/project")),
-                }
+            assert!(
+                Cli::try_parse_from(argv).is_err(),
+                "--ocap must be rejected"
             );
         }
-    }
-
-    #[test]
-    fn ambient_launch_is_allowlisted_to_the_inherited_coder_only() {
-        assert!(Command::Code { path: None }.permits_ambient_agent());
-        assert!(!Command::Cowork { path: None }.permits_ambient_agent());
-        assert!(!Command::Follow {
-            logpath: None,
-            dir: None,
-        }
-        .permits_ambient_agent());
-        assert!(!Command::Hotseat {
-            path: None,
-            skill: None,
-        }
-        .permits_ambient_agent());
-        assert!(!Command::Cockpit { path: None }.permits_ambient_agent());
-        assert!(!Command::Matrix { mock: false }.permits_ambient_agent());
-    }
-
-    #[test]
-    fn command_allowlist_wins_over_the_ambient_default() {
-        let ambient = Cli::parse_from(["gila"]);
-        assert_eq!(
-            ambient.launch_posture_for(&Command::Code { path: None }),
-            launch::LaunchPosture::Ambient
-        );
-        assert_eq!(
-            ambient.launch_posture_for(&Command::Follow {
-                logpath: None,
-                dir: None,
-            }),
-            launch::LaunchPosture::Ocap
-        );
-
-        let confined = Cli::parse_from(["gila", "--ocap"]);
-        assert_eq!(
-            confined.launch_posture_for(&Command::Cowork { path: None }),
-            launch::LaunchPosture::Ocap
-        );
     }
 
     #[test]
@@ -769,33 +694,13 @@ mod tests {
             "65536",
         ]))
         .expect("explicit unsafe grant");
-        let command = cli.command.as_ref().expect("solve command");
-        assert!(command.permits_ambient_agent());
-        assert_eq!(
-            cli.launch_posture_for(command),
-            launch::LaunchPosture::Ambient
-        );
-    }
-
-    #[test]
-    fn global_ocap_attenuates_solve_before_launch() {
-        let cli = Cli::try_parse_from([
-            "gila",
-            "--ocap",
-            "solve",
-            "--cwd",
-            "/app",
-            "--instruction-file",
-            "/tmp/task.md",
-            "--config",
-            "/tmp/bench.toml",
-            "--model",
-            "qwen3.6_35b",
-            "--unsafe-host-exec",
-        ])
-        .expect("the global clamp remains available");
-        let command = cli.command.as_ref().expect("solve command");
-        assert_eq!(cli.launch_posture_for(command), launch::LaunchPosture::Ocap);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Solve {
+                unsafe_host_exec: true,
+                ..
+            })
+        ));
     }
 
     #[test]

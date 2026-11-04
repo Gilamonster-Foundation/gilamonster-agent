@@ -24,7 +24,7 @@ back to the Python CLI automatically (with a one-line stderr notice).
 | Startup | interpreter + plugin import on every invocation | Rust: instant; in-process Python only for the 9 bridged commands |
 | `git commit`/`git tend` | subprocess git | libgit2 in-process |
 | `completion` | not available | `gila completion bash|zsh` |
-| Agent authority | n/a | Ambient by default; `gila --ocap` confines |
+| Agent authority | n/a | Ambient everywhere (operator's own authority, native shell) |
 | Version identity | Python package version | SemVer + 12-character Gila commit (`-dirty` when modified) |
 | Unported commands | direct | auto-delegate to Python `gila` + stderr notice |
 | Install | `pip install -e` into a venv | `cargo install` / prebuilt binary; bridge needs `PYO3_PYTHON` at build time |
@@ -42,7 +42,6 @@ Ensure the resulting `gila` appears **before** the pyenv shim `gila` on PATH
 ```bash
 gila version        # Rust-native; prints SemVer + exact Gila source commit
 gila confluence --help   # in-process Python bridge smoke test
-gila --ocap --help  # confirms the optional confinement switch is installed
 ```
 
 The fallback carries an internal recursion guard across wrappers, so a pyenv

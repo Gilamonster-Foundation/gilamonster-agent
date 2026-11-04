@@ -6,7 +6,7 @@ use crate::build_info;
 
 pub const CONTRACT_VERSION: &str = "1";
 pub const AGENT: &str = "gilamonster-agent";
-pub const AIRFRAME_REVISION: &str = "8cde29f0b16cab9206fb76d94925b1ea49ee68bc";
+pub const AIRFRAME_REVISION: &str = "a7f7d598";
 
 pub struct ContractInputs<'a> {
     pub requested_model: &'a str,
@@ -35,6 +35,7 @@ pub fn outcome_label(clean: bool, class: Option<ErrorClass>) -> &'static str {
     }
     match class {
         Some(ErrorClass::Model) => "model_error",
+        Some(ErrorClass::ContextExceeded) => "context_exceeded",
         Some(ErrorClass::Transport) => "transport_error",
         Some(ErrorClass::Timeout) => "timeout",
         Some(ErrorClass::Harness) | None => "harness_error",
@@ -153,7 +154,22 @@ mod tests {
             "transport_error"
         );
         assert_eq!(outcome_label(false, Some(ErrorClass::Timeout)), "timeout");
+        // newt 0.8.6 added `ContextExceeded`; the contract labels it so an
+        // evaluator can tell an overflowed context from a model error.
+        assert_eq!(
+            outcome_label(false, Some(ErrorClass::ContextExceeded)),
+            "context_exceeded"
+        );
+        assert_eq!(
+            outcome_label(false, Some(ErrorClass::Harness)),
+            "harness_error"
+        );
         assert_eq!(outcome_label(false, None), "harness_error");
+        // A clean turn wins over any error class.
+        assert_eq!(
+            outcome_label(true, Some(ErrorClass::ContextExceeded)),
+            "completed"
+        );
     }
 
     #[test]

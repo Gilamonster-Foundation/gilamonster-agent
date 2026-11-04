@@ -24,7 +24,7 @@ use gilamonster_agent::follow::{
 };
 use gilamonster_agent::hotseat::{compose_hotseat_config, hotseat_notice, triage_skill_name};
 use gilamonster_agent::{
-    capabilities, code_path, follow_no_target_report, follow_target, matrix_report, solve,
+    capabilities, code_path, follow_no_target_report, follow_target, launch, matrix_report, solve,
     CapabilitiesCmd, Cli, Command,
 };
 use newt_core::agentic::{TurnDriver, TurnDriverConfig};
@@ -66,17 +66,13 @@ fn main() -> anyhow::Result<()> {
 
     set_brand_defaults();
     let cli = Cli::parse();
-    let launch_posture = cli.command.as_ref().map_or_else(
-        || cli.launch_posture_for(&Command::Code { path: None }),
-        |command| cli.launch_posture_for(command),
-    );
     let command = cli.effective_command();
     let prepared_solve = match &command {
         Command::Solve { config, .. } => Some(solve::prepare(config)?),
         _ => None,
     };
-    launch_posture
-        .apply_and_freeze_with_config(prepared_solve.as_ref().map(solve::PreparedSolve::config));
+    // Every gila surface is ambient: freeze the posture once, before Tokio.
+    launch::apply_and_freeze_with_config(prepared_solve.as_ref().map(solve::PreparedSolve::config));
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -719,7 +715,7 @@ fn run_git(cmd: gilamonster_agent::GitCmd) -> anyhow::Result<()> {
 #[cfg(feature = "langchain")]
 async fn run_chain(question: Vec<String>) -> anyhow::Result<()> {
     use gilamonster_agent::chain::{ask, settings_from_backend};
-    let cfg = newt_core::Config::resolve()?;
+    let cfg = gilamonster_agent::resolve_config()?;
     let backend = cfg.backends.first().ok_or_else(|| {
         anyhow::anyhow!("no inference backend configured — set one up in newt's config first")
     })?;
@@ -1024,7 +1020,7 @@ async fn run_follow(
     };
 
     // Reuse the operator's first configured newt backend for the endpoint.
-    let cfg = newt_core::Config::resolve()?;
+    let cfg = gilamonster_agent::resolve_config()?;
     let backend = cfg.backends.first().ok_or_else(|| {
         anyhow::anyhow!("no inference backend configured — set one up in newt's config first")
     })?;
@@ -1104,7 +1100,7 @@ fn run_cowork(path: Option<std::path::PathBuf>) -> anyhow::Result<()> {
 
     // Build the driver against the operator's first configured newt backend, so
     // cowork talks to the same inference endpoint as the rest of the airframe.
-    let cfg = newt_core::Config::resolve()?;
+    let cfg = gilamonster_agent::resolve_config()?;
     let backend = cfg.backends.first().ok_or_else(|| {
         anyhow::anyhow!("no inference backend configured — set one up in newt's config first")
     })?;
@@ -1288,7 +1284,7 @@ fn run_hotseat(path: Option<std::path::PathBuf>, skill: Option<String>) -> anyho
 
     // Start from the operator's resolved config so hotseat is an OVERLAY, not a
     // replacement — their backends, skills path, and MCP servers carry through.
-    let base = newt_core::Config::resolve()?;
+    let base = gilamonster_agent::resolve_config()?;
     let composed = compose_hotseat_config(base, &skill);
 
     // Serialize the composed config to a per-session file and point newt at it
@@ -1327,7 +1323,7 @@ fn run_code_with_caps(path: Option<std::path::PathBuf>) -> anyhow::Result<()> {
         return newt_tui::run_code(code_path(&path), false, None, None, None, None);
     }
     let mounted = entries.len();
-    let base = newt_core::Config::resolve()?;
+    let base = gilamonster_agent::resolve_config()?;
     let composed = capabilities::compose_agent_mcp(base, entries);
     let session_path = std::env::temp_dir().join(format!("gila-caps-{}.toml", std::process::id()));
     let toml = toml::to_string(&composed)

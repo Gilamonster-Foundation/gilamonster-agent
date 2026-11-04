@@ -13,9 +13,9 @@ to `src/delegate.rs`.
 
 | Command | Route | Notes |
 | --- | --- | --- |
-| `gila` / `code` | Rust-native | Ambient; `--ocap` confines |
-| `cowork` | Rust-native | Confined agent; human-owned PTY |
-| `follow` / `hotseat` / `cockpit` | Rust-native | Always confined |
+| `gila` / `code` | Rust-native | Ambient (native host shell) |
+| `cowork` | Rust-native | Ambient agent; human-owned PTY |
+| `follow` / `hotseat` / `cockpit` | Rust-native | Ambient; observer panes are read-only by tool budget |
 | `capabilities` | Rust-native | MCP is opt-in and admission-gated |
 | `git commit` | Rust-native | libgit2, incl. `--bulk` |
 | `git tend` | Rust-native | git2-based profiles |
