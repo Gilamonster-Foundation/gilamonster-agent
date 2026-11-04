@@ -114,13 +114,22 @@ fn help_flag_lists_subcommands() {
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("--ocap"))
-        .stdout(predicate::str::contains("full ambient"))
         .stdout(predicate::str::contains("code"))
         .stdout(predicate::str::contains("follow"))
         .stdout(predicate::str::contains("cowork"))
         .stdout(predicate::str::contains("hotseat"))
         .stdout(predicate::str::contains("matrix"));
+}
+
+#[test]
+fn ocap_flag_is_rejected() {
+    // Regression: `gila --ocap` used to select newt's confined posture. Gila
+    // is ambient everywhere; the flag is gone and clap must refuse it.
+    gila()
+        .arg("--ocap")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unexpected argument '--ocap'"));
 }
 
 #[test]
@@ -294,12 +303,12 @@ fn capabilities_run_dispatches_and_errors_clearly_without_a_caps_venv() {
 }
 
 #[test]
-fn capabilities_run_engages_the_confined_path_when_the_manifest_marks_it() {
-    // A manifest entry with `confined = true` routes `run` through the agent-bridle
-    // confined spawn (caveats mint + ConfinedCommand) instead of the bare spawn.
-    // The venv is bogus so the spawn fails fast — the point is to prove the
-    // *confined* code path executes, which announces the resolved sandbox
-    // (or fails closed on a host without an enforceable backend).
+fn capabilities_run_ignores_a_legacy_confined_manifest_entry() {
+    // Regression: a manifest entry with `confined = true` used to route `run`
+    // through the agent-bridle confined spawn, announcing the sandbox on stderr.
+    // Gila no longer confines capability spawns: the legacy key still parses
+    // (older manifests keep loading) and `run` takes the bare spawn path. The
+    // venv is bogus so the spawn fails fast.
     let home = tempfile::tempdir().expect("tempdir");
     let gdir = home.path().join(".gila");
     std::fs::create_dir_all(&gdir).expect("mkdir .gila");
@@ -318,8 +327,8 @@ fn capabilities_run_engages_the_confined_path_when_the_manifest_marks_it() {
         .assert()
         .failure()
         .stderr(
-            predicate::str::contains("demo:sometool running confined (sandbox:")
-                .or(predicate::str::contains("confined spawn of")),
+            predicate::str::contains("demo:sometool")
+                .and(predicate::str::contains("confined").not()),
         );
 }
 
@@ -339,13 +348,13 @@ fn cap_list_runs_gilacap_list() {
 #[cfg(unix)]
 #[test]
 fn cap_config_writes_the_manifest_from_interactive_choices() {
-    // Drive the selector headlessly: `demo` → [b]oth, confine [y]. The chosen
-    // policy lands in <HOME>/.gila/capabilities.toml.
+    // Drive the selector headlessly: `demo` → [b]oth. The chosen policy lands
+    // in <HOME>/.gila/capabilities.toml; there is no confine prompt any more.
     let bin = fake_gilacap_dir();
     let home = tempfile::tempdir().expect("home");
     let mut cmd = gila();
     with_fake_gilacap(cmd.arg("cap").arg("config"), bin.path(), home.path())
-        .write_stdin("b\ny\n")
+        .write_stdin("b\n")
         .assert()
         .success()
         .stdout(predicate::str::contains("wrote"));
@@ -354,7 +363,7 @@ fn cap_config_writes_the_manifest_from_interactive_choices() {
         .expect("manifest written");
     assert!(manifest.contains("name = \"demo\""));
     assert!(manifest.contains("expose = \"both\""));
-    assert!(manifest.contains("confined = true"));
+    assert!(!manifest.contains("confined"));
 }
 
 #[test]

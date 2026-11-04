@@ -43,18 +43,6 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-      - name: agent-bridle stub guard
-        # PIPELINE PARITY: mirrors the pre-push hook. gila replicates newt's
-        # [patch.crates-io] block (newt-tui transitively needs agent-bridle);
-        # the patch MUST stay on the publishable `feat/stub-shell` branch. The
-        # real brush shell (`main`) reintroduces the brush git dep and is a
-        # dev-only override that must never reach a pushed branch.
-        run: |
-          if grep -Eq 'agent-bridle[a-z-]*[[:space:]]*= [{] git = "[^"]*agent-bridle", branch = "main"' Cargo.toml; then
-            echo "::error::[patch.crates-io] points agent-bridle at 'main' (real brush shell) — switch it back to feat/stub-shell before pushing."
-            exit 1
-          fi
-          echo "shell guard OK: agent-bridle patch is on the publishable stub branch."
       - name: fmt check
         if: always()
         run: cargo fmt --all -- --check

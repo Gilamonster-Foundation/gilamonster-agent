@@ -12,7 +12,7 @@ default-run = "gila"
 license = "Apache-2.0"
 description = "The Gilamonster agent matrix — inherits newt-agent's chat + agentic-coding airframe and extends it into a Hermes/Thoon-style multi-agent matrix."
 repository = "https://github.com/Gilamonster-Foundation/gilamonster-agent"
-keywords = ["gilamonster", "agent", "matrix", "ocap", "coding-agent"]
+keywords = ["gilamonster", "agent", "matrix", "coding-agent"]
 
 # Cargo.lock is committed: this crate ships the `gila` and `gila-headless`
 # binaries, so a reproducible resolve is the point. It also holds tinyvec at
@@ -34,10 +34,6 @@ path = "src/main.rs"
 name = "gila-headless"
 path = "src/bin/gila-headless.rs"
 
-[[bin]]
-name = "newt-net-guard"
-path = "src/bin/newt-net-guard.rs"
-
 [dependencies]
 # --- Inherited from newt-agent (the "airframe") -------------------------------
 # gila is a PRIVATE binary, not a published library — so it consumes newt over a
@@ -46,8 +42,8 @@ path = "src/bin/newt-net-guard.rs"
 # shape, not a stopgap. For LOCAL dev a git-ignored `.cargo/config.toml`
 # overlays these onto the local newt checkout (see .cargo/config.toml.template);
 # CI uses the pinned `rev` below. The rev is newt-agent 0.8.0-line main
-# (2026-08-13); agent-bridle resolves from crates.io (0.7.15, published) so
-# the old stub-shell `[patch.crates-io]` mirror is gone on both sides.
+# (2026-08-13). gila has no direct agent-bridle dependency: it is ambient
+# everywhere and newt-core carries its own bridle version.
 #
 # newt-tui pulls the lean chat + agentic-coding TUI (and, transitively,
 # newt-core / newt-inference / newt-tools / newt-skills / newt-mcp-client).
@@ -80,14 +76,6 @@ sha2 = "0.10"
 # The `~/.gila/capabilities.toml` selection manifest deserializes via serde
 # derive (see `src/manifest.rs`); `toml` (below) is the format.
 serde = { version = "1", features = ["derive"] }
-# The object-capability leash. `gila capabilities run` spawns a manifest-confined
-# capability through `agent_bridle_core::spawn_confined_subprocess` (Landlock +
-# env-scrub, agent-bridle#56). Published on crates.io; pinned to the same 0.7.x
-# line newt-core resolves (0.7.15) so the two halves agree on the gate types.
-# `async-trait` is needed only to implement the trivial `Tool` that mints the
-# spawn's `ToolContext` through the gate.
-agent-bridle-core = "0.7"
-async-trait = "0.1"
 # `gila hotseat` serializes the composed session config (the operator's config
 # overlaid with the read-only-triage preset, the hotseat mode, and the modulex
 # stdio MCP entry) to a per-session file and points $NEWT_CONFIG at it. newt's
