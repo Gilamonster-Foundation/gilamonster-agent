@@ -12,49 +12,58 @@ cockpit milestones continue inside 0.4.x.
 
 The first release where `Cargo.toml`, the tag, and `gila --version` agree —
 v0.1.0–v0.3.3 were tagged with the manifest still reading 0.1.0. It is also
-the first GitHub Release of the repo.
+the first GitHub Release of the repo. **Requires Rust 1.91** to build.
 
 - **Ambient everywhere; OCAP removed** (PR #90). Every `gila` surface runs
   under the operator's own host filesystem, network, and command authority on
   the native shell, frozen once at startup. The `--ocap` opt-in, the bundled
   `newt-net-guard`, the direct agent-bridle dependency, and the confined
   spawn in `gila cap run` are gone; the manifest's `confined` key is ignored.
-  Observer panes (follow, hotseat, companion) stay read-only as a product
-  posture — a zero tool budget — not as confinement. The shadow flight
-  recorder stays armed: observability is not policy. Newt remains the
-  confined airframe; Gila trades confinement for pragmatism.
+  `follow` and the companion pane stay observers by product posture — a zero
+  tool budget — not by confinement; `hotseat` is a tool-capable triage mode
+  with a bounded call budget. The shadow flight recorder stays armed:
+  observability is not policy. Newt remains the confined airframe; Gila
+  trades confinement for pragmatism.
 - **newt airframe re-pinned to v0.8.6** (PR #93): the four `newt-*` git deps
-  move from `be5647e5` to `a7f7d598`, 1,462 commits forward, with newt's
-  vendored agent-bridle 0.8.0-rc.6 restated as a `[patch.crates-io]`. MSRV
-  1.88 → 1.91. Adopted drift: notice-reporting `Config::resolve`/`load`,
-  the OAuth fields on `McpServerEntry`, `ErrorClass::ContextExceeded`, and
-  newt's 5xx retry policy.
+  move from `be5647e5` to `a7f7d598` with newt's vendored agent-bridle
+  0.8.0-rc.6 restated as a `[patch.crates-io]`. MSRV 1.88 → 1.91. For users:
+  config migration notices now print on stderr, a context-overflow turn
+  reports as `context_exceeded` in the solve contract, and transient backend
+  errors are retried with backoff.
+- **Hybrid CLI: Rust-native where it pays, Python where it exists** (PR #70,
+  #71, #72, #73). `git commit`/`git tend` run on libgit2 in-process; the
+  utility and worktree commands are Rust-native; nine command groups
+  (confluence, jira, slack, mcp, assistant, doc, calendar, review, pagerduty)
+  run in-process through a pyo3 bridge to the installed Python gilabot (set
+  `PYO3_PYTHON` at build time); everything else delegates to the Python CLI
+  with a one-line stderr notice. Routing per command: `docs/COMMANDS.md`;
+  switching from the Python `gila`: `docs/MIGRATION.md`.
+- **Exact build identity** (PR #75): `gila --version` and `gila version`
+  append Gila's 12-character Git commit to the package version, matching
+  newt's `0.4.0 (<commit>[-dirty])` provenance shape.
+- **PATH-safe Python fallback** (PR #75): installing Rust Gila ahead of a
+  pyenv shim no longer permits a Rust → shim → Rust delegation loop. Each hop
+  carries a recursion guard and continues to the real Python gilabot later on
+  PATH; `GILABOT_BIN` selects an exact fallback when older Rust builds coexist.
 - **Reproducible builds:** `Cargo.lock` is committed (PR #87).
-- **Ambient-first launch contract** (PR #75): bare `gila` and `gila code`
-  start with full authority and native host-shell dispatch; this release
-  extends that to every surface (above).
-- **Exact build identity:** `gila --version` and `gila version` append Gila's
-  12-character Git commit to the package version, matching newt's
-  `0.4.0 (<commit>[-dirty])` provenance shape.
-- **PATH-safe Python fallback:** installing Rust Gila ahead of a pyenv shim no
-  longer permits a Rust → shim → Rust delegation loop. Each hop carries a
-  recursion guard and continues to the real Python gilabot later on PATH;
-  `GILABOT_BIN` selects an exact fallback when older Rust builds coexist.
-- **Upstream drift adopted** (PR #63, #85): `McpServerEntry` trust/enabled
-  fields and the typed MCP admission witness; `NamedPermissionPreset.fs_read`;
-  `BackendConfig.model`/`kind` are `Option` — follow/cowork fail loud on an
-  unset model instead of probing.
-- **Turn-contract fold** (PR #63): newt reports an errored turn as
-  `Completed` carrying `outcome.error`; cowork folds that into the sticky
-  `Failed` the cockpit shows; follow treats it as "no comment".
+- **Backend config is explicit** (PR #63, #85): an unset model or backend
+  kind fails loud in `follow`/`cowork` instead of probing, and a backend
+  error mid-turn shows as a sticky `Failed` in the cockpit instead of a
+  successful turn; `follow` treats it as "no comment".
 - **`gila chain <question…>`** (PR #64, landed via #66): a langchain-rust
-  `LLMChain` over the same newt backend seam follow/cowork use. The
-  dependency is confined to `src/chain.rs` as an exploration surface.
+  `LLMChain` over the same newt backend seam `follow`/`cowork` use. An
+  exploration surface confined to one module.
+- **Cockpit and FleetView previews** (PR #59, #30, #60): a runnable
+  tmux-semantics multiplexer scaffold (`gila cockpit`), FleetView navigation
+  and drill-in over mock data (`gila matrix --mock`), and a `gila scrybe`
+  configuration-validation scaffold. Previews only: no live pane drivers and
+  no live scrybe connection yet.
 - **Terminal-Bench path** (PR #77, #78): a native `gila solve` headless
-  evaluator and Harbor 0.20 adapter; the scoreboard moved to
-  `docs/terminal-bench.md` (PR #88).
-- **CI honesty repairs** (PR #65): the coverage lcov upload is non-fatal and
-  the scrybe parent-dir test uses `env::temp_dir()`.
+  evaluator and Harbor 0.20 adapter that honors each task container's
+  working directory; the scoreboard moved to `docs/terminal-bench.md`
+  (PR #88).
+- **CI repairs** (PR #65): the coverage upload is non-fatal and the Windows
+  job passes again.
 
 ## v0.3.3 — Layout (2026-07-11)
 
