@@ -31,8 +31,9 @@ the first GitHub Release of the repo. **Requires Rust 1.91** to build.
   reports as `context_exceeded` in the solve contract, and transient backend
   errors are retried with backoff.
 - **Hybrid CLI: Rust-native where it pays, Python where it exists** (PR #70,
-  #71, #72, #73). `git commit`/`git tend` run on libgit2 in-process; the
-  utility and worktree commands are Rust-native; nine command groups
+  #71, #72, #73). `git commit` writes the commit through libgit2 in-process;
+  `git tend` is Rust orchestration over the Git CLI; the utility and
+  worktree commands are Rust-native; nine command groups
   (confluence, jira, slack, mcp, assistant, doc, calendar, review, pagerduty)
   run in-process through a pyo3 bridge to the installed Python gilabot (set
   `PYO3_PYTHON` at build time); everything else delegates to the Python CLI
@@ -46,10 +47,10 @@ the first GitHub Release of the repo. **Requires Rust 1.91** to build.
   carries a recursion guard and continues to the real Python gilabot later on
   PATH; `GILABOT_BIN` selects an exact fallback when older Rust builds coexist.
 - **Reproducible builds:** `Cargo.lock` is committed (PR #87).
-- **Backend config is explicit** (PR #63, #85): an unset model or backend
-  kind fails loud in `follow`/`cowork` instead of probing, and a backend
-  error mid-turn shows as a sticky `Failed` in the cockpit instead of a
-  successful turn; `follow` treats it as "no comment".
+- **Backend config is explicit** (PR #63, #85): an unset model fails in
+  `follow`/`cowork` instead of probing (an omitted backend kind defaults to
+  OpenAI), and a backend error mid-turn shows as a sticky `Failed` in the
+  cockpit instead of a successful turn; `follow` treats it as "no comment".
 - **`gila chain <question…>`** (PR #64, landed via #66): a langchain-rust
   `LLMChain` over the same newt backend seam `follow`/`cowork` use. An
   exploration surface confined to one module.
