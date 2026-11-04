@@ -1,5 +1,4 @@
 /target
-Cargo.lock
 
 # Coverage artifact emitted by `just cov-ci` / the CI coverage job.
 /lcov.info
