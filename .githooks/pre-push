@@ -8,6 +8,11 @@
 # Install: `just install-hooks` (or `git config core.hooksPath .githooks`)
 #
 # PIPELINE PARITY: this hook mirrors .github/workflows/ci.yml.
+#   - SCOPE (Craft Register CRAFT-14 v3.0): the hook is a pre-flight on the
+#     changed scope, CI is the full gate. A push with no code change — tag
+#     updates, deletions, or only top-level *.md / docs/**/*.md files —
+#     skips the gates below with a notice; CI's configured branch-push and
+#     PR jobs still run.
 #   - `just check` matches the lint + test jobs (fmt + clippy + cargo test)
 #   - `just cov-ci` matches the coverage job (cargo llvm-cov with the 80% floor)
 # When editing this hook, update the workflow to match, and vice-versa.
@@ -26,10 +31,60 @@
 
 set -e
 
-# Drain the ref list git writes to the hook's stdin so the gate commands below
-# don't inherit it, and git never takes SIGPIPE writing to a hook that exited
-# without reading.
-cat >/dev/null
+# Read the ref list git writes to the hook's stdin (reading it all also keeps
+# git from taking SIGPIPE) and decide whether this push changes any code.
+# CRAFT-14: a tag-only, delete-only, or docs-only push skips the gates; CI is
+# the full gate on the configured branch pushes and on every PR to main.
+#
+# Fail-safe direction: every uncertain case runs the gates. A ref counts as
+# "no code" only when it is a deletion, updates a tag DESTINATION, or when
+# `git diff` succeeds and every changed path (renames split into their old
+# and new names) is a top-level *.md or a *.md under docs/. Nothing else
+# under docs/ qualifies: docs/logos/*.txt are runtime assets.
+ZERO=0000000000000000000000000000000000000000
+code_change=0
+saw_ref=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+    [ -n "$local_sha" ] || continue
+    saw_ref=1
+    [ "$local_sha" = "$ZERO" ] && continue              # deleting a remote ref
+    case "$remote_ref" in refs/tags/*) continue ;; esac  # updating a tag
+    if ! git cat-file -e "$local_sha^{commit}" 2>/dev/null; then
+        code_change=1
+        continue
+    fi
+    if [ "$remote_sha" = "$ZERO" ]; then
+        # New branch: measure against where it left main; unknown → run the gates.
+        base=$(git merge-base "$local_sha" origin/main 2>/dev/null || true)
+    else
+        base="$remote_sha"
+    fi
+    if [ -z "$base" ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+        code_change=1
+        continue
+    fi
+    # Full path list first (status checked), then classify — never a pipe
+    # into grep, whose early exit could hide a diff failure.
+    if ! changed=$(git diff --name-only --no-renames "$base" "$local_sha" 2>/dev/null); then
+        code_change=1
+        continue
+    fi
+    while IFS= read -r path; do
+        [ -n "$path" ] || continue
+        case "$path" in
+            docs/*.md) ;;                      # prose under docs/
+            */*) code_change=1 ;;              # any other nested path is code
+            *.md) ;;                           # top-level README/CHANGELOG/ROADMAP
+            *) code_change=1 ;;
+        esac
+    done <<EOF_PATHS
+$changed
+EOF_PATHS
+done
+if [ "$saw_ref" = 1 ] && [ "$code_change" = 0 ]; then
+    echo "[pre-push] no code change in this push (tag, delete, or docs-only) — gates skipped; CI still runs its configured jobs"
+    exit 0
+fi
 
 cd "$(git rev-parse --show-toplevel)"
 
