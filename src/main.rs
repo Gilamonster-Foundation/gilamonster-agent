@@ -778,7 +778,7 @@ fn run_cockpit(path: Option<std::path::PathBuf>) -> anyhow::Result<()> {
     use ratatui::Terminal;
 
     // --- resolve the operator's backend (same shape as run_cowork) -----------
-    let cfg = newt_core::Config::resolve()?;
+    let cfg = gilamonster_agent::resolve_config()?;
     let backend = cfg.backends.first().ok_or_else(|| {
         anyhow::anyhow!("no inference backend configured — set one up in newt's config first")
     })?;

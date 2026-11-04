@@ -16,10 +16,12 @@
 //! | [`PtyPaneBackend`] | the human's `$SHELL` on a pty | none |
 //! | [`FailedPaneBackend`] | an error message | none, inert text |
 //!
-//! A failed pane is a backend, not an error return. A pane whose driver or
-//! shell dies must not take the cockpit down with it, and must not silently
+//! A failed pane is a backend, not an error return. A shell pane whose program
+//! cannot spawn must not take the cockpit down with it, and must not silently
 //! become an empty pane. [`FailedPaneBackend`] keeps map and model in lockstep,
-//! one backend per live pane, while showing why that pane is dead.
+//! one backend per live pane, while showing why that pane is dead. A chat pane
+//! always seats (minting is infallible); an inference failure surfaces as the
+//! pane's sticky `failed` turn status instead.
 
 use std::sync::{Arc, Mutex};
 
@@ -125,28 +127,22 @@ pub struct ChatPaneBackend {
 
 impl ChatPaneBackend {
     /// Mint a chat pane clamped to `kind` against the operator's `profile`.
-    ///
-    /// # Errors
-    /// Propagates [`AuthorityError`](crate::authority::AuthorityError) when the
-    /// caveat lattice would not actually bind (`NEWT_DISABLE_OCAP`). Callers
-    /// surface the failure as a [`FailedPaneBackend`] rather than minting an
-    /// unclamped driver.
-    pub fn new(
-        kind: PaneKind,
-        profile: &BackendProfile,
-    ) -> Result<Self, authority::AuthorityError> {
+    /// Infallible: gila is ambient everywhere, so there is no OCAP refusal to
+    /// report, and the `kind` clamp is a product posture.
+    #[must_use]
+    pub fn new(kind: PaneKind, profile: &BackendProfile) -> Self {
         let mut config = authority::driver_config(
             kind,
             &profile.endpoint,
             &profile.model,
             profile.kind,
             &profile.workspace,
-        )?;
+        );
         // The key rides the config, not the caveats: it is a backend credential,
         // never an authority grant. `driver_config` has already stamped the clamp.
         config.api_key = profile.api_key.clone();
         let caveats = config.caveats.clone();
-        Ok(Self {
+        Self {
             kind,
             caveats,
             driver: TurnDriver::with_transcript(
@@ -155,7 +151,7 @@ impl ChatPaneBackend {
             ),
             input: String::new(),
             status: TurnState::Idle,
-        })
+        }
     }
 
     /// The pane's authority posture.
@@ -424,7 +420,7 @@ mod tests {
     }
 
     fn chat() -> ChatPaneBackend {
-        ChatPaneBackend::new(PaneKind::Companion, &profile("http://localhost:1".into())).unwrap()
+        ChatPaneBackend::new(PaneKind::Companion, &profile("http://localhost:1".into()))
     }
 
     // --- chat panes ---------------------------------------------------------
@@ -436,11 +432,22 @@ mod tests {
         // is no constructor here that takes a config, so no other clamp is
         // reachable.
         for kind in [PaneKind::Companion, PaneKind::Reader, PaneKind::Workbench] {
-            let b = ChatPaneBackend::new(kind, &profile("http://localhost:1".into()))
-                .expect("ocap enabled in the test env");
+            let b = ChatPaneBackend::new(kind, &profile("http://localhost:1".into()));
             assert_eq!(b.kind(), kind);
             assert_eq!(*b.caveats(), authority::caveats_for(kind), "{kind:?}");
         }
+    }
+
+    /// Regression (#90): gila is ambient everywhere, so a chat pane must seat
+    /// with `NEWT_DISABLE_OCAP` set. The OCAP-era constructor refused here
+    /// (`AuthorityError::OcapDisabled`) and every cockpit chat pane came up
+    /// as a failed pane.
+    #[test]
+    fn a_chat_pane_builds_under_the_ambient_posture() {
+        std::env::set_var("NEWT_DISABLE_OCAP", "1");
+        let b: ChatPaneBackend =
+            ChatPaneBackend::new(PaneKind::Companion, &profile("http://localhost:1".into()));
+        assert_eq!(*b.caveats(), authority::caveats_for(PaneKind::Companion));
     }
 
     #[test]
@@ -520,7 +527,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let mut b = ChatPaneBackend::new(PaneKind::Companion, &profile(server.uri())).unwrap();
+        let mut b = ChatPaneBackend::new(PaneKind::Companion, &profile(server.uri()));
         for c in "hi".chars() {
             b.handle_key(KeyCode::Char(c), KeyModifiers::NONE);
         }
@@ -548,6 +555,11 @@ mod tests {
         assert!(!b.is_closed());
     }
 
+    /// A 404, not a 500: newt v0.8.6 retries every 5xx against a local
+    /// endpoint for ~90 s (`RetryPolicy::for_local_inference`), far past this
+    /// test's bound, so a 500 left the pane `Running` and the test red. A 404
+    /// is fatal on the first attempt, the same choice newt's own
+    /// `http_error_status_classifies_as_model_error` makes.
     #[tokio::test(flavor = "multi_thread")]
     async fn tick_reports_failed_when_the_backend_errors() {
         use wiremock::matchers::{method, path};
@@ -556,11 +568,11 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/chat"))
-            .respond_with(ResponseTemplate::new(500))
+            .respond_with(ResponseTemplate::new(404).set_body_string("no such model"))
             .mount(&server)
             .await;
 
-        let mut b = ChatPaneBackend::new(PaneKind::Companion, &profile(server.uri())).unwrap();
+        let mut b = ChatPaneBackend::new(PaneKind::Companion, &profile(server.uri()));
         b.handle_key(KeyCode::Char('x'), KeyModifiers::NONE);
         b.handle_key(KeyCode::Enter, KeyModifiers::NONE);
 

@@ -10,10 +10,9 @@
 //! unique, retired with its pane, never reused. An [`Effect`] is then a
 //! one-line insert or remove, and a stale token simply misses.
 //!
-//! A pane whose driver or shell cannot be created gets a
-//! [`FailedPaneBackend`], so the map stays in lockstep with the model and the
-//! operator sees the reason rather than losing every other pane to an early
-//! return.
+//! A shell pane whose program cannot spawn gets a [`FailedPaneBackend`], so
+//! the map stays in lockstep with the model and the operator sees the reason
+//! rather than losing every other pane to an early return.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -228,13 +227,9 @@ impl CockpitApp {
         effect
     }
 
-    /// Mint a chat pane clamped to `kind`, or an inert failed pane carrying the
-    /// authority refusal. Never mints an unclamped driver.
+    /// Mint a chat pane clamped to `kind`. Never mints an unclamped driver.
     fn make_chat(&self, kind: PaneKind) -> Box<dyn PaneBackend> {
-        match ChatPaneBackend::new(kind, &self.profile) {
-            Ok(b) => Box::new(b),
-            Err(e) => Box::new(FailedPaneBackend::new(e.to_string())),
-        }
+        Box::new(ChatPaneBackend::new(kind, &self.profile))
     }
 
     /// Spawn a shell pane, or an inert failed pane carrying the spawn error.
