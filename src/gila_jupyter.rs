@@ -680,7 +680,13 @@ fn copy_safe_child_environment(command: &mut Command) {
 // ---- Registry Store (B1a) -----------------------------------------------
 
 const REGISTRY_SCHEMA_VERSION: u32 = 1;
+/// Default bound on how long one CLI process waits for `servers.lock`. Kept
+/// short so a wedged holder surfaces as an error instead of a hang.
 const REGISTRY_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
+/// Operator override for [`REGISTRY_LOCK_TIMEOUT`], in whole seconds. Read once
+/// when the registry is opened; for hosts whose fsync can stall for seconds
+/// while several `gila jupyter` processes queue on the lock.
+const REGISTRY_LOCK_TIMEOUT_ENV: &str = "GILA_JUPYTER_REGISTRY_LOCK_TIMEOUT_SECS";
 const REGISTRY_LOCK_RETRY: Duration = Duration::from_millis(25);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -837,6 +843,7 @@ pub struct RegistryFile {
 #[derive(Debug)]
 pub struct RegistryStore {
     root: PathBuf,
+    lock_timeout: Duration,
 }
 
 #[derive(Debug)]
@@ -1169,9 +1176,41 @@ fn atomic_write_registry(path: &Path, registry: &RegistryFile) -> Result<()> {
     atomic_write_registry_with(path, registry, |file, encoded| file.write_all(encoded))
 }
 
+/// Largest accepted wait-bound override: a day, so a deadline built from it
+/// can never overflow an `Instant`.
+const MAX_SECONDS_OVERRIDE: u64 = 86_400;
+
+/// `default`, unless the environment variable `var` (whose value is `value`)
+/// holds a whole number of seconds from 1 to [`MAX_SECONDS_OVERRIDE`].
+fn seconds_override(
+    var: &str,
+    value: Option<&std::ffi::OsStr>,
+    default: Duration,
+) -> Result<Duration> {
+    let Some(value) = value else {
+        return Ok(default);
+    };
+    match value.to_str().and_then(|text| text.parse::<u64>().ok()) {
+        Some(seconds) if (1..=MAX_SECONDS_OVERRIDE).contains(&seconds) => {
+            Ok(Duration::from_secs(seconds))
+        }
+        _ => anyhow::bail!(
+            "{var} must be a whole number of seconds from 1 to {MAX_SECONDS_OVERRIDE}"
+        ),
+    }
+}
+
 impl RegistryStore {
     pub fn new() -> Result<Self> {
-        Self::from_root(resolve_registry_root()?)
+        let lock_timeout = seconds_override(
+            REGISTRY_LOCK_TIMEOUT_ENV,
+            std::env::var_os(REGISTRY_LOCK_TIMEOUT_ENV).as_deref(),
+            REGISTRY_LOCK_TIMEOUT,
+        )?;
+        Ok(Self {
+            lock_timeout,
+            ..Self::from_root(resolve_registry_root()?)?
+        })
     }
 
     #[cfg(test)]
@@ -1181,7 +1220,10 @@ impl RegistryStore {
 
     fn from_root(root: PathBuf) -> Result<Self> {
         initialize_registry_root(&root)?;
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            lock_timeout: REGISTRY_LOCK_TIMEOUT,
+        })
     }
 
     pub fn root_path(&self) -> &Path {
@@ -1201,7 +1243,7 @@ impl RegistryStore {
     }
 
     pub fn begin_transaction(&self) -> Result<RegistryTransaction> {
-        self.begin_transaction_with_timeout(REGISTRY_LOCK_TIMEOUT)
+        self.begin_transaction_with_timeout(self.lock_timeout)
     }
 
     fn begin_transaction_with_timeout(&self, timeout: Duration) -> Result<RegistryTransaction> {
@@ -1696,6 +1738,47 @@ mod registry_tests {
             fs::read(store.registry_path()).expect("read preserved registry"),
             before
         );
+    }
+
+    #[test]
+    fn seconds_override_defaults_without_a_value() {
+        assert_eq!(
+            seconds_override(REGISTRY_LOCK_TIMEOUT_ENV, None, REGISTRY_LOCK_TIMEOUT).unwrap(),
+            REGISTRY_LOCK_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn seconds_override_accepts_whole_seconds_up_to_a_day() {
+        for (text, seconds) in [("1", 1), ("120", 120), ("86400", 86_400)] {
+            let value = std::ffi::OsString::from(text);
+            assert_eq!(
+                seconds_override(
+                    STARTUP_TIMEOUT_ENV,
+                    Some(value.as_os_str()),
+                    STARTUP_TIMEOUT
+                )
+                .unwrap(),
+                Duration::from_secs(seconds)
+            );
+        }
+    }
+
+    #[test]
+    fn seconds_override_rejects_zero_overlong_and_non_integers() {
+        for bad in ["", "0", "-1", "1.5", " 5", "five", "86401"] {
+            let value = std::ffi::OsString::from(bad);
+            let error = seconds_override(
+                REGISTRY_LOCK_TIMEOUT_ENV,
+                Some(value.as_os_str()),
+                REGISTRY_LOCK_TIMEOUT,
+            )
+            .expect_err("invalid override must be rejected");
+            assert!(
+                error.to_string().contains(REGISTRY_LOCK_TIMEOUT_ENV),
+                "error must name the variable for {bad:?}: {error}"
+            );
+        }
     }
 
     #[test]
@@ -5721,7 +5804,12 @@ fn discover_runtime_endpoint(
     ))
 }
 
+/// Default bound on how long `start` waits for the spawned server to answer an
+/// authenticated readiness probe.
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
+/// Operator override for [`STARTUP_TIMEOUT`], in whole seconds, read once per
+/// `start`; for hosts too loaded to bring Jupyter up inside the default.
+const STARTUP_TIMEOUT_ENV: &str = "GILA_JUPYTER_STARTUP_TIMEOUT_SECS";
 const STARTUP_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const STARTUP_HTTP_TIMEOUT: Duration = Duration::from_millis(500);
 const LIFECYCLE_HTTP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -6000,13 +6088,8 @@ fn decode_bounded_lifecycle_json<T>(
 where
     T: serde::de::DeserializeOwned,
 {
-    if response
-        .content_length()
-        .is_some_and(|length| length > LIFECYCLE_JSON_BODY_CAP as u64)
-    {
-        return Err(format!(
-            "{description} response exceeds the {LIFECYCLE_JSON_BODY_CAP}-byte lifecycle body limit"
-        ));
+    if declared_length_exceeds_lifecycle_cap(&response) {
+        return Err(lifecycle_body_cap_error(description));
     }
     let mut body = Vec::with_capacity(
         response
@@ -6021,9 +6104,7 @@ where
         .read_to_end(&mut body)
         .map_err(|error| format!("failed to read {description} response: {error}"))?;
     if body.len() > LIFECYCLE_JSON_BODY_CAP {
-        return Err(format!(
-            "{description} response exceeds the {LIFECYCLE_JSON_BODY_CAP}-byte lifecycle body limit"
-        ));
+        return Err(lifecycle_body_cap_error(description));
     }
     serde_json::from_slice(&body).map_err(|error| {
         format!(
@@ -6082,31 +6163,68 @@ fn failed_start_with_artifact_rollback(
     )
 }
 
+fn lifecycle_body_cap_error(description: &str) -> String {
+    format!(
+        "{description} response exceeds the {LIFECYCLE_JSON_BODY_CAP}-byte lifecycle body limit"
+    )
+}
+
+fn declared_length_exceeds_lifecycle_cap(response: &reqwest::blocking::Response) -> bool {
+    response
+        .content_length()
+        .is_some_and(|length| length > LIFECYCLE_JSON_BODY_CAP as u64)
+}
+
+/// Why one startup readiness probe did not find the server ready.
+#[derive(Debug)]
+enum ReadinessMiss {
+    /// Not ready yet (refused, timed out, non-2xx, unreadable body): probe
+    /// again until the startup deadline.
+    Retry(String),
+    /// The authenticated endpoint answered 2xx with a declared body over the
+    /// lifecycle cap. Probing again gets the same answer, so startup rolls back
+    /// now instead of spending the whole deadline and reporting whichever probe
+    /// happened to be last.
+    Reject(String),
+}
+
 fn startup_endpoint_ready(
     client: &reqwest::blocking::Client,
     endpoint: &JupyterEndpoint,
-) -> std::result::Result<(), String> {
-    let base_url = url::Url::parse(&endpoint.url)
-        .map_err(|error| format!("validated startup URL could not be reopened: {error}"))?;
+) -> std::result::Result<(), ReadinessMiss> {
+    let base_url = url::Url::parse(&endpoint.url).map_err(|error| {
+        ReadinessMiss::Retry(format!(
+            "validated startup URL could not be reopened: {error}"
+        ))
+    })?;
     let kernels_url = api_url(&base_url, "api/kernels");
+    let authorization = authorization_header(&endpoint.token)
+        .map_err(|error| ReadinessMiss::Retry(error.to_string()))?;
     match client
         .get(kernels_url)
-        .header(
-            "Authorization",
-            authorization_header(&endpoint.token).map_err(|error| error.to_string())?,
-        )
+        .header("Authorization", authorization)
         .send()
     {
         Ok(response) if response.status().is_success() => {
+            if declared_length_exceeds_lifecycle_cap(&response) {
+                return Err(ReadinessMiss::Reject(lifecycle_body_cap_error(
+                    "readiness endpoint",
+                )));
+            }
             decode_bounded_lifecycle_json::<Vec<KernelInfo>>(response, "readiness endpoint")
                 .map(|_| ())
+                .map_err(ReadinessMiss::Retry)
         }
-        Ok(response) => Err(format!(
+        Ok(response) => Err(ReadinessMiss::Retry(format!(
             "readiness endpoint returned HTTP {}",
             response.status()
+        ))),
+        Err(error) if error.is_timeout() => Err(ReadinessMiss::Retry(
+            "readiness request timed out".to_string(),
         )),
-        Err(error) if error.is_timeout() => Err("readiness request timed out".to_string()),
-        Err(error) => Err(format!("readiness connection failed: {error}")),
+        Err(error) => Err(ReadinessMiss::Retry(format!(
+            "readiness connection failed: {error}"
+        ))),
     }
 }
 
@@ -6209,6 +6327,11 @@ pub fn start_server(params: JupyterServerParams) -> Result<JupyterServerResult> 
         .flatten(),
     );
 
+    let startup_timeout = seconds_override(
+        STARTUP_TIMEOUT_ENV,
+        std::env::var_os(STARTUP_TIMEOUT_ENV).as_deref(),
+        STARTUP_TIMEOUT,
+    )?;
     // Validate the current on-disk schema/corruption state before creating a
     // process. This read-only snapshot releases its lock immediately.
     let store = RegistryStore::new().context("failed to initialize Jupyter registry")?;
@@ -6294,7 +6417,7 @@ pub fn start_server(params: JupyterServerParams) -> Result<JupyterServerResult> 
     let pid = guard.id();
     let mut scanner = IncrementalLogScanner::new(read_handle);
     let mut last_probe_error: Option<String> = None;
-    let deadline = Instant::now() + STARTUP_TIMEOUT;
+    let deadline = Instant::now() + startup_timeout;
 
     let (endpoint, runtime_pid) = loop {
         match scanner.poll_lines() {
@@ -6320,7 +6443,19 @@ pub fn start_server(params: JupyterServerParams) -> Result<JupyterServerResult> 
                     Ok(()) => {
                         break (candidate, runtime_pid);
                     }
-                    Err(error) => last_probe_error = Some(error),
+                    Err(ReadinessMiss::Retry(error)) => last_probe_error = Some(error),
+                    Err(ReadinessMiss::Reject(error)) => {
+                        let diagnostic = redacted_log_tail(&scanner, &diagnostic_redactor);
+                        return Ok(failed_start_with_artifact_rollback(
+                            guard,
+                            &artifacts,
+                            format!(
+                                "rejected Jupyter readiness response: {error}; durable log tail:\n{diagnostic}"
+                            ),
+                            pid,
+                            log_path,
+                        ));
+                    }
                 }
             }
             Ok(RuntimeDiscovery::Pending) => {}
@@ -6376,7 +6511,7 @@ pub fn start_server(params: JupyterServerParams) -> Result<JupyterServerResult> 
                 &artifacts,
                 format!(
                     "Jupyter did not become ready within {} seconds ({probe}); durable log tail:\n{diagnostic}",
-                    STARTUP_TIMEOUT.as_secs()
+                    startup_timeout.as_secs()
                 ),
                 pid,
                 log_path,
