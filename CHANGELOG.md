@@ -8,16 +8,31 @@ their historical tags **`v0.1.0`** ≡ v0.3.1 and **`v0.2.0`** ≡ v0.3.2). As o
 airframe (see the v0.4.0 entry and ROADMAP's renumbering note); the unshipped
 cockpit milestones continue inside 0.4.x.
 
-## v0.4.0 — Re-pinned airframe + the LangChain surface (unreleased)
+## v0.4.0 — Ambient airframe on newt v0.8.6 (unreleased)
 
 The first release where `Cargo.toml`, the tag, and `gila --version` agree —
-v0.1.0–v0.3.3 were tagged with the manifest still reading 0.1.0.
+v0.1.0–v0.3.3 were tagged with the manifest still reading 0.1.0. It is also
+the first GitHub Release of the repo.
 
-- **Ambient-first launch contract:** bare `gila` and `gila code` start with full
-  filesystem/network/exec authority and native host-shell dispatch. Global
-  `--ocap` restores newt's configured confinement; cowork, follow, hotseat,
-  cockpit/companion, utility, and delegated commands remain confined. Ambient
-  actions retain newt's append-only shadow-OCAP recorder.
+- **Ambient everywhere; OCAP removed** (PR #90). Every `gila` surface runs
+  under the operator's own host filesystem, network, and command authority on
+  the native shell, frozen once at startup. The `--ocap` opt-in, the bundled
+  `newt-net-guard`, the direct agent-bridle dependency, and the confined
+  spawn in `gila cap run` are gone; the manifest's `confined` key is ignored.
+  Observer panes (follow, hotseat, companion) stay read-only as a product
+  posture — a zero tool budget — not as confinement. The shadow flight
+  recorder stays armed: observability is not policy. Newt remains the
+  confined airframe; Gila trades confinement for pragmatism.
+- **newt airframe re-pinned to v0.8.6** (PR #91): the four `newt-*` git deps
+  move from `be5647e5` to `a7f7d598`, 1,462 commits forward, with newt's
+  vendored agent-bridle 0.8.0-rc.6 restated as a `[patch.crates-io]`. MSRV
+  1.88 → 1.91. Adopted drift: notice-reporting `Config::resolve`/`load`,
+  the OAuth fields on `McpServerEntry`, `ErrorClass::ContextExceeded`, and
+  newt's 5xx retry policy.
+- **Reproducible builds:** `Cargo.lock` is committed (PR #87).
+- **Ambient-first launch contract** (PR #75): bare `gila` and `gila code`
+  start with full authority and native host-shell dispatch; this release
+  extends that to every surface (above).
 - **Exact build identity:** `gila --version` and `gila version` append Gila's
   12-character Git commit to the package version, matching newt's
   `0.4.0 (<commit>[-dirty])` provenance shape.
@@ -25,30 +40,21 @@ v0.1.0–v0.3.3 were tagged with the manifest still reading 0.1.0.
   longer permits a Rust → shim → Rust delegation loop. Each hop carries a
   recursion guard and continues to the real Python gilabot later on PATH;
   `GILABOT_BIN` selects an exact fallback when older Rust builds coexist.
-- **newt airframe re-pinned** to the 0.8.0-line main (`8cde29f`, 2026-08-13).
-  The four direct newt dependencies move atomically; Gila also adopts newt's
-  typed MCP admission witness and frozen startup-authority contract.
-- **Upstream drift adopted** (PR #63): `McpServerEntry` trust/enabled fields;
-  `NamedPermissionPreset.fs_read`; `gila capabilities check` spawns under the
-  operator's real confinement leash (`Config::mcp_probe_caveats`, never
-  `top()`); `BackendConfig.model`/`kind` are `Option` — follow/cowork fail
-  loud on an unset model instead of probing.
-- **Turn-contract fold** (PR #63): newt now reports an errored turn as
-  `Completed` carrying `outcome.error` (the partial trajectory survives).
-  cowork folds that into the sticky `Failed` the cockpit shows; follow treats
-  it as "no comment". Previously a backend 500 rendered as a successful turn.
+- **Upstream drift adopted** (PR #63, #85): `McpServerEntry` trust/enabled
+  fields and the typed MCP admission witness; `NamedPermissionPreset.fs_read`;
+  `BackendConfig.model`/`kind` are `Option` — follow/cowork fail loud on an
+  unset model instead of probing.
+- **Turn-contract fold** (PR #63): newt reports an errored turn as
+  `Completed` carrying `outcome.error`; cowork folds that into the sticky
+  `Failed` the cockpit shows; follow treats it as "no comment".
 - **`gila chain <question…>`** (PR #64, landed via #66): a langchain-rust
-  `LLMChain` (system frame + human template) over the same newt backend seam
-  follow/cowork use — endpoint, model, and token from `Config::resolve()`,
-  nothing in code. The dependency is confined to `src/chain.rs` as an
-  exploration surface (upstream last published 2024-10) with a cheap exit.
-- **CI honesty repairs** (PR #65): the coverage job's lcov upload is
-  non-fatal (an org artifact-quota hit had been failing jobs whose gate
-  passed), and the scrybe parent-dir test uses `env::temp_dir()` so the
-  Windows job passes again.
-
-Release mechanics: tag `v0.4.0` on main after PRs #65/#66 merge; first
-GitHub Release of the repo.
+  `LLMChain` over the same newt backend seam follow/cowork use. The
+  dependency is confined to `src/chain.rs` as an exploration surface.
+- **Terminal-Bench path** (PR #77, #78): a native `gila solve` headless
+  evaluator and Harbor 0.20 adapter; the scoreboard moved to
+  `docs/terminal-bench.md` (PR #88).
+- **CI honesty repairs** (PR #65): the coverage lcov upload is non-fatal and
+  the scrybe parent-dir test uses `env::temp_dir()`.
 
 ## v0.3.3 — Layout (2026-07-11)
 
