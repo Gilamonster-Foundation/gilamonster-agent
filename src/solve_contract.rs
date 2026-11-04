@@ -6,7 +6,7 @@ use crate::build_info;
 
 pub const CONTRACT_VERSION: &str = "1";
 pub const AGENT: &str = "gilamonster-agent";
-pub const AIRFRAME_REVISION: &str = "be5647e5";
+pub const AIRFRAME_REVISION: &str = "a7f7d598";
 
 pub struct ContractInputs<'a> {
     pub requested_model: &'a str,
@@ -35,6 +35,7 @@ pub fn outcome_label(clean: bool, class: Option<ErrorClass>) -> &'static str {
     }
     match class {
         Some(ErrorClass::Model) => "model_error",
+        Some(ErrorClass::ContextExceeded) => "context_exceeded",
         Some(ErrorClass::Transport) => "transport_error",
         Some(ErrorClass::Timeout) => "timeout",
         Some(ErrorClass::Harness) | None => "harness_error",

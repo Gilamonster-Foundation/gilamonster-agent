@@ -715,7 +715,7 @@ fn run_git(cmd: gilamonster_agent::GitCmd) -> anyhow::Result<()> {
 #[cfg(feature = "langchain")]
 async fn run_chain(question: Vec<String>) -> anyhow::Result<()> {
     use gilamonster_agent::chain::{ask, settings_from_backend};
-    let cfg = newt_core::Config::resolve()?;
+    let cfg = gilamonster_agent::resolve_config()?;
     let backend = cfg.backends.first().ok_or_else(|| {
         anyhow::anyhow!("no inference backend configured — set one up in newt's config first")
     })?;
@@ -913,7 +913,7 @@ async fn run_follow(
     };
 
     // Reuse the operator's first configured newt backend for the endpoint.
-    let cfg = newt_core::Config::resolve()?;
+    let cfg = gilamonster_agent::resolve_config()?;
     let backend = cfg.backends.first().ok_or_else(|| {
         anyhow::anyhow!("no inference backend configured — set one up in newt's config first")
     })?;
@@ -993,7 +993,7 @@ fn run_cowork(path: Option<std::path::PathBuf>) -> anyhow::Result<()> {
 
     // Build the driver against the operator's first configured newt backend, so
     // cowork talks to the same inference endpoint as the rest of the airframe.
-    let cfg = newt_core::Config::resolve()?;
+    let cfg = gilamonster_agent::resolve_config()?;
     let backend = cfg.backends.first().ok_or_else(|| {
         anyhow::anyhow!("no inference backend configured — set one up in newt's config first")
     })?;
@@ -1177,7 +1177,7 @@ fn run_hotseat(path: Option<std::path::PathBuf>, skill: Option<String>) -> anyho
 
     // Start from the operator's resolved config so hotseat is an OVERLAY, not a
     // replacement — their backends, skills path, and MCP servers carry through.
-    let base = newt_core::Config::resolve()?;
+    let base = gilamonster_agent::resolve_config()?;
     let composed = compose_hotseat_config(base, &skill);
 
     // Serialize the composed config to a per-session file and point newt at it
@@ -1216,7 +1216,7 @@ fn run_code_with_caps(path: Option<std::path::PathBuf>) -> anyhow::Result<()> {
         return newt_tui::run_code(code_path(&path), false, None, None, None, None);
     }
     let mounted = entries.len();
-    let base = newt_core::Config::resolve()?;
+    let base = gilamonster_agent::resolve_config()?;
     let composed = capabilities::compose_agent_mcp(base, entries);
     let session_path = std::env::temp_dir().join(format!("gila-caps-{}.toml", std::process::id()));
     let toml = toml::to_string(&composed)

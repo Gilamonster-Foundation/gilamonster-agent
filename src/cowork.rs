@@ -1214,6 +1214,11 @@ mod tests {
             .mount(&server)
             .await;
 
+        // newt (since 0.8.6) retries 5xx with backoff — 4 retries, 500 ms base
+        // doubling — which outlasts this test's window. The policy reads its
+        // env knob per request, so turn retries off: the test is about the
+        // fold into `Failed`, not about the retry schedule.
+        std::env::set_var("NEWT_HTTP_MAX_RETRIES", "0");
         let cfg = TurnDriverConfig::new(server.uri(), "test-model", BackendKind::Ollama, ".");
         let mut a = CoworkApp::new(ObservationChannel::new(TurnDriver::new(cfg)));
 

@@ -538,6 +538,19 @@ impl Cli {
     }
 }
 
+/// Print one newt config notice (a migration hint, a deprecation) to stderr.
+/// newt's `Config::resolve` / `Config::load` report through a callback so the
+/// caller owns the surface; gila has no TUI notice strip, so stderr it is.
+pub fn report_notice(notice: newt_core::tty::Notice<'static>) {
+    eprintln!("{}", notice.line());
+}
+
+/// `newt_core::Config::resolve` with notices routed to [`report_notice`] — the
+/// one call site shape every gila surface uses.
+pub fn resolve_config() -> anyhow::Result<newt_core::Config> {
+    Ok(newt_core::Config::resolve(&mut report_notice)?)
+}
+
 /// Render the line announcing where the inherited operator identity lives.
 ///
 /// Takes the *result* of `newt_identity::default_key_path()` so both arms — a

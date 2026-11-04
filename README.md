@@ -16,7 +16,7 @@ the confined airframe. See the
 
 ## Install
 
-Builds require Rust 1.88+ and Python 3. The Unix recipe also requires
+Builds require Rust 1.91+ and Python 3. The Unix recipe also requires
 [`just`](https://github.com/casey/just).
 
 ```bash

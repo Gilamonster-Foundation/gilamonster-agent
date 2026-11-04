@@ -66,9 +66,7 @@ pub fn apply_and_freeze_with_config(config: Option<&newt_core::Config>) {
 
     let shell = match config {
         Some(config) => config.shell.clone(),
-        None => newt_core::Config::resolve()
-            .ok()
-            .and_then(|config| config.shell),
+        None => crate::resolve_config().ok().and_then(|config| config.shell),
     };
     std::env::set_var("NEWT_SHELL_ENGINE", shell_engine().as_str());
     let passthrough = shell
