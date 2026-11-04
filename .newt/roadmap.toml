@@ -263,7 +263,7 @@ net = "none"
 
 [[tree.subtask]]
 id = "node-17"
-instruction = "Herder cockpit ph1 — PaneBackend + PTY panes, gila cockpit confined shell pane"
+instruction = "Herder cockpit ph1 — PaneBackend (chat/PTY/failed panes), gila cockpit opens a companion chat pane, splits add ambient shell panes"
 deps = []
 parallel_ok = false
 context = []
@@ -278,7 +278,7 @@ net = "none"
 
 [[tree.subtask]]
 id = "node-18"
-instruction = "Herder cockpit ph2 — ChatPaneBackend, tabs, agents.toml palette, spawn newt/claude/codex"
+instruction = "Herder cockpit ph2 — agents.toml palette, default chat+shell layout, spawn newt/claude/codex"
 deps = []
 parallel_ok = false
 context = []

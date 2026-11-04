@@ -67,10 +67,13 @@ pub trait PaneBackend {
 }
 ```
 
-`cockpit.rs`'s `Effect` grows `PaneOpened(PaneId, PaneRole)` /
-`PaneClosed(PaneId)` variants so the runtime — not the pure model — constructs
-and tears down backends. The runtime owns a parallel
-`HashMap<PaneId, Box<dyn PaneBackend>>` alongside the pure `Cockpit` state.
+`cockpit.rs`'s `Effect` carries `OpenChatPane` / `OpenShellPane` /
+`ClosePane` / `CloseTab` variants, each naming the pane's `PaneToken`, so the
+runtime — not the pure model — constructs and tears down backends. The runtime
+owns a parallel `HashMap<PaneToken, Box<dyn PaneBackend>>` alongside the pure
+`Cockpit` state. Tokens, not `PaneId`s, key the map: a `PaneId` is per-tab and
+aliases across tabs, while a `PaneToken` is globally unique and retired with
+its pane.
 `keys.rs::Action` gains `NewTabWithAgent`, `SpawnPaneCommand`, `VoiceToggle`,
 `SuperviseToggle`, and a palette-open action.
 
@@ -79,17 +82,15 @@ and tears down backends. The runtime owns a parallel
 1. **`ChatPaneBackend`** — cowork's chat half: `TurnDriver`
    (submit/poll/cancel/transcript), `authority::driver_config(PaneKind, …)`,
    cowork's transcript→ratatui rendering, the input-line editing lifted from
-   `CoworkApp`. `PaneKind` is chosen at pane creation, same authority map as
-   `cockpit-tmux-multiplexer.md`.
+   `CoworkApp`. `PaneKind` is chosen at pane creation and stamps the pane's
+   caveats. gila runs ambient everywhere, so those caveats are a **product**
+   posture, not a security boundary: the companion's `max_calls = 0` keeps it a
+   commentator that can speak but not act.
 2. **`PtyPaneBackend`** — `pty.rs` machinery essentially verbatim, with the
    command parameterized by an [`AgentManifest`](#the-agents-manifest)
-   entry's `argv`. Spawn goes through
-   `agent_bridle_core::spawn_confined_subprocess` — the same gate
-   `capabilities.rs` uses — with a `SpawnPosture::{Ambient, Confined}` knob
-   read from the manifest entry's `posture`. Cockpit panes default
-   **Confined**, per `docs/decisions/ambient_native_shell_default.md`; an
-   ambient pane (a trusted login shell, say) is an explicit per-entry opt-in,
-   never a pane-creation-time flag.
+   entry's `argv`. Spawn goes through the existing `PtyShell::spawn`; the
+   pane is **ambient**, the human's own program with the human's own
+   authority, exactly as `gila cowork`'s shell pane is.
 3. **`OpenShellPaneBackend`** (feature `openshell`) —
    `OpenShellClient::connect` + `create_sandbox` + `wait_ready`, then the raw
    tonic `ExecSandboxInteractive` bidi stream. Output bytes feed the same
@@ -121,7 +122,6 @@ argv = ["newt"]
 description = "newt-agent, in a PTY pane"
 # cwd = "/path/to/project"
 # env = ["OPENAI_API_KEY"]
-# posture = "confined"   # or "ambient"
 ```
 
 A **missing** file is not an error — it resolves to a built-in default
@@ -214,7 +214,7 @@ tokio task, never on the render thread.
 
 Bare `gila` currently launches the inline chat path. This design flips that
 default: bare `gila` launches the full-screen multiplexer, with a default
-layout of one gila-chat pane plus one confined shell pane (cowork parity).
+layout of one gila-chat pane plus one ambient shell pane (cowork parity).
 
 - **`gila code`** and a new **`--inline`** escape hatch keep the previous
   inline behavior reachable on purpose — operators scripting gila, or
@@ -223,12 +223,11 @@ layout of one gila-chat pane plus one confined shell pane (cowork parity).
 - **Non-TTY invocations fall back automatically** to the old inline path —
   a full-screen ratatui app has no meaning against a pipe or a CI log, so
   the fallback is unconditional, not a flag the caller must remember.
-- **The ambient-native-shell trust contract is preserved by surface, not
-  weakened by the flip**: chat panes minted through `authority.rs` keep
-  their existing `PaneKind` posture; PTY panes default Confined; an
-  explicit ambient pane still requires an explicit manifest opt-in. The
-  flip changes *what greets the user by default*, not *what authority
-  anything is granted*.
+- **The flip grants nothing new**: chat panes minted through
+  `authority.rs` keep their `PaneKind` posture (the companion stays
+  zero-tool), and PTY panes are the same ambient shells `gila cowork`
+  already opens. The flip changes *what greets the user by default*, not
+  *what authority anything is granted*.
 - `docs/decisions/ambient_native_shell_default.md` gets a default-surface
   note recording the flip and its date, per that doc's own revisit
   discipline.
@@ -260,12 +259,13 @@ Each phase ships full test coverage at the pure-function layer (backends,
 manifest parsing, supervisor routing) with only the raw render loop as an
 uncovered carve-out, per the repo's three-layer pattern.
 
-1. **PaneBackend + PTY panes** — `pane_backend.rs`, `PtyPaneBackend`,
-   `cockpit_app.rs`. `gila cockpit` opens one confined shell pane;
-   split/close/nav/zoom are real. Existing commands untouched.
-2. **Chat panes + tabs + palette** — `ChatPaneBackend`; default layout
-   chat+shell (cowork parity); `agents.toml` (this doc's manifest); spawn
-   `newt`/`claude`/`codex` in PTY panes from the palette; multi-tab.
+1. **PaneBackend + live panes** — `pane_backend.rs` (`ChatPaneBackend`,
+   `PtyPaneBackend`, `FailedPaneBackend`), `cockpit_app.rs`. `gila cockpit`
+   opens a companion chat pane; splits open ambient shell panes; new tabs,
+   close/nav/zoom are real. Existing commands untouched.
+2. **Palette** — default layout chat+shell (cowork parity); `agents.toml`
+   (this doc's manifest) wired into a palette; spawn `newt`/`claude`/`codex`
+   in PTY panes from it.
 3. **Default flip** — bare `gila` launches the multiplexer; `gila code` /
    `--inline` and the non-TTY fallback; the decision-doc update.
 4. **Supervision** — `supervisor.rs`, watch/herd modes; wiremock-backed
