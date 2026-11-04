@@ -3,8 +3,10 @@ name: CI
 # HOOK PARITY: the lint/test/coverage jobs are mirrored by .githooks/pre-push.
 # When editing those, update the push hook to match.
 # SCOPE: the hook skips its gates for tag-only, delete-only and docs-only
-# pushes (CRAFT-14); this pipeline runs on every push and is the full gate.
-# EXCEPTION: the `windows` job is CI-only — no local Windows dev box.
+# pushes (CRAFT-14); this pipeline's branch-push and PR jobs still run and
+# the PR merge gate is unchanged.
+# EXCEPTION: the `windows`, headless-portability and harbor-adapter jobs
+# are CI-only — no local Windows dev box, container, or Harbor install.
 #
 # Mirrored from newt-agent's CI (gila inherits newt's gate: fmt + clippy -D
 # warnings + test + an 80% line-coverage floor). gila is a single-package crate
