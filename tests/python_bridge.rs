@@ -48,10 +48,19 @@ fn bridge_env_ready() -> bool {
     }
 }
 
+/// Serializes bridge calls across this file's tests. The interpreter is one
+/// per process and `sys.argv` is global: two tests entering the bridge from
+/// parallel threads raced, and the unknown-subcommand test saw the help
+/// loop's argv (exit 0 instead of click's 2).
+static BRIDGE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Run one vendored command through the in-process bridge and return its
-/// exit code. Each call re-enters `Python::with_gil`, so tests stay isolated
-/// from one another's interpreter state.
+/// exit code. Each call re-enters `Python::with_gil` under [`BRIDGE`], so
+/// tests stay isolated from one another's interpreter state.
 fn run(cmd: &str, args: &[&str]) -> i32 {
+    let _serialized = BRIDGE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let args: Vec<std::ffi::OsString> = args.iter().map(std::ffi::OsString::from).collect();
     gilamonster_agent::python_bridge::run_python_command(cmd, &args)
         .unwrap_or_else(|e| panic!("bridge error running {cmd} {args:?}: {e:#}"))

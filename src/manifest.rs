@@ -3,8 +3,7 @@
 //! The MCP/agent surface of every installed capability would flood an agent's
 //! context, so it is **opt-in**: by default a capability is human-CLI only. This
 //! manifest is where the user (via `gila cap config`, future) records, per
-//! capability, whether it loads as agent tools, whether it runs confined, which
-//! env it needs, and which venv serves it.
+//! capability, whether it loads as agent tools, which env it needs, and which venv serves it.
 //!
 //! This module is pure parsing + lookup — it deliberately does not depend on
 //! newt's config types; composing the agent-exposed entries into newt
@@ -46,10 +45,6 @@ pub struct CapabilityEntry {
     /// Where its tools are exposed. Defaults to [`Expose::Cli`].
     #[serde(default)]
     pub expose: Expose,
-    /// Run the capability's tools under an agent-bridle leash when invoked as an
-    /// agent tool (`gila capabilities run` confines it; see `capabilities.rs`).
-    #[serde(default)]
-    pub confined: bool,
     /// Environment variables to grant the capability subprocess (and nothing
     /// else reaches it — the external-boundary invariant).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -131,7 +126,6 @@ mod tests {
         [[capabilities]]
         name = "confluence"
         expose = "both"
-        confined = true
         env = ["CONFLUENCE_BASE_URL", "CONFLUENCE_TOKEN"]
         tools = ["fetch", "blog"]
 
@@ -160,7 +154,6 @@ mod tests {
         let m = Manifest::parse(SAMPLE).unwrap();
         let c = m.entry("confluence").unwrap();
         assert_eq!(c.expose, Expose::Both);
-        assert!(c.confined);
         assert_eq!(c.env, ["CONFLUENCE_BASE_URL", "CONFLUENCE_TOKEN"]);
         assert_eq!(
             c.tools.as_deref(),
@@ -169,7 +162,6 @@ mod tests {
 
         let mogul = m.entry("mogul").unwrap();
         assert_eq!(mogul.expose, Expose::Cli); // default
-        assert!(!mogul.confined);
     }
 
     #[test]
@@ -201,7 +193,6 @@ mod tests {
                 CapabilityEntry {
                     name: "confluence".into(),
                     expose: Expose::Both,
-                    confined: true,
                     env: vec!["CONFLUENCE_TOKEN".into()],
                     tools: None,
                     venv: None,
@@ -209,7 +200,6 @@ mod tests {
                 CapabilityEntry {
                     name: "mogul".into(),
                     expose: Expose::Cli,
-                    confined: false,
                     env: vec![],
                     tools: None,
                     venv: None,

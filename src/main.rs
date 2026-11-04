@@ -24,7 +24,7 @@ use gilamonster_agent::follow::{
 };
 use gilamonster_agent::hotseat::{compose_hotseat_config, hotseat_notice, triage_skill_name};
 use gilamonster_agent::{
-    capabilities, code_path, follow_no_target_report, follow_target, matrix_report, solve,
+    capabilities, code_path, follow_no_target_report, follow_target, launch, matrix_report, solve,
     CapabilitiesCmd, Cli, Command,
 };
 use newt_core::agentic::{TurnDriver, TurnDriverConfig};
@@ -66,17 +66,13 @@ fn main() -> anyhow::Result<()> {
 
     set_brand_defaults();
     let cli = Cli::parse();
-    let launch_posture = cli.command.as_ref().map_or_else(
-        || cli.launch_posture_for(&Command::Code { path: None }),
-        |command| cli.launch_posture_for(command),
-    );
     let command = cli.effective_command();
     let prepared_solve = match &command {
         Command::Solve { config, .. } => Some(solve::prepare(config)?),
         _ => None,
     };
-    launch_posture
-        .apply_and_freeze_with_config(prepared_solve.as_ref().map(solve::PreparedSolve::config));
+    // Every gila surface is ambient: freeze the posture once, before Tokio.
+    launch::apply_and_freeze_with_config(prepared_solve.as_ref().map(solve::PreparedSolve::config));
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()

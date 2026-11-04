@@ -2335,10 +2335,8 @@ dependencies = [
 name = "gilamonster-agent"
 version = "0.4.0"
 dependencies = [
- "agent-bridle-core",
  "anyhow",
  "assert_cmd",
- "async-trait",
  "clap",
  "crossterm",
  "git2",
@@ -3991,7 +3989,7 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 [[package]]
 name = "newt-core"
 version = "0.8.0"
-source = "git+https://github.com/Gilamonster-Foundation/newt-agent?rev=8cde29f0b16cab9206fb76d94925b1ea49ee68bc#8cde29f0b16cab9206fb76d94925b1ea49ee68bc"
+source = "git+https://github.com/Gilamonster-Foundation/newt-agent?rev=be5647e5#be5647e5efa553cba38eabd08d435c5a22767a63"
 dependencies = [
  "age",
  "agent-bridle",
@@ -4005,8 +4003,10 @@ dependencies = [
  "crossterm",
  "ignore",
  "libc",
+ "newt-interaction",
  "newt-skills",
  "newt-tuner",
+ "parking_lot",
  "pulldown-cmark",
  "regex",
  "reqwest 0.12.28",
@@ -4029,7 +4029,7 @@ dependencies = [
 [[package]]
 name = "newt-git"
 version = "0.8.0"
-source = "git+https://github.com/Gilamonster-Foundation/newt-agent?rev=8cde29f0b16cab9206fb76d94925b1ea49ee68bc#8cde29f0b16cab9206fb76d94925b1ea49ee68bc"
+source = "git+https://github.com/Gilamonster-Foundation/newt-agent?rev=be5647e5#be5647e5efa553cba38eabd08d435c5a22767a63"
 dependencies = [
  "chrono",
  "grit-lib",
@@ -4042,7 +4042,7 @@ dependencies = [
 [[package]]
 name = "newt-identity"
 version = "0.8.0"
-source = "git+https://github.com/Gilamonster-Foundation/newt-agent?rev=8cde29f0b16cab9206fb76d94925b1ea49ee68bc#8cde29f0b16cab9206fb76d94925b1ea49ee68bc"
+source = "git+https://github.com/Gilamonster-Foundation/newt-agent?rev=be5647e5#be5647e5efa553cba38eabd08d435c5a22767a63"
 dependencies = [
  "agent-mesh-protocol",
  "base64 0.22.1",
@@ -4055,7 +4055,7 @@ dependencies = [
 [[package]]
 name = "newt-inference"
 version = "0.8.0"
-source = "git+https://github.com/Gilamonster-Foundation/newt-agent?rev=8cde29f0b16cab9206fb76d94925b1ea49ee68bc#8cde29f0b16cab9206fb76d94925b1ea49ee68bc"
+source = "git+https://github.com/Gilamonster-Foundation/newt-agent?rev=be5647e5#be5647e5efa553cba38eabd08d435c5a22767a63"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4073,9 +4073,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "newt-interaction"
+version = "0.8.0"
+source = "git+https://github.com/Gilamonster-Foundation/newt-agent?rev=be5647e5#be5647e5efa553cba38eabd08d435c5a22767a63"
+dependencies = [
+ "content-addressable",
+ "serde",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "newt-mcp-client"
 version = "0.8.0"
-source = "git+https://github.com/Gilamonster-Foundation/newt-agent?rev=8cde29f0b16cab9206fb76d94925b1ea49ee68bc#8cde29f0b16cab9206fb76d94925b1ea49ee68bc"
+source = "git+https://github.com/Gilamonster-Foundation/newt-agent?rev=be5647e5#be5647e5efa553cba38eabd08d435c5a22767a63"
 dependencies = [
  "agent-bridle",
  "anyhow",
@@ -4091,7 +4101,7 @@ dependencies = [
 [[package]]
 name = "newt-skills"
 version = "0.8.0"
-source = "git+https://github.com/Gilamonster-Foundation/newt-agent?rev=8cde29f0b16cab9206fb76d94925b1ea49ee68bc#8cde29f0b16cab9206fb76d94925b1ea49ee68bc"
+source = "git+https://github.com/Gilamonster-Foundation/newt-agent?rev=be5647e5#be5647e5efa553cba38eabd08d435c5a22767a63"
 dependencies = [
  "serde",
  "serde_yaml",
@@ -4101,7 +4111,7 @@ dependencies = [
 [[package]]
 name = "newt-tools"
 version = "0.8.0"
-source = "git+https://github.com/Gilamonster-Foundation/newt-agent?rev=8cde29f0b16cab9206fb76d94925b1ea49ee68bc#8cde29f0b16cab9206fb76d94925b1ea49ee68bc"
+source = "git+https://github.com/Gilamonster-Foundation/newt-agent?rev=be5647e5#be5647e5efa553cba38eabd08d435c5a22767a63"
 dependencies = [
  "anyhow",
  "newt-core",
@@ -4115,7 +4125,7 @@ dependencies = [
 [[package]]
 name = "newt-tui"
 version = "0.8.0"
-source = "git+https://github.com/Gilamonster-Foundation/newt-agent?rev=8cde29f0b16cab9206fb76d94925b1ea49ee68bc#8cde29f0b16cab9206fb76d94925b1ea49ee68bc"
+source = "git+https://github.com/Gilamonster-Foundation/newt-agent?rev=be5647e5#be5647e5efa553cba38eabd08d435c5a22767a63"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4128,6 +4138,7 @@ dependencies = [
  "newt-git",
  "newt-identity",
  "newt-inference",
+ "newt-interaction",
  "newt-mcp-client",
  "newt-skills",
  "newt-tools",
@@ -4139,12 +4150,13 @@ dependencies = [
  "tokio",
  "toml 1.1.5+spec-1.1.0",
  "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "newt-tuner"
 version = "0.8.0"
-source = "git+https://github.com/Gilamonster-Foundation/newt-agent?rev=8cde29f0b16cab9206fb76d94925b1ea49ee68bc#8cde29f0b16cab9206fb76d94925b1ea49ee68bc"
+source = "git+https://github.com/Gilamonster-Foundation/newt-agent?rev=be5647e5#be5647e5efa553cba38eabd08d435c5a22767a63"
 dependencies = [
  "anyhow",
  "clap",
@@ -4778,7 +4790,7 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 [[package]]
 name = "plugins-protocol"
 version = "0.8.0"
-source = "git+https://github.com/Gilamonster-Foundation/newt-agent?rev=8cde29f0b16cab9206fb76d94925b1ea49ee68bc#8cde29f0b16cab9206fb76d94925b1ea49ee68bc"
+source = "git+https://github.com/Gilamonster-Foundation/newt-agent?rev=be5647e5#be5647e5efa553cba38eabd08d435c5a22767a63"
 dependencies = [
  "async-trait",
  "serde",

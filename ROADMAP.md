@@ -31,19 +31,18 @@ the next epic.
 > continue unchanged inside `0.4.x`** — read "v0.3.N" below as "the Nth
 > milestone", now landing as 0.4.x patch/minor bumps.
 
-## Ambient-first product contract (2026-08-13)
+## Ambient product contract (2026-08-13, OCAP removed 2026-11-04)
 
-Gila now has a deliberate trust-posture split from its airframe: bare `gila`
-and `gila code` launch full-ambient with native host command execution;
-`--ocap` restores newt's configured confinement. Cowork, observer, hotseat,
-companion, and utility surfaces remain confined. The implementation and
-remaining release gates are tracked in
+Gila has a deliberate trust-posture split from its airframe: every `gila`
+surface runs under the operator's own ambient authority with native host
+command execution. Newt remains the confined airframe. The 2026-08-13 line kept
+`--ocap` as an opt-in rollback; v0.4.0 removes it, the bundled `newt-net-guard`,
+and the direct agent-bridle dependency. The decision record is
 [`docs/decisions/ambient_native_shell_default.md`](docs/decisions/ambient_native_shell_default.md).
 
 This is a cross-cutting launch contract, not a renumbering of the cockpit
-milestones below. This line packages a co-located Linux `newt-net-guard`; its
-remaining ratchets are live shell BAT evidence, overlay-disabled pin
-verification, and typed workbench-only expansion in the cockpit.
+milestones below. Observer panes (follow, hotseat, companion) stay read-only as
+a product posture — a zero tool budget — not as confinement.
 
 ## Baseline: newt-agent 0.8.0
 
