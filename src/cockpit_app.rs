@@ -324,6 +324,36 @@ impl CockpitApp {
 mod tests {
     use super::*;
     use crate::cockpit::PaneRole;
+    use ratatui::text::Line;
+
+    /// A deterministic stand-in backend: a fixed closed/alive answer and an
+    /// optional queued observation, so runtime tests never race a real child.
+    struct Fake {
+        closed: bool,
+        pending: Option<String>,
+    }
+
+    impl PaneBackend for Fake {
+        fn title(&self) -> String {
+            "fake".to_string()
+        }
+        fn render_lines(&mut self, _width: u16, _height: u16) -> Vec<Line<'static>> {
+            Vec::new()
+        }
+        fn observation(&mut self) -> Option<String> {
+            self.pending.take()
+        }
+        fn is_closed(&mut self) -> bool {
+            self.closed
+        }
+    }
+
+    fn fake(closed: bool, pending: Option<&str>) -> Box<dyn PaneBackend> {
+        Box::new(Fake {
+            closed,
+            pending: pending.map(str::to_string),
+        })
+    }
 
     fn profile() -> BackendProfile {
         BackendProfile {
@@ -472,57 +502,61 @@ mod tests {
 
     /// Reaping a *background* pane must not move the operator's focus.
     ///
-    /// Three panes: the chat, a dead shell, and a second shell the operator is
+    /// Three panes: the chat, a dead shell, and a live shell the operator is
     /// typing in. Before this was pinned, the reap aimed the close by focus and
-    /// `close_focused` refocused an arbitrary survivor, so a shell exiting in
-    /// the background silently redirected the operator's next keystrokes (an
-    /// Enter would submit a bogus chat turn).
-    #[cfg(unix)]
+    /// `close_focused` refocused the first surviving pane (the chat), so a
+    /// shell exiting in the background silently redirected the operator's next
+    /// keystrokes (an Enter would submit a bogus chat turn). Fake backends make
+    /// "dead" and "alive" deterministic instead of racing real children.
     #[test]
     fn reap_of_a_background_pane_keeps_the_operators_focus() {
-        let mut a = app(); // shell program is /bin/echo — it exits at once
-        a.apply(Action::SplitShell); // the pane that will die
-        a.apply(Action::SplitShell); // the operator's pane (focused, newest)
-        assert_eq!(a.cockpit().pane_count(), 3);
+        let mut a = app();
+        a.apply(Action::SplitShell);
+        let dead = a.cockpit().focused_token();
+        a.apply(Action::SplitShell);
         let operator = a.cockpit().focused_token();
+        a.backends.insert(dead, fake(true, None));
+        a.backends.insert(operator, fake(false, None));
 
-        for _ in 0..200 {
-            a.reap_closed();
-            if a.cockpit().pane_count() < 3 {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(25));
-        }
+        a.reap_closed();
 
-        // Whichever shells were reaped, if the operator's pane is one of the
-        // survivors it must still be the focused one.
-        if a.cockpit()
-            .panes()
-            .iter()
-            .any(|(_, token)| *token == operator)
-        {
-            assert_eq!(
-                a.cockpit().focused_token(),
-                operator,
-                "a background reap stole the operator's focus"
-            );
-        }
+        assert!(a.backend_mut(dead).is_none(), "the dead pane was reaped");
+        assert_eq!(a.cockpit().pane_count(), 2);
+        assert!(
+            a.backend_mut(operator).is_some(),
+            "the operator's pane survives"
+        );
+        assert_eq!(
+            a.cockpit().focused_token(),
+            operator,
+            "a background reap stole the operator's focus"
+        );
+        assert!(!a.should_quit());
     }
 
     /// Draining is what keeps a PTY pane's pending buffer from growing without
-    /// bound until supervision (phase 4) consumes it, so the runtime must offer
-    /// the drain over every backend, including background tabs' panes.
+    /// bound until supervision (phase 4) consumes it, so it must cover every
+    /// backend, including the panes of a tab you are not looking at.
     #[test]
     fn drain_observations_covers_every_backend_not_just_the_active_tab() {
         let mut a = app();
-        a.apply(Action::NewChatTab); // a second tab; tab 1's backend is now inactive
-        assert_eq!(a.backend_count(), 2);
+        let background = a.cockpit().focused_token();
+        a.apply(Action::NewChatTab); // tab 1's pane is now in an inactive tab
+        let active = a.cockpit().focused_token();
+        assert_ne!(background, active);
+        for token in [background, active] {
+            a.backends.insert(token, fake(false, Some("output")));
+        }
+
         a.drain_observations();
-        assert_eq!(
-            a.backend_count(),
-            2,
-            "draining is read-only over the backend map"
-        );
+
+        for (name, token) in [("background", background), ("active", active)] {
+            assert_eq!(
+                a.backend_mut(token).unwrap().observation(),
+                None,
+                "the {name} tab's queued output was not drained"
+            );
+        }
     }
 
     #[test]

@@ -438,13 +438,15 @@ mod tests {
         }
     }
 
-    /// Regression (#90): gila is ambient everywhere, so a chat pane must seat
-    /// with `NEWT_DISABLE_OCAP` set. The OCAP-era constructor refused here
-    /// (`AuthorityError::OcapDisabled`) and every cockpit chat pane came up
-    /// as a failed pane.
+    /// Regression (#90): gila is ambient everywhere, so minting a chat pane
+    /// cannot fail. The red evidence was a compile failure, not a runtime
+    /// refusal: the OCAP-era `new` returned `Result<Self, AuthorityError>` and
+    /// `?`-ed `driver_config`, which no longer compiled once #90 made
+    /// `driver_config` infallible. The `let b: ChatPaneBackend` binding pins
+    /// that signature. The constructor reads no environment, so the test sets
+    /// none (mutating it would race the other tests in this binary).
     #[test]
     fn a_chat_pane_builds_under_the_ambient_posture() {
-        std::env::set_var("NEWT_DISABLE_OCAP", "1");
         let b: ChatPaneBackend =
             ChatPaneBackend::new(PaneKind::Companion, &profile("http://localhost:1".into()));
         assert_eq!(*b.caveats(), authority::caveats_for(PaneKind::Companion));
