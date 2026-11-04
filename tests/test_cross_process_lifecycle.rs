@@ -70,6 +70,15 @@ impl Harness {
         command
             .env("HOME", self._home.path())
             .env("GILA_HOME", self.gila_home.path())
+            // Contending CLI processes queue on the registry lock; how long the
+            // queue takes depends on this box's fsync latency, not on the code
+            // under test. Bound the wait far past any plausible queue so a
+            // start fails only if a holder never releases.
+            .env("GILA_JUPYTER_REGISTRY_LOCK_TIMEOUT_SECS", "120")
+            // Same for bringing the fixture up: readiness is signalled by the
+            // fixture's runtime file and kernels answer, so this bound only
+            // fires if the fixture never answers, not because the box is slow.
+            .env("GILA_JUPYTER_STARTUP_TIMEOUT_SECS", "120")
             .env("PATH", &self.path)
             .env("GILA_AUTH_TOKEN", "must-not-reach-child")
             .env("GILA_OPERATOR_KEY", "must-not-reach-child")
@@ -957,6 +966,41 @@ fn semantic_start_failure_is_nonzero_and_redacts_token() {
     assert_listener_port_reclaimed(port);
 }
 
+/// Regression (lane-79): the startup readiness budget was a fixed 20 s, so a
+/// start on a loaded host could fail for box speed alone. It is injectable
+/// (`GILA_JUPYTER_STARTUP_TIMEOUT_SECS`, 120 s from the harness); this pins
+/// that the override, not the default, bounds a start that never gets ready.
+#[test]
+fn startup_readiness_budget_is_the_injected_bound() {
+    let harness = Harness::new();
+    let port = free_port();
+    fs::write(harness.mode_path(), "kernels-503").unwrap();
+    let start = harness
+        .command()
+        .env("GILA_JUPYTER_STARTUP_TIMEOUT_SECS", "2")
+        .args([
+            "jupyter",
+            "start",
+            "--port",
+            &port.to_string(),
+            "--token",
+            "budget-token",
+        ])
+        .output()
+        .expect("run never-ready start");
+    assert!(!start.status.success(), "never-ready start exited zero");
+    assert!(
+        stderr(&start).contains("did not become ready within 2 seconds"),
+        "start was not bounded by the injected budget: {}",
+        stderr(&start)
+    );
+    if harness.registry_path().exists() {
+        assert!(harness.registry().servers.is_empty());
+    }
+    assert_listener_port_reclaimed(port);
+    assert_no_instance_trees(&harness);
+}
+
 #[test]
 fn malformed_kernels_readiness_is_rolled_back_without_registration() {
     let harness = Harness::new();
@@ -1275,8 +1319,13 @@ fn oversized_startup_and_parallel_list_bodies_are_rejected_at_the_shared_cap() {
         "oversized-startup-token",
     ]);
     assert!(!failed.status.success(), "oversized readiness body started");
+    // Regression (lane-79): an over-cap readiness answer used to be retried
+    // until the 20-second startup deadline, and the test passed only if the
+    // very last probe happened to finish inside its 500 ms budget. It is a
+    // definitive answer, so startup must roll back on it directly.
     assert!(
-        stderr(&failed).contains("65536-byte lifecycle body limit"),
+        stderr(&failed).contains("rejected Jupyter readiness response")
+            && stderr(&failed).contains("65536-byte lifecycle body limit"),
         "unexpected oversized readiness failure: {}",
         stderr(&failed)
     );
@@ -1284,7 +1333,7 @@ fn oversized_startup_and_parallel_list_bodies_are_rejected_at_the_shared_cap() {
     assert_no_instance_trees(&startup);
 
     let list = Harness::new();
-    let mut started = start_concurrently(&list, 8);
+    let mut started = start_sequentially(&list, 8);
     fs::write(list.mode_path(), "kernels-oversized").unwrap();
     let began = Instant::now();
     let output = list.run(&["jupyter", "list"]);
@@ -1314,25 +1363,25 @@ fn oversized_startup_and_parallel_list_bodies_are_rejected_at_the_shared_cap() {
     assert_no_instance_trees(&list);
 }
 
-struct ConcurrentServers<'a> {
+struct StartedServers<'a> {
     harness: &'a Harness,
     entries: Vec<(u64, u16)>,
 }
 
-impl ConcurrentServers<'_> {
+impl StartedServers<'_> {
     fn mark_stopped(&mut self, handle: u64) {
         self.entries.retain(|(active, _)| *active != handle);
     }
 }
 
-impl Drop for ConcurrentServers<'_> {
+impl Drop for StartedServers<'_> {
     fn drop(&mut self) {
         let _ = fs::remove_file(self.harness.mode_path());
         for (handle, _) in self.entries.drain(..) {
             let output = self.harness.run(&["jupyter", "stop", &handle.to_string()]);
             if !output.status.success() {
                 eprintln!(
-                    "ERROR: concurrent-server cleanup failed for handle {handle}: {}",
+                    "ERROR: started-server cleanup failed for handle {handle}: {}",
                     stderr(&output)
                 );
             }
@@ -1340,7 +1389,30 @@ impl Drop for ConcurrentServers<'_> {
     }
 }
 
-fn start_concurrently(harness: &Harness, count: usize) -> ConcurrentServers<'_> {
+/// Start `count` servers one after another, for tests that need running
+/// servers but are not testing start concurrency: no start ever queues on the
+/// registry lock behind another.
+fn start_sequentially(harness: &Harness, count: usize) -> StartedServers<'_> {
+    let mut servers = StartedServers {
+        harness,
+        entries: Vec::with_capacity(count),
+    };
+    for index in 0..count {
+        let token = format!("sequential-token-{index}");
+        let output = harness.run(&["jupyter", "start", "--port", "0", "--token", &token]);
+        assert!(
+            output.status.success(),
+            "start {index} failed: {}",
+            stderr(&output)
+        );
+        let handle = parse_handle(&output);
+        let port = harness.registry().servers[&handle].port;
+        servers.entries.push((handle, port));
+    }
+    servers
+}
+
+fn start_concurrently(harness: &Harness, count: usize) -> StartedServers<'_> {
     let mut children = Vec::new();
     for index in 0..count {
         // Let each fixture bind port zero itself; this removes the otherwise
@@ -1363,12 +1435,60 @@ fn start_concurrently(harness: &Harness, count: usize) -> ConcurrentServers<'_> 
             Err(error) => failures.push(format!("failed to wait for concurrent start: {error}")),
         }
     }
-    let servers = ConcurrentServers { harness, entries };
+    let servers = StartedServers { harness, entries };
     assert!(
         failures.is_empty(),
         "concurrent starts failed: {failures:?}"
     );
     servers
+}
+
+/// Regression (lane-79): concurrent starts failed with "timed out after 5
+/// seconds waiting for the registry lock" whenever one holder's commit stalled
+/// in fsync. The wait bound is injectable (`GILA_JUPYTER_REGISTRY_LOCK_TIMEOUT_SECS`,
+/// set to 120 s by the harness), so a start queued behind a holder waits for
+/// that holder instead of failing on the 5-second production default.
+#[test]
+fn start_waits_for_a_held_registry_lock_up_to_the_injected_bound() {
+    let harness = Harness::new();
+    let init = harness.run(&["jupyter", "list"]);
+    assert!(
+        init.status.success(),
+        "registry init failed: {}",
+        stderr(&init)
+    );
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(harness.gila_home.path().join("servers.lock"))
+        .expect("open registry lock");
+    lock.lock().expect("hold registry lock");
+
+    let mut command = harness.command();
+    command.args([
+        "jupyter",
+        "start",
+        "--port",
+        "0",
+        "--token",
+        "lock-wait-token",
+    ]);
+    let child = command.spawn().expect("spawn start behind the held lock");
+    // Hold past the 5-second production default; the start must still be
+    // queued, not failed, when the lock is released.
+    thread::sleep(Duration::from_secs(7));
+    lock.unlock().expect("release registry lock");
+
+    let output = child.wait_with_output().expect("wait for queued start");
+    assert!(
+        output.status.success(),
+        "start queued behind a held lock failed: {}",
+        stderr(&output)
+    );
+    let handle = parse_handle(&output);
+    let stop = harness.run(&["jupyter", "stop", &handle.to_string()]);
+    assert!(stop.status.success(), "stop failed: {}", stderr(&stop));
+    assert_no_instance_trees(&harness);
 }
 
 #[test]
@@ -1487,7 +1607,7 @@ fn concurrent_stop_preserves_a_different_instance_that_wins_the_cas_race() {
 #[test]
 fn list_probes_have_a_bounded_aggregate_deadline() {
     let harness = Harness::new();
-    let mut started = start_concurrently(&harness, 4);
+    let mut started = start_sequentially(&harness, 4);
     fs::write(harness.mode_path(), "kernels-delay").unwrap();
     let began = Instant::now();
     let list = harness.run(&["jupyter", "list"]);
