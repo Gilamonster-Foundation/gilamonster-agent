@@ -58,8 +58,13 @@ fn entry_for_with(g: &GilacapCmd, name: &str) -> McpServerEntry {
         url: None,
         headers: Default::default(),
         request_timeout_secs: None,
+        login_argv: Vec::new(),
+        oauth_client_id: None,
+        oauth_scopes: None,
+        oauth_callback_port: None,
         // gila-owned wiring (the manifest the operator edited) — trusted config.
         trust: McpTrust::Trusted,
+        origin: None,
     }
 }
 
@@ -132,7 +137,7 @@ pub async fn check(name: &str) -> Result<()> {
     // confinement a live session applies. Mirrors `newt doctor` / `newt mcp
     // probe` (Config::mcp_probe_caveats — never `top()` in a dispatch path).
     let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let leash = Config::resolve()
+    let leash = crate::resolve_config()
         .unwrap_or_default()
         .mcp_probe_caveats(&workspace);
     let admitted = newt_core::mcp::admit(&entry)
@@ -468,7 +473,12 @@ mod tests {
             url: None,
             headers: Default::default(),
             request_timeout_secs: None,
+            login_argv: Vec::new(),
+            oauth_client_id: None,
+            oauth_scopes: None,
+            oauth_callback_port: None,
             trust: McpTrust::Trusted,
+            origin: None,
         });
         let entries = vec![
             entry_for_with(&gilacap(), "confluence"),

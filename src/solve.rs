@@ -47,8 +47,8 @@ pub fn prepare(profile: &Path) -> Result<PreparedSolve> {
     let profile_bytes = std::fs::read(profile)
         .with_context(|| format!("reading --config {}", profile.display()))?;
     let profile_sha256 = format!("{:x}", Sha256::digest(&profile_bytes));
-    let mut config =
-        Config::load(profile).with_context(|| format!("loading --config {}", profile.display()))?;
+    let mut config = Config::load(profile, &mut crate::report_notice)
+        .with_context(|| format!("loading --config {}", profile.display()))?;
     config.apply_runtime_settings();
     let capability_path = std::env::var_os(CAPABILITIES_MANIFEST_ENV)
         .map(PathBuf::from)
@@ -128,7 +128,7 @@ fn apply_context_window(driver: &mut TurnDriverConfig, context_window: u32) {
 /// through `set_active_model_family`, the way `newt-cli/src/solve.rs:172`
 /// does. Tracked separately; this is deliberately not a name-shaped guess.
 fn runtime_posture(config: &Config, _model: &str) -> RuntimeSettingsSnapshot {
-    newt_core::tenacity::set_active_model_family(None);
+    newt_core::initiative::set_active_model_family(None);
     RuntimeSettingsSnapshot::resolve(config, None, None)
 }
 

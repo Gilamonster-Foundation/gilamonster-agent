@@ -15,3 +15,6 @@
 
 # Python bytecode cache (e.g. from scripts/generate_logos.py).
 __pycache__/
+
+# llvm-cov raw profiles a test binary writes when run outside cargo-llvm-cov.
+*.profraw

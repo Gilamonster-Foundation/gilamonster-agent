@@ -62,7 +62,7 @@ jobs:
   headless-portability:
     name: Headless portability (Debian 12)
     runs-on: ${{ vars.GMF_LINUX_RUNNER || 'ubuntu-latest' }}
-    container: rust:1.88-bookworm
+    container: rust:1.91-bookworm
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2

@@ -1208,9 +1208,14 @@ mod tests {
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
+        // A 400 is a non-retryable error. newt (since 0.8.6) retries 5xx,
+        // 408 and 429 with backoff (six retries, 2 s base for a loopback
+        // backend), which outlasts this test's window; the test is about the
+        // fold into `Failed`, not about the retry schedule, and mutating the
+        // retry env var would leak into every other test in this process.
         Mock::given(method("POST"))
             .and(path("/api/chat"))
-            .respond_with(ResponseTemplate::new(500))
+            .respond_with(ResponseTemplate::new(400))
             .mount(&server)
             .await;
 
