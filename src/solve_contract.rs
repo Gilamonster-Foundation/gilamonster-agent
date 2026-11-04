@@ -154,7 +154,22 @@ mod tests {
             "transport_error"
         );
         assert_eq!(outcome_label(false, Some(ErrorClass::Timeout)), "timeout");
+        // newt 0.8.6 added `ContextExceeded`; the contract labels it so an
+        // evaluator can tell an overflowed context from a model error.
+        assert_eq!(
+            outcome_label(false, Some(ErrorClass::ContextExceeded)),
+            "context_exceeded"
+        );
+        assert_eq!(
+            outcome_label(false, Some(ErrorClass::Harness)),
+            "harness_error"
+        );
         assert_eq!(outcome_label(false, None), "harness_error");
+        // A clean turn wins over any error class.
+        assert_eq!(
+            outcome_label(true, Some(ErrorClass::ContextExceeded)),
+            "completed"
+        );
     }
 
     #[test]

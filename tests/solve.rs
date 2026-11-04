@@ -252,3 +252,74 @@ async fn model_mismatch_fails_before_inference_or_trace() {
         .stderr(predicates::str::contains("does not match profile model"));
     assert!(!temp.path().join("events.jsonl").exists());
 }
+
+/// Regression (newt v0.8.6 re-pin): `Config::load` now reports migration
+/// notices through a callback, and gila routes them to stderr via
+/// `report_notice`. A profile that still uses the pre-split `[tenacity]`
+/// table must (1) load with a warning on stderr, (2) keep stdout as valid
+/// JSONL (the contract record is printed there), and (3) stay byte-for-byte
+/// unchanged on disk: an operator-supplied profile outside `~/.newt` is
+/// translated in memory, never rewritten.
+#[tokio::test]
+async fn legacy_profile_notice_goes_to_stderr_and_leaves_stdout_and_file_intact() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "chatcmpl-gila-legacy",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "probe-model",
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": "done" },
+                "finish_reason": "stop"
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let (temp, args) = fixture(&server);
+    let profile = temp.path().join("bench.toml");
+    let legacy = format!(
+        "{}[tenacity]\ndefault = \"standard\"\n",
+        fs::read_to_string(&profile).expect("profile")
+    );
+    fs::write(&profile, &legacy).expect("legacy profile");
+
+    let output = tokio::task::spawn_blocking(move || {
+        let mut process = command(&temp);
+        process.args(&args);
+        let output = process.output().expect("run gila-headless");
+        (temp, output)
+    })
+    .await
+    .expect("Gila child task");
+    let (temp, output) = output;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("uses old psyche labels"),
+        "the legacy-label notice must reach stderr, got:\n{stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("psyche labels"),
+        "diagnostics must not leak into stdout:\n{stdout}"
+    );
+    for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
+        serde_json::from_str::<Value>(line)
+            .unwrap_or_else(|e| panic!("stdout line is not JSON ({e}): {line}"));
+    }
+    assert_eq!(
+        fs::read_to_string(&profile).expect("profile after run"),
+        legacy,
+        "an operator-supplied profile must not be rewritten"
+    );
+    assert!(temp.path().join("events.jsonl").exists());
+}

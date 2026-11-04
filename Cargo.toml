@@ -14,10 +14,9 @@ repository = "https://github.com/Gilamonster-Foundation/gilamonster-agent"
 keywords = ["gilamonster", "agent", "matrix", "coding-agent"]
 
 # Cargo.lock is committed: this crate ships the `gila` and `gila-headless`
-# binaries, so a reproducible resolve is the point. It also holds tinyvec at
-# 1.12.0 — 1.12 builds, 1.13.0 fails on rustc 1.98 with "cannot find macro
-# `vec`" (it arrives transitively via hickory-proto). Re-test before letting
-# `cargo update` move it.
+# binaries, so a reproducible resolve is the point. The regenerated lock for
+# the v0.8.6 airframe resolves tinyvec 1.13.3 (1.13.0 once failed on rustc
+# 1.98 with "cannot find macro `vec`"); CI validates the lock as committed.
 
 [features]
 default = ["langchain", "native-git", "python-bridge"]
@@ -80,8 +79,8 @@ serde = { version = "1", features = ["derive"] }
 # overlaid with the read-only-triage preset, the hotseat mode, and the modulex
 # stdio MCP entry) to a per-session file and points $NEWT_CONFIG at it. newt's
 # `Config` is serde-shaped, so a single `toml::to_string` round-trips through
-# newt's own loader — gila never reimplements config writing. Pinned to the
-# version newt resolves transitively so the two halves agree on the serializer.
+# newt's own loader. newt itself is on toml 1.x; gila stays on 0.8 (agent-bridle
+# is on the same major) — the two never exchange toml types, only the TOML text.
 toml = "0.8"
 # The rich-TUI surface lives HERE, not in newt: newt deliberately keeps its chat
 # a plain scroller (docs/decisions/plain_scroller_tui.md) and exposes transcript
@@ -166,7 +165,11 @@ strip = true
 # NEWT_PATCHES.md`). A `[patch]` does not propagate to git-dep consumers, so
 # gila restates it against the SAME newt rev: cargo finds the vendored packages
 # by name inside the git checkout. Keep these revs in lockstep with the four
-# newt-* deps above.
+# newt-* deps above. newt also patches crossterm to a vendored 0.28.1 with a
+# bounded cursor-position retry (newt #2644) and `position_to` for its
+# `rich-tui` cockpit; gila does not enable `rich-tui` and its own ratatui
+# surfaces use fullscreen viewports, so that patch is deliberately not
+# restated. Revisit if gila ever enables newt's rich UI.
 [patch.crates-io]
 agent-bridle-core = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev = "a7f7d598" }
 agent-bridle-tool-shell = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev = "a7f7d598" }
