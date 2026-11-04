@@ -4,19 +4,6 @@ description: "Start, stop, list, and monitor durable loopback Jupyter servers th
 version: 1.2.0
 license: Apache-2.0
 when_to_use: Need a local interactive Jupyter server, a durable handle that survives the launching CLI process, or authenticated status and stop operations without trusting a bare PID or arbitrary URL.
-caveats:
-  exec:
-    only:
-      - "jupyter"
-  fs_read:
-    only: []
-  fs_write:
-    only: []
-  net:
-    only:
-      - "127.0.0.1:*"
-      - "[::1]:*"
-  max_calls: { at_most: 20 }
 ---
 
 # Jupyter Server Management Skill

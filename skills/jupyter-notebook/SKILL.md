@@ -4,19 +4,6 @@ description: "Execute Jupyter notebooks (.ipynb) using nbconvert, capturing outp
 version: 1.0.0
 license: Apache-2.0
 when_to_use: Need to run a Jupyter notebook end-to-end and capture cell outputs, errors, and execution results. Useful for data science workflows, verifying notebooks run correctly, or executing notebooks as part of an automated pipeline.
-caveats:
-  exec:
-    only:
-      - "jupyter"
-      - "nbconvert"
-  fs_read:
-    only:
-      - "*.ipynb"
-  fs_write:
-    only:
-      - "*.ipynb"
-  net: { only: [] }
-  max_calls: { at_most: 10 }
 ---
 
 # Jupyter Notebook Execution Skill

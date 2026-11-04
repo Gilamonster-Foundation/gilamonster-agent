@@ -5,14 +5,18 @@ name = "gilamonster-agent"
 # 0.1.0 while tags reached v0.3.3 — from here the manifest moves with the tag.
 version = "0.4.0"
 edition = "2021"
-# 1.75 -> 1.88: follows newt-agent's honest-floor bump (its current lock needs
-# 1.88 via darling 0.23 / instability 0.3.12 from the ratatui work).
-rust-version = "1.88"
+# Follows newt-agent's floor: its 0.8.6 workspace declares rust-version 1.91.
+rust-version = "1.91"
 default-run = "gila"
 license = "Apache-2.0"
 description = "The Gilamonster agent matrix — inherits newt-agent's chat + agentic-coding airframe and extends it into a Hermes/Thoon-style multi-agent matrix."
 repository = "https://github.com/Gilamonster-Foundation/gilamonster-agent"
-keywords = ["gilamonster", "agent", "matrix", "ocap", "coding-agent"]
+keywords = ["gilamonster", "agent", "matrix", "coding-agent"]
+
+# Cargo.lock is committed: this crate ships the `gila` and `gila-headless`
+# binaries, so a reproducible resolve is the point. The regenerated lock for
+# the v0.8.6 airframe resolves tinyvec 1.13.3 (1.13.0 once failed on rustc
+# 1.98 with "cannot find macro `vec`"); CI validates the lock as committed.
 
 [features]
 default = ["langchain", "native-git", "python-bridge"]
@@ -35,10 +39,6 @@ name = "gila-headless"
 path = "src/bin/gila-headless.rs"
 
 [[bin]]
-name = "newt-net-guard"
-path = "src/bin/newt-net-guard.rs"
-
-[[bin]]
 name = "gila-jupyter-fixture"
 path = "src/bin/gila-jupyter-fixture.rs"
 required-features = ["jupyter-test-fixture"]
@@ -50,15 +50,16 @@ required-features = ["jupyter-test-fixture"]
 # A binary never needs crates.io, so the git-dep is the correct *permanent*
 # shape, not a stopgap. For LOCAL dev a git-ignored `.cargo/config.toml`
 # overlays these onto the local newt checkout (see .cargo/config.toml.template);
-# CI uses the pinned `rev` below. The rev is newt-agent 0.8.0-line main
-# (2026-08-16); agent-bridle now resolves from crates.io (0.7.14, published) so
-# the old stub-shell `[patch.crates-io]` mirror is gone on both sides.
+# CI uses the pinned `rev` below. The rev is newt-agent a7f7d598 — the v0.8.6
+# version-bump commit on main (2026-11-04). gila has no direct agent-bridle
+# dependency: it is ambient everywhere and newt-core carries its own bridle
+# version (see [patch.crates-io] at the bottom).
 #
 # newt-tui pulls the lean chat + agentic-coding TUI (and, transitively,
 # newt-core / newt-inference / newt-tools / newt-skills / newt-mcp-client).
 # gilamonster reuses it directly and will extend it; "inherits and extends" is a
 # git dependency on a sibling repo, not a fork.
-newt-tui = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev = "a46d001430f4c3b9713fa5254beb9838a0777968" }
+newt-tui = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev = "a7f7d598" }
 # The cowork foundation (newt PR #310 / issue #308): the redaction-gated
 # `ShellObservation` seam, the non-blocking `TurnDriver` (submit_observation /
 # submit / poll / cancel), and `transcript_lines`. `gila follow` consumes these
@@ -66,10 +67,10 @@ newt-tui = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev =
 # built once in newt-core, gila only feeds it. The attenuation-only `Caveats`
 # lattice (re-exported from newt-core) is what clamps follow to a read-only
 # posture. Same pinned rev as the rest of the airframe.
-newt-core = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev = "a46d001430f4c3b9713fa5254beb9838a0777968" }
+newt-core = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev = "a7f7d598" }
 # The object-capability identity layer — signed, attenuation-only AgentKey
 # caveats. Shared with newt so the whole matrix runs under one capability model.
-newt-identity = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev = "a46d001430f4c3b9713fa5254beb9838a0777968" }
+newt-identity = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev = "a7f7d598" }
 
 # --- Local ---------------------------------------------------------------------
 anyhow = "1"
@@ -78,28 +79,20 @@ tokio = { version = "1", features = ["full"] }
 # newt's MCP client — `gila capabilities check` connects to a capability's MCP
 # server over the SAME stdio JSON-RPC transport the inherited TUI uses, so the
 # check exercises the real path, not a re-implementation. Same pinned rev.
-newt-mcp-client = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev = "a46d001430f4c3b9713fa5254beb9838a0777968" }
+newt-mcp-client = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev = "a7f7d598" }
 # `gila capabilities check` builds tool-call arguments and reads MCP results.
 serde_json = "1"
 sha2 = "0.10"
 # The `~/.gila/capabilities.toml` selection manifest deserializes via serde
 # derive (see `src/manifest.rs`); `toml` (below) is the format.
 serde = { version = "1", features = ["derive"] }
-# The object-capability leash. `gila capabilities run` spawns a manifest-confined
-# capability through `agent_bridle_core::spawn_confined_subprocess` (Landlock +
-# env-scrub, agent-bridle#56). Published on crates.io; pinned to the same 0.7.x
-# line newt-core resolves (0.7.15) so the two halves agree on the gate types.
-# `async-trait` is needed only to implement the trivial `Tool` that mints the
-# spawn's `ToolContext` through the gate.
-agent-bridle-core = "0.7"
-async-trait = "0.1"
 # `gila hotseat` serializes the composed session config (the operator's config
 # overlaid with the read-only-triage preset, the hotseat mode, and the modulex
 # stdio MCP entry) to a per-session file and points $NEWT_CONFIG at it. newt's
 # `Config` is serde-shaped, so a single `toml::to_string` round-trips through
-# newt's own loader — gila never reimplements config writing. Pinned to the
-# version newt resolves transitively so the two halves agree on the serializer.
-toml = "1.0"
+# newt's own loader. newt itself is on toml 1.x; gila stays on 0.8 (agent-bridle
+# is on the same major) — the two never exchange toml types, only the TOML text.
+toml = "0.8"
 # The rich-TUI surface lives HERE, not in newt: newt deliberately keeps its chat
 # a plain scroller (docs/decisions/plain_scroller_tui.md) and exposes transcript
 # render DATA only (newt_core::agentic::transcript_lines). gila is the rich-TUI
@@ -148,7 +141,7 @@ serde_yaml = "0.9"
 # boots the interpreter on first GIL acquisition. BUILD-TIME: set
 # PYO3_PYTHON=/Users/shartsock/venv/bin/python so pyo3 embeds the venv
 # interpreter (the default `python3` pyenv shim lacks the gila-plugin-* pkgs).
-pyo3 = { version = "0.28", features = ["auto-initialize"], optional = true }
+pyo3 = { version = "0.22", features = ["auto-initialize"], optional = true }
 # --- Jupyter notebook tooling (ported from newt-agent PR #1730) -------------
 # Gila ports newt-agent's `newt-tools/src/jupyter.rs` into its own tree as
 # `src/gila_jupyter.rs` (the extension point is a separate binary, not a
@@ -204,3 +197,18 @@ which = "7"
 opt-level = 3
 lto = "thin"
 strip = true
+
+# newt-core depends on agent-bridle 0.8.0-rc.6 and, inside its own workspace,
+# swaps in a patched vendored copy (newt-agent `vendor/agent-bridle-core/
+# NEWT_PATCHES.md`). A `[patch]` does not propagate to git-dep consumers, so
+# gila restates it against the SAME newt rev: cargo finds the vendored packages
+# by name inside the git checkout. Keep these revs in lockstep with the four
+# newt-* deps above. newt also patches crossterm to a vendored 0.28.1 with a
+# bounded cursor-position retry (newt #2644) and `position_to` for its
+# `rich-tui` cockpit; gila does not enable `rich-tui` and its own ratatui
+# surfaces use fullscreen viewports, so that patch is deliberately not
+# restated. Revisit if gila ever enables newt's rich UI.
+[patch.crates-io]
+agent-bridle-core = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev = "a7f7d598" }
+agent-bridle-tool-shell = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev = "a7f7d598" }
+agent-bridle-fdguard = { git = "https://github.com/Gilamonster-Foundation/newt-agent", rev = "a7f7d598" }

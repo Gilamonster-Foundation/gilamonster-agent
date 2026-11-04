@@ -2,9 +2,9 @@ name: CI
 
 # HOOK PARITY: the lint/test/coverage jobs are mirrored by .githooks/pre-push.
 # When editing those, update the push hook to match.
-# EXCEPTIONS: the Windows/macOS OS lanes and top-level compatibility-pinned
-# real-Jupyter profiles are
-# CI-only; the hook runs their deterministic fixture coverage locally.
+# EXCEPTIONS (CI-only): the windows/macos-jupyter OS lanes, the
+# compatibility-pinned real-jupyter profiles, headless-portability, and
+# harbor-adapter; the hook runs the deterministic fixture coverage locally.
 #
 # Mirrored from newt-agent's CI (gila inherits newt's gate: fmt + clippy -D
 # warnings + test + an 80% line-coverage floor). gila is a single-package crate
@@ -40,6 +40,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
+        id: py
         with:
           python-version: "3.11"
       - name: provide PYO3_PYTHON target
@@ -52,18 +53,8 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-      - name: agent-bridle stub guard
-        # PIPELINE PARITY: mirrors the pre-push hook. gila replicates newt's
-        # [patch.crates-io] block (newt-tui transitively needs agent-bridle);
-        # the patch MUST stay on the publishable `feat/stub-shell` branch. The
-        # real brush shell (`main`) reintroduces the brush git dep and is a
-        # dev-only override that must never reach a pushed branch.
-        run: |
-          if grep -Eq 'agent-bridle[a-z-]*[[:space:]]*= [{] git = "[^"]*agent-bridle", branch = "main"' Cargo.toml; then
-            echo "::error::[patch.crates-io] points agent-bridle at 'main' (real brush shell) — switch it back to feat/stub-shell before pushing."
-            exit 1
-          fi
-          echo "shell guard OK: agent-bridle patch is on the publishable stub branch."
+        with:
+          key: py${{ steps.py.outputs.python-version }}
       - name: fmt check
         if: always()
         run: cargo fmt --all -- --check
@@ -93,10 +84,12 @@ jobs:
     name: Headless portability (Debian 12)
     runs-on: ${{ vars.GMF_LINUX_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 20
-    container: rust:1.88-bookworm
+    container: rust:1.91-bookworm
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: headless
       - name: build portable evaluator binary
         run: cargo build --release --no-default-features --bin gila-headless
       - name: reject non-portable dynamic dependencies
@@ -114,6 +107,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
+        id: py
         with:
           python-version: "3.11"
       - name: provide PYO3_PYTHON target
@@ -122,9 +116,9 @@ jobs:
           ln -sf "$(command -v python3)" "$GITHUB_WORKSPACE/ci-python/bin/python"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: py${{ steps.py.outputs.python-version }}
       - name: cargo test
-        # --locked is intentionally absent: Cargo.lock is git-ignored for this
-        # binary (the git-dep resolves per build). Lock staleness is irrelevant.
         run: cargo test
       - name: jupyter feature tests
         if: always()
@@ -171,6 +165,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
+        id: py
         with:
           python-version: "3.11"
       - name: provide PYO3_PYTHON target
@@ -182,7 +177,11 @@ jobs:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
         with:
-          key: coverage
+          # The key carries the resolved Python patch version: pyo3's cached
+          # build-script output bakes in the libpython directory, and a
+          # toolcache bump (3.11.17 → 3.11.18) left the link step searching a
+          # directory that no longer existed (PR #90 CI).
+          key: coverage-py${{ steps.py.outputs.python-version }}
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@v2
         with:
@@ -248,6 +247,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
+        id: py
         with:
           python-version: "3.11"
       - name: provide PYO3_PYTHON target
@@ -261,7 +261,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          key: windows
+          key: windows-py${{ steps.py.outputs.python-version }}
       - name: clippy
         run: cargo clippy --all-targets -- -D warnings
       - name: clippy --features jupyter

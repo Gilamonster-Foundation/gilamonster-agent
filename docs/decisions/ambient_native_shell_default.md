@@ -2,8 +2,12 @@
 
 Author: Shawn Hartsock
 Proposed: 2026-08-13
-Accepted: TBD
-Status: Editing
+Accepted: 2026-08-13 (ambient default landed in PR #75)
+Status: Superseded 2026-11-04 — v0.4.0 removes the `--ocap` opt-in, the
+bundled `newt-net-guard`, the agent-bridle confined spawn in `gila cap run`,
+and the confined posture of cowork/follow/hotseat/cockpit. Gila is ambient
+everywhere; Newt is the confined airframe. The launch baseline below (the
+`NEWT_*` switches, the freeze, the flight recorder) still describes what ships.
 Audience: Gilamonster Foundation maintainers and operators
 
 ## Problem / Context

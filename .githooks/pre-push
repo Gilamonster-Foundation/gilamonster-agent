@@ -3,17 +3,18 @@
 # Pre-push hook for gilamonster-agent
 #
 # Runs the same lint + test + coverage gates that CI runs, locally, before any
-# push reaches origin. If this passes, CI should pass too.
+# push reaches origin. If this passes, the mirrored CI jobs should pass too.
 #
 # Install: `just install-hooks` (or `git config core.hooksPath .githooks`)
 #
 # PIPELINE PARITY: this hook mirrors .github/workflows/ci.yml.
-#   - the agent-bridle stub guard below matches the lint job's guard step
 #   - `just check` matches the lint + test jobs, including the isolated
 #     `jupyter` build, strict fixture/headless lint, native-git fixture suite,
 #     cross-process lifecycle, and the no-default solve gate
 #   - `just cov-ci` matches the coverage job (fixture + native-git llvm-cov
 #     instrumentation with the 80% floor)
+#   - CI-only (no local mirror): the windows, macos-jupyter and real-jupyter
+#     platform/compatibility jobs, headless-portability, and harbor-adapter
 # When editing this hook, update the workflow to match, and vice-versa.
 #
 # Do NOT skip this hook with `--no-verify`. If a check fails, fix the issue.
@@ -74,17 +75,6 @@ else
     echo "           Coverage gate skipped locally — CI is the authoritative gate."
     SKIP_COV=1
 fi
-
-# Guard: never push a build patched onto the real brush shell (agent-bridle
-# `main`) — it reintroduces the brush git dep. gila replicates newt's
-# [patch.crates-io] block, so the same guard applies here.
-echo "[pre-push] checking agent-bridle patch is on the publishable stub branch..."
-if grep -Eq 'agent-bridle[a-z-]*[[:space:]]*= [{] git = "[^"]*agent-bridle", branch = "main"' Cargo.toml; then
-    echo "ERROR: [patch.crates-io] points agent-bridle at 'main' (real brush shell)." >&2
-    echo "       Switch it back to feat/stub-shell before pushing." >&2
-    exit 1
-fi
-echo "shell guard OK: agent-bridle patch is on the publishable stub branch."
 
 echo "[pre-push] running just check (including Jupyter isolation + lifecycle gates)..."
 just check
