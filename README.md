@@ -14,40 +14,6 @@ network, and command authority. `--ocap` uses Newt's configured OCAP posture.
 default. See the
 [authority policy](docs/decisions/ambient_native_shell_default.md).
 
-## Terminal-Bench
-
-No `gila` result is published in
-[`gilamonster-bench@44f49eb`](https://github.com/Gilamonster-Foundation/gilamonster-bench/tree/44f49eb504db05ca234b91e1595f175b528a0686).
-The table reproduces the
-[`newt-agent@5ddc969`](https://github.com/Gilamonster-Foundation/newt-agent/blob/5ddc9693aff8d0230d70bfbebdacbedf772eb423/README.md#terminal-bench)
-scoreboard; these are Newt results.
-
-_Best recorded Newt run per model and lane. Measured rows use
-[Terminal-Bench](https://github.com/harbor-framework/terminal-bench) `tb-30` at
-context 65,536. OCAP off/on means unconfined/confined. Metadata is shown per
-lane because the two maxima may come from different releases._
-
-| Model | OCAP off | OCAP on |
-|-------|----------|---------|
-| `deepseek-v4-pro`<br><sub>deepseek</sub> | 56.7% (17/30)<br><sub>v0.8.0 · 2026-08-06</sub> | 50.0% (15/30)<br><sub>v0.8.0 · 2026-08-06</sub> |
-| `nemotron-3-super`<br><sub>nemotron</sub> | 36.7% (11/30)<br><sub>v0.8.0 · 2026-08-05</sub> | 26.7% (8/30)<br><sub>v0.8.0 · 2026-08-05</sub> |
-| `ornith-1.0-35b-q8`<br><sub>ornith</sub> | _pending_ | 36.7% (11/30)<br><sub>v0.7.6 · 2026-07-29</sub> |
-| `qwen3.6_35b`<br><sub>qwen</sub> | 20.0% (6/30)<br><sub>v0.7.5 · 2026-07-28</sub> | 26.7% (8/30)<br><sub>v0.7.6 · 2026-07-29</sub> |
-| `o4-mini`<br><sub>openai</sub> | 13.3% (4/30)<br><sub>v0.8.0 · 2026-08-05</sub> | 16.7% (5/30)<br><sub>v0.8.0 · 2026-08-05</sub> |
-| `qwen3-coder_30b`<br><sub>qwen</sub> | 10.0% (3/30)<br><sub>v0.7.5 · 2026-07-28</sub> | 13.3% (4/30)<br><sub>v0.7.6 · 2026-07-29</sub> |
-| `gpt-oss_120b`<br><sub>openai</sub> | 10.0% (3/30)<br><sub>v0.8.0 · 2026-08-05</sub> | 10.0% (3/30)<br><sub>v0.8.0 · 2026-08-05</sub> |
-| `kimi-linear_48b`<br><sub>kimi</sub> | _pending_ | 10.0% (3/30)<br><sub>v0.7.6 · 2026-07-31</sub> |
-| `nemotron-3-nano_30b`<br><sub>nemotron</sub> | 6.7% (2/30)<br><sub>v0.7.5 · 2026-07-29</sub> | _pending_ |
-| `glm-4.7-flash`<br><sub>glm</sub> | _pending_ | 3.3% (1/30)<br><sub>v0.7.6 · 2026-07-31</sub> |
-| `gpt-4.1-mini`<br><sub>openai</sub> | 0.0% (0/30)<br><sub>v0.8.0 · 2026-08-05</sub> | 3.3% (1/30)<br><sub>v0.8.0 · 2026-08-05</sub> |
-| `kimi-k2.7-code`<br><sub>kimi</sub> | _queued_ | _queued_ |
-| `nemotron-3-ultra`<br><sub>nemotron</sub> | _queued_ | _queued_ |
-| `ornith-1.0-397b-iq1_m`<br><sub>ornith</sub> | _queued_ | _queued_ |
-
-[Score records](https://github.com/Gilamonster-Foundation/newt-agent/blob/5ddc9693aff8d0230d70bfbebdacbedf772eb423/scripts/eval/bench-results.jsonl)
-and [July survey notes](https://github.com/Gilamonster-Foundation/newt-agent/blob/5ddc9693aff8d0230d70bfbebdacbedf772eb423/docs/findings/2026-07-29-dgx-spark-terminal-bench-survey.md)
-are pinned to the same Newt revision.
-
 ## Install
 
 Builds require Rust 1.88+ and Python 3. The Unix recipe also requires
@@ -89,6 +55,19 @@ just install-hooks
 
 For local Newt changes, run `just overlay-on`, edit the generated
 `.cargo/config.toml`, then run `just overlay-off` to restore the pinned build.
+
+## Documents
+
+| Document | Covers |
+|---|---|
+| [ROADMAP.md](ROADMAP.md) | Release line, milestones, links to the cockpit/authority design docs |
+| [CHANGELOG.md](CHANGELOG.md) | What shipped in each version |
+| [docs/decisions/ambient_native_shell_default.md](docs/decisions/ambient_native_shell_default.md) | The ambient-authority policy summarized above |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | How the hybrid Rust/Python command dispatch works |
+| [docs/COMMANDS.md](docs/COMMANDS.md) | Per-command routing: Rust-native, in-process Python, or shell-delegate |
+| [docs/MIGRATION.md](docs/MIGRATION.md) | Switching a Python gilabot daily driver to `gila` |
+| [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | Python gilabot vs Rust `gila` startup speed |
+| [docs/terminal-bench.md](docs/terminal-bench.md) | Newt's Terminal-Bench scoreboard (gila has no published result yet) |
 
 ## License
 
