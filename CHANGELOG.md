@@ -24,18 +24,20 @@ here on; the in-process Python bridge still needs a source build.
   Verified on native Windows: private-ACL ownership, pipe inheritance,
   socket blocking mode, directory replacement and junction handling all
   fixed before merge.
-- **Herder cockpit phase 1** (PR #86): the live resources behind each pane —
-  a `PaneBackend` trait with chat, PTY and failed-pane backends, the
-  runtime that owns the backend map and prefix dispatcher, globally unique
-  pane tokens, and the `~/.gila/agents.toml` palette manifest (parsed, not
-  yet wired in). A chat pane mints its driver only through
-  `authority::driver_config` and construction cannot fail; a PTY spawn
-  error becomes a failed pane instead of taking the cockpit down.
+- **Herder cockpit phase 1** (PR #86): `gila cockpit` panes are live.
+  Chat panes talk to a real newt turn driver and shell panes host a real
+  PTY; keyboard input goes to the focused pane, with a prefix key for
+  cockpit commands. A shell that fails to launch shows its error in its own
+  pane instead of closing the cockpit, and an inference error shows as a
+  failed turn in the chat pane. The `~/.gila/agents.toml` agent palette is
+  read but not yet connected to pane creation.
 - **Installers on every tag** (PR #97, #98): Linux x86_64 (tar.gz, `.deb`,
   `.rpm`, built on Ubuntu 22.04 with a glibc ≤ 2.35 guard), macOS arm64
   (tar.gz, Homebrew formula `gila.rb`, OpenSSL linked statically) and
-  Windows x86_64 (zip, Chocolatey `.nupkg`). Bridge-less builds: Python-
-  backed command groups delegate to a Python `gila` on PATH.
+  Windows x86_64 (zip, Chocolatey `.nupkg`). The prebuilt binaries carry
+  neither the in-process Python bridge nor the `jupyter` feature: Python-
+  backed command groups delegate to a Python `gila` on PATH, and native
+  `gila jupyter` needs a source build (`just install`).
 - **Push hook scope** (PR #96): tag-only, delete-only and docs-only pushes
   skip the local gates (CRAFT-14); CI remains the full gate.
 
