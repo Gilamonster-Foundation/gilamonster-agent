@@ -433,16 +433,17 @@ fn value_after<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
         .map(String::as_str)
 }
 
+/// Winsock (and BSD) accept inherits the listener's nonblocking mode, and
+/// `main`'s listener is nonblocking. SO_RCVTIMEO only bounds blocking reads;
+/// without this reset a delayed first packet yields WouldBlock, which the
+/// fixture would mistake for a complete request.
+fn prepare_accepted_stream(stream: &TcpStream) -> std::io::Result<()> {
+    stream.set_nonblocking(false)?;
+    stream.set_read_timeout(Some(Duration::from_secs(1)))
+}
+
 fn handle_request(stream: &mut TcpStream, token: &str, base_path: &str, mode_path: &Path) -> bool {
-    // Winsock accept inherits the listener's nonblocking mode. SO_RCVTIMEO
-    // only bounds blocking reads; without this reset a delayed first packet
-    // yields WouldBlock, which the fixture mistakes for a complete request.
-    stream
-        .set_nonblocking(false)
-        .expect("blocking accepted fixture stream");
-    stream
-        .set_read_timeout(Some(Duration::from_secs(1)))
-        .expect("bounded fixture read");
+    prepare_accepted_stream(stream).expect("blocking, bounded fixture read");
     let mut request_bytes = Vec::with_capacity(1_024);
     let mut chunk = [0u8; 1_024];
     while request_bytes.len() < 16 * 1024 {
@@ -538,4 +539,48 @@ fn write_response_headers(stream: &mut TcpStream, status: &str, content_length: 
     );
     let _ = stream.write_all(headers.as_bytes());
     let _ = stream.flush();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression (PR #79, Windows): accepted streams kept the listener's
+    /// nonblocking mode, so the fixture answered before request bytes arrived.
+    /// This checks the socket's mode itself, so no schedule can mask it.
+    #[test]
+    fn accepted_streams_are_restored_to_blocking_mode() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback");
+        let _silent_client =
+            TcpStream::connect(listener.local_addr().expect("address")).expect("connect");
+        let (stream, _) = listener.accept().expect("accept");
+        // The mode Winsock and BSD accept inherit from main's listener; set it
+        // explicitly so every platform starts where Windows does.
+        stream
+            .set_nonblocking(true)
+            .expect("inherited nonblocking mode");
+        prepare_accepted_stream(&stream).expect("prepare accepted stream");
+
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsRawFd;
+            let fdinfo = fs::read_to_string(format!("/proc/self/fdinfo/{}", stream.as_raw_fd()))
+                .expect("socket fdinfo");
+            let flags = fdinfo
+                .lines()
+                .find_map(|line| line.strip_prefix("flags:"))
+                .map(|flags| u32::from_str_radix(flags.trim(), 8).expect("octal flags"))
+                .expect("fdinfo flags");
+            assert_eq!(flags & 0o4000, 0, "O_NONBLOCK still set: {flags:o}");
+        }
+        #[cfg(windows)]
+        {
+            // The client never writes. A blocking read ends at SO_RCVTIMEO with
+            // WSAETIMEDOUT; a nonblocking one fails at once with WSAEWOULDBLOCK.
+            let error = (&stream)
+                .read(&mut [0])
+                .expect_err("the silent client sent nothing");
+            assert_eq!(error.kind(), std::io::ErrorKind::TimedOut, "{error}");
+        }
+    }
 }
