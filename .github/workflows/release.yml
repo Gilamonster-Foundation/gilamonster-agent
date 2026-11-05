@@ -356,19 +356,30 @@ jobs:
             echo "::warning::no CHANGELOG section headed '## ${TAG}'; the Release body is left as is"
             rm -f notes.md
           fi
-      - name: Preserve an existing release's state
+      - name: Preserve an existing release's state (draft-aware, fail-closed)
         id: existing
         run: |
           set -euo pipefail
-          if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" > rel.json 2>/dev/null; then
-            echo "draft=$(jq -r .draft rel.json)" >> "$GITHUB_OUTPUT"
-            echo "prerelease=$(jq -r .prerelease rel.json)" >> "$GITHUB_OUTPUT"
-            echo "existing release: draft=$(jq -r .draft rel.json) prerelease=$(jq -r .prerelease rel.json) name=$(jq -r .name rel.json)"
+          # The by-tag endpoint only sees PUBLISHED releases; list every release
+          # (drafts included for a token with contents:write) and match the tag
+          # exactly. Any API, transport or parse failure aborts this job, so a
+          # flaky lookup can never turn into "publish with defaults".
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" > releases.json
+          jq -s '[.[] | if type == "array" then .[] else . end]' releases.json > all.json
+          n=$(jq -r --arg t "$TAG" '[.[] | select(.tag_name == $t)] | length' all.json)
+          if [ "$n" -gt 1 ]; then echo "::error::$n releases carry tag ${TAG}"; exit 1; fi
+          if [ "$n" -eq 1 ]; then
+            draft=$(jq -r --arg t "$TAG" '.[] | select(.tag_name == $t) | .draft' all.json)
+            prerelease=$(jq -r --arg t "$TAG" '.[] | select(.tag_name == $t) | .prerelease' all.json)
+            name=$(jq -r --arg t "$TAG" '.[] | select(.tag_name == $t) | .name' all.json)
+            case "$draft$prerelease" in truetrue|truefalse|falsetrue|falsefalse) ;; *) echo "::error::unexpected flags draft=$draft prerelease=$prerelease"; exit 1 ;; esac
+            echo "existing release '$name': draft=$draft prerelease=$prerelease — preserved"
           else
-            echo "draft=false" >> "$GITHUB_OUTPUT"
-            echo "prerelease=false" >> "$GITHUB_OUTPUT"
-            echo "no release for ${TAG} yet; one will be created"
+            draft=false; prerelease=false
+            echo "no release for ${TAG} yet; one will be created (draft=false prerelease=false)"
           fi
+          echo "draft=$draft" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
       - name: Create or update the release
         uses: softprops/action-gh-release@v2
         with:
