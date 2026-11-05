@@ -85,19 +85,27 @@ fn main() {
         fs::remove_dir_all(instance_dir).expect("fixture remove owned instance directory");
         #[cfg(windows)]
         {
-            // Gila deliberately retains handles to the secret files on
-            // Windows. Removing the tree would leave delete-pending directory
-            // entries until those handles close, so model an attacker using
-            // the operation Windows can perform with delete sharing enabled:
-            // rename the exact tree out of the controlled path, then replace
-            // that path with an unrelated directory.
+            // Move open secrets individually before renaming their directory:
+            // Windows forbids renaming a directory with open descendants even
+            // when those descendants were opened with delete sharing.
             let name = instance_dir
                 .file_name()
-                .expect("fixture instance directory name")
+                .expect("instance name")
                 .to_string_lossy();
+            let staging = instance_dir.with_file_name(format!("{name}.fixture-staging"));
             let retained = instance_dir.with_file_name(format!("{name}.fixture-retained"));
+            fs::create_dir(&staging).expect("secret staging directory");
+            for secret in ["token", "jupyter_config.py"] {
+                fs::rename(instance_dir.join(secret), staging.join(secret))
+                    .expect("stage exact open secret");
+            }
             fs::rename(instance_dir, &retained)
                 .expect("fixture retain exact owned instance directory");
+            for secret in ["token", "jupyter_config.py"] {
+                fs::rename(staging.join(secret), retained.join(secret))
+                    .expect("retain exact open secret");
+            }
+            fs::remove_dir(&staging).expect("remove empty secret staging directory");
         }
         fs::create_dir(instance_dir).expect("fixture create unowned replacement directory");
         fs::write(instance_dir.join("replacement-sentinel"), b"preserve")
@@ -306,15 +314,15 @@ fn write_runtime_metadata(config: &Config, actual_addr: SocketAddr, base_url: &s
             {
                 fs::create_dir(&target).expect("fixture create junction target");
                 let system_root = env::var_os("SYSTEMROOT").expect("fixture SYSTEMROOT");
-                let output = Command::new(PathBuf::from(system_root).join("System32/cmd.exe"))
-                    .arg("/D")
-                    .arg("/C")
-                    .arg("mklink")
-                    .arg("/J")
-                    .arg(&runtime_file)
-                    .arg(&target)
-                    .output()
-                    .expect("fixture launch mklink junction");
+                use std::os::windows::process::CommandExt;
+                let output = Command::new(
+                    PathBuf::from(system_root).join("System32").join("cmd.exe"),
+                )
+                .env("GILA_TEST_JUNCTION", &runtime_file)
+                .env("GILA_TEST_JUNCTION_TARGET", &target)
+                .raw_arg(r#"/D /C mklink /J "%GILA_TEST_JUNCTION%" "%GILA_TEST_JUNCTION_TARGET%""#)
+                .output()
+                .expect("fixture launch mklink junction");
                 assert!(
                     output.status.success(),
                     "fixture create runtime junction failed: stdout={} stderr={}",
@@ -426,7 +434,15 @@ fn value_after<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
 }
 
 fn handle_request(stream: &mut TcpStream, token: &str, base_path: &str, mode_path: &Path) -> bool {
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+    // Winsock accept inherits the listener's nonblocking mode. SO_RCVTIMEO
+    // only bounds blocking reads; without this reset a delayed first packet
+    // yields WouldBlock, which the fixture mistakes for a complete request.
+    stream
+        .set_nonblocking(false)
+        .expect("blocking accepted fixture stream");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .expect("bounded fixture read");
     let mut request_bytes = Vec::with_capacity(1_024);
     let mut chunk = [0u8; 1_024];
     while request_bytes.len() < 16 * 1024 {

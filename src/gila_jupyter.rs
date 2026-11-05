@@ -92,6 +92,33 @@ mod windows_private {
     };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
+    /// Inherited standard handles remain inheritable even when Command
+    /// redirects a child's stdio. Windows would copy those extra handles into
+    /// the persistent server too, keeping the caller's capture pipes open
+    /// after Gila exits. Command duplicates explicitly selected stdio handles
+    /// for inheritance, so clearing the originals preserves intentional stdio.
+    pub fn prevent_ambient_stdio_inheritance() -> io::Result<()> {
+        use windows_sys::Win32::Foundation::{SetHandleInformation, HANDLE_FLAG_INHERIT};
+
+        for raw in [
+            io::stdin().as_raw_handle(),
+            io::stdout().as_raw_handle(),
+            io::stderr().as_raw_handle(),
+        ] {
+            if raw.is_null() || raw == INVALID_HANDLE_VALUE {
+                continue;
+            }
+            // SAFETY: these are borrowed process standard handles. Only the
+            // inheritance flag changes; none is closed or replaced. Do not
+            // restore it after spawn, which would reintroduce the leak on the
+            // next spawn (or race another thread spawning a child).
+            if unsafe { SetHandleInformation(raw, HANDLE_FLAG_INHERIT, 0) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        Ok(())
+    }
+
     struct OwnedHandle(HANDLE);
 
     impl Drop for OwnedHandle {
@@ -2042,6 +2069,9 @@ const PROCESS_CLEANUP_RETRY_DELAY: Duration = Duration::from_millis(20);
 /// (Windows). The selected wrappers do not kill on drop/handle close; callers
 /// must retain the returned ownership and explicitly terminate it when needed.
 pub fn spawn_owned(command: Command) -> io::Result<OwnedChild> {
+    #[cfg(windows)]
+    windows_private::prevent_ambient_stdio_inheritance()?;
+
     let mut command = process_wrap::std::CommandWrap::from(command);
 
     #[cfg(unix)]
@@ -5599,8 +5629,18 @@ mod instance_cleanup_tests {
         let tmp = TempDir::new().expect("temp dir");
         let id = [0x42; 16];
         let artifacts = artifacts(&tmp, id);
+        // Windows cannot rename a directory containing open descendant files,
+        // but it can move those files with delete sharing. Preserve the exact
+        // open secrets and perform the replacement through legal operations.
+        for name in ["token", "jupyter_config.py"] {
+            fs::rename(artifacts.instance_dir.join(name), tmp.path().join(name))
+                .expect("stage open secret");
+        }
         let retained = tmp.path().join("retained-owned-instance");
         fs::rename(&artifacts.instance_dir, &retained).expect("retain owner");
+        for name in ["token", "jupyter_config.py"] {
+            fs::rename(tmp.path().join(name), retained.join(name)).expect("retain open secret");
+        }
         let unrelated = tmp.path().join("unrelated");
         fs::create_dir(&unrelated).expect("unrelated directory");
         fs::write(unrelated.join("sentinel"), b"preserve").expect("sentinel");
@@ -5951,6 +5991,12 @@ const LIST_AGGREGATE_TIMEOUT: Duration = Duration::from_secs(3);
 /// per `list`.
 const LIST_TIMEOUT_ENV: &str = "GILA_JUPYTER_LIST_TIMEOUT_SECS";
 const LIST_PROBE_CONCURRENCY: usize = 8;
+// Winsock retries refused loopback connects before reporting WSAECONNREFUSED
+// (about two seconds on native Windows). Restarting every 250 ms prevents a
+// definitive refusal forever. A timeout remains ambiguous on every platform.
+#[cfg(windows)]
+const LISTENER_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+#[cfg(not(windows))]
 const LISTENER_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 const SHUTDOWN_CONFIRM_TIMEOUT: Duration = Duration::from_secs(5);
 const DUPLICATE_STOP_RACE_TIMEOUT: Duration = Duration::from_millis(750);
@@ -6779,7 +6825,7 @@ fn probe_registered_server(
             return ProbeOutcome::Unreachable("kernels request timed out".to_string());
         }
         Err(error) => {
-            return ProbeOutcome::Unreachable(format!("kernels connection failed: {error}"));
+            return ProbeOutcome::Unreachable(format!("kernels connection failed: {error:#}"));
         }
     };
     if !response.status().is_success() {
@@ -6954,7 +7000,14 @@ enum ListenerState {
 }
 
 fn listener_state(socket_addr: SocketAddr) -> ListenerState {
-    match TcpStream::connect_timeout(&socket_addr, LISTENER_CONNECT_TIMEOUT) {
+    listener_state_with_timeout(socket_addr, LISTENER_CONNECT_TIMEOUT)
+}
+
+fn listener_state_with_timeout(socket_addr: SocketAddr, timeout: Duration) -> ListenerState {
+    if timeout.is_zero() {
+        return ListenerState::Ambiguous("listener probe deadline exceeded".to_string());
+    }
+    match TcpStream::connect_timeout(&socket_addr, timeout.min(LISTENER_CONNECT_TIMEOUT)) {
         Ok(stream) => {
             drop(stream);
             ListenerState::Accepting
@@ -7051,7 +7104,10 @@ fn confirm_listener_refused(socket_addr: SocketAddr) -> Result<()> {
     let deadline = Instant::now() + SHUTDOWN_CONFIRM_TIMEOUT;
     let mut last_ambiguous = None;
     loop {
-        match listener_state(socket_addr) {
+        match listener_state_with_timeout(
+            socket_addr,
+            deadline.saturating_duration_since(Instant::now()),
+        ) {
             ListenerState::Refused => return Ok(()),
             ListenerState::Accepting => {}
             ListenerState::Ambiguous(error) => last_ambiguous = Some(error),
@@ -7073,7 +7129,10 @@ fn listener_becomes_refused(socket_addr: SocketAddr, timeout: Duration) -> Resul
     let deadline = Instant::now() + timeout;
     let mut last_ambiguous = None;
     loop {
-        match listener_state(socket_addr) {
+        match listener_state_with_timeout(
+            socket_addr,
+            deadline.saturating_duration_since(Instant::now()),
+        ) {
             ListenerState::Refused => return Ok(true),
             ListenerState::Accepting => {}
             ListenerState::Ambiguous(error) => last_ambiguous = Some(error),
@@ -7134,7 +7193,10 @@ pub fn stop_server(handle_id: u64) -> Result<bool> {
     match probe_registered_server(&store, &client, &record, LIFECYCLE_HTTP_TIMEOUT) {
         ProbeOutcome::Running(_) => {}
         ProbeOutcome::Unreachable(error) => {
-            if listener_becomes_refused(endpoint.socket_addr, DUPLICATE_STOP_RACE_TIMEOUT)? {
+            if listener_becomes_refused(
+                endpoint.socket_addr,
+                LISTENER_CONNECT_TIMEOUT + DUPLICATE_STOP_RACE_TIMEOUT,
+            )? {
                 return cleanup_then_delete_registered_instance(&store, &record, false);
             }
             anyhow::bail!(
@@ -7161,7 +7223,7 @@ pub fn stop_server(handle_id: u64) -> Result<bool> {
                 );
             }
             anyhow::bail!(
-                "Jupyter shutdown connection failed; registry entry {handle_id} preserved: {error}"
+                "Jupyter shutdown connection failed; registry entry {handle_id} preserved: {error:#}"
             );
         }
     };
@@ -7183,6 +7245,20 @@ pub fn stop_server(handle_id: u64) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn closed_loopback_listener_is_definitely_refused() {
+        let listener =
+            std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback listener");
+        let address = listener.local_addr().expect("listener address");
+        assert!(matches!(listener_state(address), ListenerState::Accepting));
+        drop(listener);
+        let state = listener_state(address);
+        assert!(
+            matches!(state, ListenerState::Refused),
+            "closed listener: {state:?}"
+        );
+    }
 
     #[test]
     fn authentication_inputs_have_an_exact_pre_spawn_size_boundary() {

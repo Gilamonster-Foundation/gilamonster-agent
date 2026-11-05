@@ -118,7 +118,7 @@ impl Harness {
     fn run(&self, args: &[&str]) -> Output {
         self.command()
             .args(args)
-            .output()
+            .bounded_output()
             .expect("run gila subprocess")
     }
 
@@ -139,6 +139,144 @@ impl Harness {
     fn mode_path(&self) -> PathBuf {
         self.work.path().join(".fixture-mode")
     }
+}
+
+trait BoundedCommandOutput {
+    fn bounded_output(&mut self) -> std::io::Result<Output>;
+}
+
+impl BoundedCommandOutput for Command {
+    fn bounded_output(&mut self) -> std::io::Result<Output> {
+        self.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        bounded_output(self.spawn()?, Duration::from_secs(180))
+    }
+}
+
+// Read both streams concurrently so a full pipe cannot prevent process exit.
+// The same deadline covers process exit and EOF: a detached descendant can
+// keep an inherited writer alive after the CLI itself has already exited.
+fn bounded_output(mut child: Child, timeout: Duration) -> std::io::Result<Output> {
+    let deadline = Instant::now() + timeout;
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let stdout = child.stdout.take().expect("piped stdout");
+    let stderr = child.stderr.take().expect("piped stderr");
+    for (is_stdout, mut pipe) in [
+        (true, Box::new(stdout) as Box<dyn Read + Send>),
+        (false, Box::new(stderr) as Box<dyn Read + Send>),
+    ] {
+        let sender = sender.clone();
+        thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let result = pipe.read_to_end(&mut bytes).map(|_| bytes);
+            let _ = sender.send((is_stdout, result));
+        });
+    }
+    drop(sender);
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("gila subprocess did not exit within {timeout:?}"),
+            ));
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    let mut output = Output {
+        status,
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+    };
+    for _ in 0..2 {
+        let (is_stdout, bytes) = receiver
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .map_err(|_| std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("gila exited with {status}, but stdout/stderr did not reach EOF within {timeout:?}; a descendant may have inherited the CLI pipes"),
+            ))?;
+        if is_stdout {
+            output.stdout = bytes?;
+        } else {
+            output.stderr = bytes?;
+        }
+    }
+    Ok(output)
+}
+
+#[test]
+fn fixture_waits_for_request_bytes_after_accept() {
+    let harness = Harness::new();
+    let mut started = start_sequentially(&harness, 1);
+    let (handle, port) = started.entries[0];
+    let record = harness.registry().servers[&handle].clone();
+    let mut stream =
+        TcpStream::connect(("127.0.0.1", port)).expect("connect before sending headers");
+    stream
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .unwrap();
+    let mut first_byte = [0];
+    let early = stream.read(&mut first_byte);
+    assert!(
+        matches!(early, Err(ref error) if matches!(error.kind(),
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock)),
+        "fixture responded before request bytes arrived: {early:?}"
+    );
+    let base = url::Url::parse(&record.url)
+        .unwrap()
+        .path()
+        .trim_end_matches('/')
+        .to_string();
+    write!(stream, "GET {base}/api/kernels HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: token {}\r\nConnection: close\r\n\r\n", record.token).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .expect("read delayed-request response");
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    drop(stream);
+    let stop = harness.run(&["jupyter", "stop", &handle.to_string()]);
+    assert!(stop.status.success(), "stop failed: {}", stderr(&stop));
+    started.mark_stopped(handle);
+}
+
+#[test]
+fn start_closes_cli_pipes_while_server_remains_running() {
+    let harness = Harness::new();
+    let child = harness
+        .command()
+        .args([
+            "jupyter",
+            "start",
+            "--port",
+            "0",
+            "--token",
+            "pipe-regression-token",
+        ])
+        .spawn()
+        .expect("spawn start with captured pipes");
+    let output = bounded_output(child, Duration::from_secs(10));
+    // Clean up through HTTP even on the red path: calling the same CLI capture
+    // that we are diagnosing would deadlock the regression's cleanup too.
+    let registry = harness.registry();
+    assert_eq!(registry.servers.len(), 1);
+    let record = registry.servers.values().next().unwrap();
+    let server_was_running = TcpStream::connect(("127.0.0.1", record.port)).is_ok();
+    let base_path = url::Url::parse(&record.url).unwrap().path().to_string();
+    fixture_shutdown(record.port, &record.token, &base_path);
+    assert_listener_port_reclaimed(record.port);
+    let output = output.expect("CLI pipes must close without waiting for the persistent server");
+    assert!(output.status.success(), "start failed: {}", stderr(&output));
+    assert!(
+        server_was_running,
+        "server must outlive the CLI and its capture pipes"
+    );
 }
 
 struct ChildCleanup(Child);
@@ -1009,7 +1147,7 @@ fn startup_readiness_budget_is_the_injected_bound() {
             "--token",
             "budget-token",
         ])
-        .output()
+        .bounded_output()
         .expect("run never-ready start");
     assert!(!start.status.success(), "never-ready start exited zero");
     assert!(
@@ -1153,6 +1291,21 @@ fn startup_rollback_preserves_an_unowned_instance_directory_replacement() {
         2,
         "Windows retains the renamed exact owner alongside the unrelated replacement"
     );
+    #[cfg(windows)]
+    {
+        let retained = replacements
+            .iter()
+            .find(|path| path.join("token").is_file())
+            .expect("retained exact owner and secrets");
+        for secret in ["token", "jupyter_config.py"] {
+            assert!(
+                fs::read(retained.join(secret))
+                    .expect("retained secret")
+                    .is_empty(),
+                "rollback must erase the exact open {secret} despite directory replacement"
+            );
+        }
+    }
     let replacement = replacements
         .iter()
         .find(|path| path.join("replacement-sentinel").is_file())
@@ -1451,7 +1604,7 @@ fn start_concurrently(harness: &Harness, count: usize) -> StartedServers<'_> {
     let mut entries = Vec::with_capacity(count);
     let mut failures = Vec::new();
     for child in children {
-        match child.wait_with_output() {
+        match bounded_output(child, Duration::from_secs(180)) {
             Ok(output) if output.status.success() => {
                 let handle = parse_handle(&output);
                 let port = harness.registry().servers[&handle].port;
@@ -1494,7 +1647,7 @@ fn registry_lock_wait_is_bounded_by_the_configured_timeout() {
         .command()
         .env("GILA_JUPYTER_REGISTRY_LOCK_TIMEOUT_SECS", "1")
         .args(["jupyter", "list"])
-        .output()
+        .bounded_output()
         .expect("run list behind the held lock");
     lock.unlock().expect("release registry lock");
     assert!(
@@ -1531,7 +1684,7 @@ fn concurrent_starts_have_unique_handles_and_duplicate_stops_are_idempotent() {
     }
     let mut outcomes = Vec::new();
     for child in duplicate_stops {
-        let output = child.wait_with_output().expect("wait duplicate stop");
+        let output = bounded_output(child, Duration::from_secs(180)).expect("wait duplicate stop");
         assert!(
             output.status.success(),
             "duplicate stop failed: {}",
@@ -1601,7 +1754,7 @@ fn concurrent_stop_preserves_a_different_instance_that_wins_the_cas_race() {
         .servers
         .insert(handle, replacement.clone());
     harness.write_registry(&replacement_registry);
-    let stop = stop_child.wait_with_output().expect("wait racing stop");
+    let stop = bounded_output(stop_child, Duration::from_secs(180)).expect("wait racing stop");
     assert!(
         !stop.status.success(),
         "different-instance race exited zero"
@@ -1647,7 +1800,7 @@ fn list_probes_have_a_bounded_aggregate_deadline() {
         .command()
         .env("GILA_JUPYTER_LIST_TIMEOUT_SECS", "1")
         .args(["jupyter", "list"])
-        .output()
+        .bounded_output()
         .expect("run bounded list");
     assert!(
         bounded.status.success(),
@@ -1686,7 +1839,7 @@ fn real_traitlets_parser_demonstrates_deprecated_notebook_ip_alias_bypass() {
             "--ip=127.0.0.1",
             "--show-config-json",
         ])
-        .output()
+        .bounded_output()
     {
         Ok(output) => output,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -1764,7 +1917,7 @@ impl Drop for RealServerCleanup {
             match self
                 .command()
                 .args(["jupyter", "stop", &self.handle.to_string()])
-                .output()
+                .bounded_output()
             {
                 Ok(output) if output.status.success() => {}
                 Ok(output) => eprintln!(
@@ -1812,7 +1965,9 @@ fn real_jupyter_lifecycle_uses_private_runtime_metadata() {
             "--password",
             password,
         ]);
-    let start = start_command.output().expect("run real Jupyter start");
+    let start = start_command
+        .bounded_output()
+        .expect("run real Jupyter start");
     assert!(
         start.status.success(),
         "real start failed: {}",
@@ -1871,7 +2026,7 @@ fn real_jupyter_lifecycle_uses_private_runtime_metadata() {
     let status = cleanup
         .command()
         .args(["jupyter", "status", &handle.to_string()])
-        .output()
+        .bounded_output()
         .expect("real status");
     assert!(
         status.status.success(),
@@ -1882,7 +2037,7 @@ fn real_jupyter_lifecycle_uses_private_runtime_metadata() {
     let stop = cleanup
         .command()
         .args(["jupyter", "stop", &handle.to_string()])
-        .output()
+        .bounded_output()
         .expect("real stop");
     assert!(stop.status.success(), "real stop failed: {}", stderr(&stop));
     cleanup.active = false;
