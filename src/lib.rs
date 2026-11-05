@@ -359,7 +359,8 @@ pub enum Command {
     /// waits for the registry lock while other `gila jupyter` commands hold it
     /// (whole seconds, default 5). GILA_JUPYTER_STARTUP_TIMEOUT_SECS bounds how
     /// long `start` waits for the server to answer its readiness probe (whole
-    /// seconds, default 20).
+    /// seconds, default 20). GILA_JUPYTER_LIST_TIMEOUT_SECS bounds how long
+    /// `list` waits for all servers' probes (whole seconds, default 3).
     #[cfg(feature = "jupyter")]
     Jupyter {
         #[command(subcommand)]
