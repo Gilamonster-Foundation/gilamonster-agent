@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Chocolatey package for gilamonster-agent (Windows).
+
+  The release workflow (.github/workflows/release.yml, job `chocolatey-package`)
+  substitutes @VERSION@ here and in tools/chocolateyinstall.ps1, runs `choco
+  pack`, and attaches the resulting `gila.@VERSION@.nupkg` to the GitHub
+  release. There is no chocolatey.org feed; install the attached package from a
+  local source, e.g. `choco install gila (source .) (version @VERSION@)` with
+  the usual leading double-hyphen on the flags (XML comments cannot contain
+  a double hyphen).
+-->
+<package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
+  <metadata>
+    <id>gila</id>
+    <version>@VERSION@</version>
+    <title>Gilamonster Agent</title>
+    <authors>Shawn Hartsock</authors>
+    <owners>Gilamonster Foundation</owners>
+    <projectUrl>https://github.com/Gilamonster-Foundation/gilamonster-agent</projectUrl>
+    <projectSourceUrl>https://github.com/Gilamonster-Foundation/gilamonster-agent</projectSourceUrl>
+    <packageSourceUrl>https://github.com/Gilamonster-Foundation/gilamonster-agent</packageSourceUrl>
+    <licenseUrl>https://github.com/Gilamonster-Foundation/gilamonster-agent/blob/main/LICENSE</licenseUrl>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <tags>gila gilamonster agent cli coder ai llm local-first</tags>
+    <summary>Ambient agent cockpit built on the newt-agent airframe.</summary>
+    <description>
+Gilamonster agent — the ambient agent cockpit built on the newt-agent airframe.
+
+This package installs the `gila` CLI and the portable `gila-headless`
+evaluator as shimmed executables on your PATH. Bridge-less build: Python-backed
+command groups delegate to a `gila` from the Python gilabot package if one is
+on PATH.
+    </description>
+  </metadata>
+  <files>
+    <file src="tools\**" target="tools" />
+  </files>
+</package>

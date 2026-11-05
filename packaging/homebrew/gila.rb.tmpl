@@ -1,0 +1,44 @@
+# Homebrew formula TEMPLATE for gilamonster-agent.
+#
+# The release workflow (.github/workflows/release.yml, job `homebrew-formula`)
+# renders this into `gila.rb` by substituting the release version and the
+# sha256 of each platform archive, then attaches `gila.rb` to the GitHub
+# release. There is no tap; install with:
+#
+#   brew install --formula https://github.com/Gilamonster-Foundation/gilamonster-agent/releases/download/v@VERSION@/gila.rb
+#
+# Only macOS arm64 and Linux x86_64 are built (the release matrix).
+class Gila < Formula
+  desc "Ambient agent cockpit built on the newt-agent airframe"
+  homepage "https://github.com/Gilamonster-Foundation/gilamonster-agent"
+  version "@VERSION@"
+  license "Apache-2.0"
+
+  on_macos do
+    on_arm do
+      url "https://github.com/Gilamonster-Foundation/gilamonster-agent/releases/download/v@VERSION@/gilamonster-agent-v@VERSION@-macos-arm64.tar.gz"
+      sha256 "@SHA256_MACOS_ARM@"
+    end
+  end
+
+  on_linux do
+    on_intel do
+      url "https://github.com/Gilamonster-Foundation/gilamonster-agent/releases/download/v@VERSION@/gilamonster-agent-v@VERSION@-linux-x86_64.tar.gz"
+      sha256 "@SHA256_LINUX_X64@"
+    end
+  end
+
+  def install
+    # The archive unpacks to a single versioned directory; chdir defensively
+    # in case Homebrew did not enter it.
+    target = Dir["gilamonster-agent-*"].find { |d| File.directory?(d) }
+    Dir.chdir(target) if target
+    bin.install "gila"
+    bin.install "gila-headless"
+  end
+
+  test do
+    system bin/"gila", "--version"
+    system bin/"gila-headless", "--version"
+  end
+end

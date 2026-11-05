@@ -1,0 +1,391 @@
+# Release: prebuilt `gila` + `gila-headless` for Linux x86_64, macOS arm64 and
+# Windows x86_64, plus .deb/.rpm (nfpm), a Homebrew formula and a Chocolatey
+# package, attached to the GitHub Release for the tag.
+#
+# Triggers: a `v*` tag push, or `workflow_dispatch` with `tag` naming an
+# EXISTING version tag (used to attach assets to a Release whose tag predates
+# this workflow, e.g. v0.4.0). The `resolve` job validates the tag's shape,
+# resolves exactly `refs/tags/<tag>` to one commit (a same-named branch cannot
+# influence it), and every later job checks out THAT commit for the source.
+# Packaging recipes (packaging/, this workflow's own revision) are checked out
+# separately from `github.sha`, so a backfill of an old tag builds the old
+# source with the current recipes. On a tag push both revisions coincide.
+#
+# Installer builds are BRIDGE-LESS: `--no-default-features --features
+# langchain,native-git`. The default `python-bridge` feature embeds one exact
+# libpython minor through pyo3, which no prebuilt binary can satisfy across
+# machines; with it off, the bridged command groups shell-delegate to a Python
+# `gila` on PATH (src/delegate.rs). `just install` remains the full in-process
+# build. On macOS, OpenSSL (pulled in by git2's HTTPS support) is linked
+# statically and the binaries are inspected for stray Homebrew dylibs.
+#
+# The Release body is the CHANGELOG section whose heading is exactly
+# `## <tag>` (followed by whitespace or end of line), cut to the next `## `.
+# An existing Release keeps its name, draft and prerelease state; assets with
+# the same name are replaced, so a rerun is idempotent.
+#
+# HOOK PARITY: packaging is CI-only — there is no local mirror of this file.
+# The gates it relies on (fmt, clippy, tests, coverage) are ci.yml and
+# .githooks/pre-push; keep those in step, not this.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing version tag to build and attach assets to (e.g. v0.4.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  RUST_BACKTRACE: 1
+  CARGO_TERM_COLOR: always
+
+jobs:
+  resolve:
+    name: Resolve the release tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.r.outputs.tag }}
+      commit: ${{ steps.r.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - id: r
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            TAG="${INPUT_TAG}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          # Bare version tag only: no branch names, SHAs, or full refs.
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?$'; then
+            echo "::error::'$TAG' is not a version tag (vX.Y.Z[-pre])"; exit 1
+          fi
+          # Exactly refs/tags/<tag>, peeled to the commit it points at.
+          line=$(git ls-remote --tags origin "refs/tags/${TAG}^{}" "refs/tags/${TAG}")
+          COMMIT=$(printf '%s\n' "$line" | awk '$2=="refs/tags/'"$TAG"'^{}" {print $1}')
+          [ -n "$COMMIT" ] || COMMIT=$(printf '%s\n' "$line" | awk '$2=="refs/tags/'"$TAG"'" {print $1}')
+          if [ -z "$COMMIT" ]; then
+            echo "::error::tag '$TAG' does not exist on origin"; exit 1
+          fi
+          if [ "${GITHUB_EVENT_NAME}" != "workflow_dispatch" ] && [ "$COMMIT" != "$GITHUB_SHA" ]; then
+            echo "::error::tag '$TAG' resolves to $COMMIT, not the pushed $GITHUB_SHA"; exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+          echo "releasing $TAG at $COMMIT (recipes from $GITHUB_SHA)"
+
+  build-binaries:
+    name: Build (${{ matrix.label }})
+    needs: [resolve]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            label: linux-x86_64
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+            label: macos-arm64
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            label: windows-x86_64
+    runs-on: ${{ matrix.platform }}
+    env:
+      TAG: ${{ needs.resolve.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.commit }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Static OpenSSL (macOS)
+        if: matrix.platform == 'macos-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew list openssl@3 >/dev/null 2>&1 || brew install openssl@3
+          echo "OPENSSL_DIR=$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
+          echo "OPENSSL_STATIC=1" >> "$GITHUB_ENV"
+
+      - name: Build binaries (bridge-less)
+        run: >
+          cargo build --release --locked --target ${{ matrix.target }}
+          --no-default-features --features langchain,native-git
+          --bin gila --bin gila-headless
+
+      - name: Reject stray dynamic libraries (macOS)
+        if: matrix.platform == 'macos-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for b in gila gila-headless; do
+            otool -L "target/${{ matrix.target }}/release/$b"
+            if otool -L "target/${{ matrix.target }}/release/$b" | grep -Eq '/opt/homebrew|/usr/local/'; then
+              echo "::error::$b links a Homebrew/local dylib; it would not run on a clean Mac"; exit 1
+            fi
+          done
+
+      - name: Show dynamic libraries (Linux)
+        if: matrix.platform == 'ubuntu-latest'
+        shell: bash
+        run: |
+          for b in gila gila-headless; do ldd "target/${{ matrix.target }}/release/$b" || true; done
+
+      - name: Stage release contents (Unix)
+        if: matrix.platform != 'windows-latest'
+        shell: bash
+        run: |
+          STAGE="gilamonster-agent-${TAG}-${{ matrix.label }}"
+          mkdir -p "$STAGE"
+          cp target/${{ matrix.target }}/release/gila "$STAGE/"
+          cp target/${{ matrix.target }}/release/gila-headless "$STAGE/"
+          cp LICENSE README.md "$STAGE/"
+          "$STAGE/gila" --version
+          "$STAGE/gila-headless" --version
+          tar -czf "$STAGE.tar.gz" "$STAGE"
+          echo "ARCHIVE=$STAGE.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Stage release contents (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          $STAGE = "gilamonster-agent-$env:TAG-${{ matrix.label }}"
+          New-Item -ItemType Directory -Path $STAGE
+          Copy-Item "target/${{ matrix.target }}/release/gila.exe" $STAGE/
+          Copy-Item "target/${{ matrix.target }}/release/gila-headless.exe" $STAGE/
+          Copy-Item LICENSE, README.md $STAGE/
+          & "$STAGE/gila.exe" --version
+          Compress-Archive -Path $STAGE -DestinationPath "$STAGE.zip"
+          echo "ARCHIVE=$STAGE.zip" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Upload archive artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gilamonster-agent-${{ matrix.label }}
+          path: ${{ env.ARCHIVE }}
+          if-no-files-found: error
+          retention-days: 30
+
+  linux-packages:
+    name: Linux packages (deb + rpm)
+    needs: [resolve, build-binaries]
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ needs.resolve.outputs.tag }}
+    steps:
+      - name: Source at the tag (LICENSE, README)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.commit }}
+      - name: Packaging recipes at the workflow's revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: recipes
+      - name: Backfill check — old source, current recipes
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ needs.resolve.outputs.commit }}"
+          test -f recipes/packaging/nfpm.yaml
+      - name: Download linux archive
+        uses: actions/download-artifact@v4
+        with:
+          name: gilamonster-agent-linux-x86_64
+          path: incoming/
+      - name: Extract binaries into staging/
+        run: |
+          set -euo pipefail
+          mkdir -p staging
+          tar -xzf "incoming/gilamonster-agent-${TAG}-linux-x86_64.tar.gz" -C incoming/
+          cp "incoming/gilamonster-agent-${TAG}-linux-x86_64/gila" staging/
+          cp "incoming/gilamonster-agent-${TAG}-linux-x86_64/gila-headless" staging/
+          chmod +x staging/gila staging/gila-headless
+      - name: Install nfpm
+        run: |
+          set -euo pipefail
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.41.3
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+      - name: Build .deb and .rpm
+        run: |
+          set -euo pipefail
+          export VERSION="${TAG#v}"
+          mkdir -p dist
+          nfpm pkg --config recipes/packaging/nfpm.yaml --packager deb --target dist/
+          nfpm pkg --config recipes/packaging/nfpm.yaml --packager rpm --target dist/
+          ls -la dist/
+      - name: Upload packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: gilamonster-agent-linux-packages
+          path: dist/*
+          if-no-files-found: error
+
+  homebrew-formula:
+    name: Homebrew formula
+    needs: [resolve, build-binaries]
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ needs.resolve.outputs.tag }}
+    steps:
+      - name: Packaging recipes at the workflow's revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: recipes
+      - name: Download all archives
+        uses: actions/download-artifact@v4
+        with:
+          path: incoming/
+      - name: Render gila.rb
+        run: |
+          set -euo pipefail
+          VER="${TAG#v}"
+          mac="incoming/gilamonster-agent-macos-arm64/gilamonster-agent-${TAG}-macos-arm64.tar.gz"
+          lin="incoming/gilamonster-agent-linux-x86_64/gilamonster-agent-${TAG}-linux-x86_64.tar.gz"
+          sha_mac="$(sha256sum "$mac" | awk '{print $1}')"
+          sha_lin="$(sha256sum "$lin" | awk '{print $1}')"
+          mkdir -p dist
+          sed -e "s/@VERSION@/${VER}/g" \
+              -e "s/@SHA256_MACOS_ARM@/${sha_mac}/g" \
+              -e "s/@SHA256_LINUX_X64@/${sha_lin}/g" \
+              recipes/packaging/homebrew/gila.rb.tmpl > dist/gila.rb
+          cat dist/gila.rb
+      - name: Upload formula
+        uses: actions/upload-artifact@v4
+        with:
+          name: gilamonster-agent-homebrew
+          path: dist/gila.rb
+          if-no-files-found: error
+
+  chocolatey-package:
+    name: Chocolatey package
+    needs: [resolve, build-binaries]
+    continue-on-error: true
+    runs-on: windows-latest
+    env:
+      TAG: ${{ needs.resolve.outputs.tag }}
+    steps:
+      - name: Source at the tag (LICENSE)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.commit }}
+      - name: Packaging recipes at the workflow's revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: recipes
+      - name: Download windows archive
+        uses: actions/download-artifact@v4
+        with:
+          name: gilamonster-agent-windows-x86_64
+          path: incoming
+      - name: Render nuspec + install script and pack
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = $env:TAG
+          $ver = $tag -replace '^v', ''
+          $zip = "incoming/gilamonster-agent-$tag-windows-x86_64.zip"
+          $sha = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          New-Item -ItemType Directory -Force -Path pack/tools | Out-Null
+          (Get-Content recipes/packaging/chocolatey/gila.nuspec) `
+            -replace '@VERSION@', $ver | Set-Content pack/gila.nuspec
+          (Get-Content recipes/packaging/chocolatey/tools/chocolateyinstall.ps1) `
+            -replace '@VERSION@', $ver -replace '@SHA256_WINDOWS_X64@', $sha |
+            Set-Content pack/tools/chocolateyinstall.ps1
+          Copy-Item LICENSE pack/tools/ -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          choco pack pack/gila.nuspec --outputdirectory dist
+          Get-ChildItem dist
+      - name: Upload nupkg
+        uses: actions/upload-artifact@v4
+        with:
+          name: gilamonster-agent-chocolatey
+          path: dist/*.nupkg
+          if-no-files-found: error
+
+  github-release:
+    name: GitHub release (${{ needs.resolve.outputs.tag }})
+    needs: [resolve, build-binaries, linux-packages, homebrew-formula, chocolatey-package]
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ needs.resolve.outputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Source at the tag (CHANGELOG)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.commit }}
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-artifacts/
+      - name: Collect assets
+        run: |
+          mkdir -p dist
+          find all-artifacts -type f \
+            \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.deb' \
+               -o -name '*.rpm' -o -name '*.nupkg' -o -name 'gila.rb' \) \
+            -exec cp {} dist/ \;
+          ls -la dist/
+      - name: Cut the release notes from CHANGELOG.md (exact heading)
+        run: |
+          set -euo pipefail
+          awk -v v="$TAG" 'BEGIN{gsub(/\./,"\\.",v); re="^## " v "([[:space:]]|$)"} $0 ~ re {f=1; print; next} f && /^## / {exit} f' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            echo "::warning::no CHANGELOG section headed '## ${TAG}'; the Release body is left as is"
+            rm -f notes.md
+          fi
+      - name: Preserve an existing release's state (draft-aware, fail-closed)
+        id: existing
+        run: |
+          set -euo pipefail
+          # The by-tag endpoint only sees PUBLISHED releases; list every release
+          # (drafts included for a token with contents:write) and match the tag
+          # exactly. Any API, transport or parse failure aborts this job, so a
+          # flaky lookup can never turn into "publish with defaults".
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" > releases.json
+          jq -s '[.[] | if type == "array" then .[] else . end]' releases.json > all.json
+          n=$(jq -r --arg t "$TAG" '[.[] | select(.tag_name == $t)] | length' all.json)
+          if [ "$n" -gt 1 ]; then echo "::error::$n releases carry tag ${TAG}"; exit 1; fi
+          if [ "$n" -eq 1 ]; then
+            draft=$(jq -r --arg t "$TAG" '.[] | select(.tag_name == $t) | .draft' all.json)
+            prerelease=$(jq -r --arg t "$TAG" '.[] | select(.tag_name == $t) | .prerelease' all.json)
+            name=$(jq -r --arg t "$TAG" '.[] | select(.tag_name == $t) | .name' all.json)
+            case "$draft$prerelease" in truetrue|truefalse|falsetrue|falsefalse) ;; *) echo "::error::unexpected flags draft=$draft prerelease=$prerelease"; exit 1 ;; esac
+            echo "existing release '$name': draft=$draft prerelease=$prerelease — preserved"
+          else
+            draft=false; prerelease=false
+            echo "no release for ${TAG} yet; one will be created (draft=false prerelease=false)"
+          fi
+          echo "draft=$draft" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+      - name: Create or update the release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          target_commitish: ${{ needs.resolve.outputs.commit }}
+          draft: ${{ steps.existing.outputs.draft }}
+          prerelease: ${{ steps.existing.outputs.prerelease }}
+          body_path: ${{ hashFiles('notes.md') != '' && 'notes.md' || '' }}
+          files: dist/*
