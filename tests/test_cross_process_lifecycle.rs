@@ -79,6 +79,10 @@ impl Harness {
             // fixture's runtime file and kernels answer, so this bound only
             // fires if the fixture never answers, not because the box is slow.
             .env("GILA_JUPYTER_STARTUP_TIMEOUT_SECS", "120")
+            // And for `list`: its aggregate deadline only fires here when a
+            // test sets a short bound on purpose, never because a worker was
+            // descheduled.
+            .env("GILA_JUPYTER_LIST_TIMEOUT_SECS", "120")
             .env("PATH", &self.path)
             .env("GILA_AUTH_TOKEN", "must-not-reach-child")
             .env("GILA_OPERATOR_KEY", "must-not-reach-child")
@@ -206,6 +210,25 @@ fn stdout(output: &Output) -> String {
 
 fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+/// `gila jupyter list` output as handle -> (state, error line if any).
+fn list_entries(output: &Output) -> BTreeMap<u64, (String, Option<String>)> {
+    let mut entries = BTreeMap::new();
+    let mut current = None;
+    for line in stdout(output).lines() {
+        if let Some(rest) = line.strip_prefix("  handle ") {
+            let (handle, rest) = rest.split_once(": ").expect("list handle line");
+            let handle: u64 = handle.parse().expect("list handle id");
+            let state = rest.split(" at ").next().expect("list state").to_string();
+            entries.insert(handle, (state, None));
+            current = Some(handle);
+        } else if let Some(error) = line.strip_prefix("    error: ") {
+            let handle = current.expect("error line follows a handle line");
+            entries.get_mut(&handle).expect("listed handle").1 = Some(error.to_string());
+        }
+    }
+    entries
 }
 
 fn parse_handle(output: &Output) -> u64 {
@@ -1335,23 +1358,26 @@ fn oversized_startup_and_parallel_list_bodies_are_rejected_at_the_shared_cap() {
     let list = Harness::new();
     let mut started = start_sequentially(&list, 8);
     fs::write(list.mode_path(), "kernels-oversized").unwrap();
-    let began = Instant::now();
     let output = list.run(&["jupyter", "list"]);
     assert!(
         output.status.success(),
         "oversized list failed: {}",
         stderr(&output)
     );
-    assert!(
-        began.elapsed() < Duration::from_secs(5),
-        "3-second aggregate deadline exceeded reasonable scheduling slack"
-    );
-    let rendered = stdout(&output);
-    assert_eq!(
-        rendered.matches("65536-byte lifecycle body limit").count(),
-        8,
-        "every bounded worker must reject its own oversized body: {rendered}"
-    );
+    // Causal outcome only: every server's own oversized body was rejected at
+    // the cap. Elapsed time is not asserted; the harness's list bound keeps a
+    // descheduled worker from turning this into a deadline result.
+    let entries = list_entries(&output);
+    for (handle, _) in &started.entries {
+        let (state, error) = &entries[handle];
+        assert_eq!(state, "unreachable", "handle {handle}: {entries:?}");
+        assert!(
+            error
+                .as_deref()
+                .is_some_and(|error| error.contains("65536-byte lifecycle body limit")),
+            "handle {handle} was not rejected at the body cap: {entries:?}"
+        );
+    }
 
     fs::remove_file(list.mode_path()).unwrap();
     let handles: Vec<_> = started.entries.iter().map(|(handle, _)| *handle).collect();
@@ -1443,13 +1469,13 @@ fn start_concurrently(harness: &Harness, count: usize) -> StartedServers<'_> {
     servers
 }
 
-/// Regression (lane-79): concurrent starts failed with "timed out after 5
-/// seconds waiting for the registry lock" whenever one holder's commit stalled
-/// in fsync. The wait bound is injectable (`GILA_JUPYTER_REGISTRY_LOCK_TIMEOUT_SECS`,
-/// set to 120 s by the harness), so a start queued behind a holder waits for
-/// that holder instead of failing on the 5-second production default.
+/// Regression (lane-79): the registry-lock wait was a hardcoded 5 s. The
+/// configured bound (`GILA_JUPYTER_REGISTRY_LOCK_TIMEOUT_SECS`) must reach the
+/// wait: with the lock held for the whole command and a 1 s bound, the command
+/// fails naming 1 s, on any schedule. That the wait outlasts the 5 s default
+/// when configured longer is proven in virtual time by the registry unit tests.
 #[test]
-fn start_waits_for_a_held_registry_lock_up_to_the_injected_bound() {
+fn registry_lock_wait_is_bounded_by_the_configured_timeout() {
     let harness = Harness::new();
     let init = harness.run(&["jupyter", "list"]);
     assert!(
@@ -1464,31 +1490,22 @@ fn start_waits_for_a_held_registry_lock_up_to_the_injected_bound() {
         .expect("open registry lock");
     lock.lock().expect("hold registry lock");
 
-    let mut command = harness.command();
-    command.args([
-        "jupyter",
-        "start",
-        "--port",
-        "0",
-        "--token",
-        "lock-wait-token",
-    ]);
-    let child = command.spawn().expect("spawn start behind the held lock");
-    // Hold past the 5-second production default; the start must still be
-    // queued, not failed, when the lock is released.
-    thread::sleep(Duration::from_secs(7));
+    let blocked = harness
+        .command()
+        .env("GILA_JUPYTER_REGISTRY_LOCK_TIMEOUT_SECS", "1")
+        .args(["jupyter", "list"])
+        .output()
+        .expect("run list behind the held lock");
     lock.unlock().expect("release registry lock");
-
-    let output = child.wait_with_output().expect("wait for queued start");
     assert!(
-        output.status.success(),
-        "start queued behind a held lock failed: {}",
-        stderr(&output)
+        !blocked.status.success(),
+        "list behind a held lock exited zero"
     );
-    let handle = parse_handle(&output);
-    let stop = harness.run(&["jupyter", "stop", &handle.to_string()]);
-    assert!(stop.status.success(), "stop failed: {}", stderr(&stop));
-    assert_no_instance_trees(&harness);
+    assert!(
+        stderr(&blocked).contains("timed out after 1s waiting for the registry lock"),
+        "the configured bound did not reach the lock wait: {}",
+        stderr(&blocked)
+    );
 }
 
 #[test]
@@ -1604,21 +1621,50 @@ fn concurrent_stop_preserves_a_different_instance_that_wins_the_cas_race() {
     assert!(harness.registry().servers.is_empty());
 }
 
+/// The list deadline is an injected bound (`GILA_JUPYTER_LIST_TIMEOUT_SECS`).
+/// Both halves assert outcomes, not elapsed time: under the harness's 120 s
+/// bound every delayed server answers; under a 1 s bound none can, because the
+/// fixture holds each kernels answer for 1.2 s, so a slower host only makes the
+/// deadline more certain. Regression (lane-79): the 3 s deadline was
+/// hardcoded, and the test asserted the whole CLI finished in under 5 s.
 #[test]
 fn list_probes_have_a_bounded_aggregate_deadline() {
     let harness = Harness::new();
     let mut started = start_sequentially(&harness, 4);
     fs::write(harness.mode_path(), "kernels-delay").unwrap();
-    let began = Instant::now();
+
     let list = harness.run(&["jupyter", "list"]);
-    let elapsed = began.elapsed();
     assert!(list.status.success(), "list failed: {}", stderr(&list));
-    assert!(
-        elapsed < Duration::from_secs(5),
-        "3-second list deadline exceeded reasonable scheduling slack: {elapsed:?}"
-    );
+    let entries = list_entries(&list);
     for (handle, _) in &started.entries {
-        assert!(stdout(&list).contains(&format!("handle {handle}: running")));
+        assert_eq!(
+            entries[handle].0, "running",
+            "delayed handle {handle} inside the bound: {entries:?}"
+        );
+    }
+
+    let bounded = harness
+        .command()
+        .env("GILA_JUPYTER_LIST_TIMEOUT_SECS", "1")
+        .args(["jupyter", "list"])
+        .output()
+        .expect("run bounded list");
+    assert!(
+        bounded.status.success(),
+        "bounded list failed: {}",
+        stderr(&bounded)
+    );
+    let entries = list_entries(&bounded);
+    for (handle, _) in &started.entries {
+        let (state, error) = &entries[handle];
+        assert_eq!(state, "unreachable", "handle {handle}: {entries:?}");
+        assert!(
+            matches!(
+                error.as_deref(),
+                Some("kernels request timed out" | "list aggregate deadline exceeded")
+            ),
+            "handle {handle} must miss the 1 s list bound: {entries:?}"
+        );
     }
 
     fs::remove_file(harness.mode_path()).unwrap();
