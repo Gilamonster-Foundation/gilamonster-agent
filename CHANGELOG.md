@@ -8,6 +8,42 @@ their historical tags **`v0.1.0`** ≡ v0.3.1 and **`v0.2.0`** ≡ v0.3.2). As o
 airframe (see the v0.4.0 entry and ROADMAP's renumbering note); the unshipped
 cockpit milestones continue inside 0.4.x.
 
+## v0.5.0 — Jupyter, the cockpit runtime, and installers (2026-11-05)
+
+Requires Rust 1.91 to build. Prebuilt installers for every release from
+here on; the in-process Python bridge still needs a source build.
+
+- **`gila jupyter`** (PR #79, fixes #82): an opt-in command family behind
+  the non-default `jupyter` feature — `execute`, `start`, `status`, `list`,
+  `stop`, `bootstrap` — with a Pixi-first launcher, a durable server
+  registry under `GILA_HOME`, process-group lifecycle, and authenticated
+  readiness and shutdown. The bound endpoint is learned from protected
+  runtime metadata, never from the requested port. Three waits are tunable
+  with unchanged defaults (`GILA_JUPYTER_REGISTRY_LOCK_TIMEOUT_SECS`,
+  `GILA_JUPYTER_STARTUP_TIMEOUT_SECS`, `GILA_JUPYTER_LIST_TIMEOUT_SECS`).
+  Runs on Windows: the private registry permissions, server lifecycle,
+  directory replacement and junction handling were verified on native
+  Windows.
+- **Herder cockpit phase 1** (PR #86): `gila cockpit` panes are live.
+  Chat panes talk to a real newt turn driver and shell panes host a real
+  PTY; keyboard input goes to the focused pane, with a prefix key for
+  cockpit commands. A shell that fails to launch shows its error in its own
+  pane instead of closing the cockpit, and an inference error shows as a
+  failed turn in the chat pane. The agent palette is not available yet;
+  `~/.gila/agents.toml` does not affect pane creation.
+- **Installers on every tag** (PR #97, #98): Linux x86_64 (tar.gz, `.deb`,
+  `.rpm`, built on Ubuntu 22.04 with a glibc ≤ 2.35 guard), macOS arm64
+  (tar.gz, Homebrew formula `gila.rb`, OpenSSL linked statically) and
+  Windows x86_64 (zip, Chocolatey `.nupkg`). The prebuilt binaries carry
+  neither the in-process Python bridge nor the `jupyter` feature: Python-
+  backed command groups delegate to a Python `gila` on PATH, and native
+  `gila jupyter` needs a source build with the feature enabled:
+  `cargo install --path . --features jupyter` (set `PYO3_PYTHON` as the
+  README describes).
+- **Push hook scope** (PR #96): for contributors, tag-only, delete-only and
+  docs-only pushes skip the local build-and-test gates; CI remains the full
+  gate on every pull request.
+
 ## v0.4.0 — Ambient airframe on newt v0.8.6 (2026-11-04)
 
 The first release where `Cargo.toml`, the tag, and `gila --version` agree —
