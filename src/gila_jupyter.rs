@@ -5630,17 +5630,20 @@ mod instance_cleanup_tests {
         let id = [0x42; 16];
         let artifacts = artifacts(&tmp, id);
         // Windows cannot rename a directory containing open descendant files,
-        // but it can move those files with delete sharing. Preserve the exact
-        // open secrets and perform the replacement through legal operations.
-        for name in ["token", "jupyter_config.py"] {
-            fs::rename(artifacts.instance_dir.join(name), tmp.path().join(name))
-                .expect("stage open secret");
-        }
+        // but it can move those files with delete sharing. Every move of the
+        // owner directory while `artifacts` holds the secrets open goes through
+        // here, so the exact open secrets travel with it legally.
+        let move_owner = |from: &Path, to: &Path| {
+            for name in ["token", "jupyter_config.py"] {
+                fs::rename(from.join(name), tmp.path().join(name)).expect("stage open secret");
+            }
+            fs::rename(from, to).expect("move owner directory");
+            for name in ["token", "jupyter_config.py"] {
+                fs::rename(tmp.path().join(name), to.join(name)).expect("move open secret back");
+            }
+        };
         let retained = tmp.path().join("retained-owned-instance");
-        fs::rename(&artifacts.instance_dir, &retained).expect("retain owner");
-        for name in ["token", "jupyter_config.py"] {
-            fs::rename(tmp.path().join(name), retained.join(name)).expect("retain open secret");
-        }
+        move_owner(&artifacts.instance_dir, &retained);
         let unrelated = tmp.path().join("unrelated");
         fs::create_dir(&unrelated).expect("unrelated directory");
         fs::write(unrelated.join("sentinel"), b"preserve").expect("sentinel");
@@ -5649,8 +5652,9 @@ mod instance_cleanup_tests {
             Err(error) if error.raw_os_error() == Some(1314) => {
                 // Creating symlinks requires Developer Mode or
                 // SeCreateSymbolicLinkPrivilege. The separate direct-handle
-                // test below still covers safe exact-object deletion.
-                fs::rename(&retained, &artifacts.instance_dir).expect("restore owner");
+                // test below still covers safe exact-object deletion. The
+                // secrets are still open here, so restore like the first move.
+                move_owner(&retained, &artifacts.instance_dir);
                 artifacts.cleanup_all().expect("owned cleanup");
                 return;
             }
