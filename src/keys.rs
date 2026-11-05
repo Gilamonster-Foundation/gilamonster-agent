@@ -405,6 +405,17 @@ impl KeyDispatcher {
         self.current == TableId::Prefix
     }
 
+    /// Drop any armed prefix sequence, returning to the Root table.
+    ///
+    /// The cockpit loop calls this when it absorbs a key the dispatcher has no
+    /// vocabulary for (Delete/Insert/BackTab) while a prefix is armed: such a
+    /// key is a post-prefix miss, so it must reach nothing *and* must not leave
+    /// the sequence armed — otherwise the operator's next ordinary keystroke
+    /// would still resolve in the Prefix table and fire an unintended action.
+    pub fn disarm(&mut self) {
+        self.reset();
+    }
+
     /// Re-configure the prefix: the old prefix's `send-prefix` binding moves
     /// to the new combo (derived-at-build, per the design).
     pub fn set_prefix(&mut self, prefix: KeyCombo) {
@@ -841,6 +852,27 @@ mod tests {
             d.on_key(KeyCombo::char('c'), now),
             KeyDisposition::Consumed(Action::NewChatTab)
         );
+    }
+
+    /// `disarm` drops an armed sequence so the *next* key resolves in Root.
+    ///
+    /// The cockpit loop needs this for keys the dispatcher has no vocabulary
+    /// for (Delete/Insert/BackTab): those must be absorbed after a prefix
+    /// rather than forwarded to a PTY, and leaving the prefix armed afterwards
+    /// would make the operator's following keystroke fire a stray action.
+    #[test]
+    fn disarm_drops_an_armed_prefix_sequence() {
+        let mut d = KeyDispatcher::default();
+        let now = t0();
+        assert_eq!(d.on_key(KeyCombo::ctrl('b'), now), KeyDisposition::Pending);
+        assert!(d.is_armed());
+        d.disarm();
+        assert!(!d.is_armed(), "the sequence is dropped");
+        // `x` would be ClosePane from the Prefix table; from Root it forwards.
+        assert_eq!(d.on_key(KeyCombo::char('x'), now), KeyDisposition::Forward);
+        // Disarming when nothing is armed is a harmless no-op.
+        d.disarm();
+        assert!(!d.is_armed());
     }
 
     #[test]
