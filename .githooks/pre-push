@@ -8,6 +8,8 @@
 # Install: `just install-hooks` (or `git config core.hooksPath .githooks`)
 #
 # PIPELINE PARITY: this hook mirrors .github/workflows/ci.yml.
+#   - .github/workflows/release.yml (packaging on a tag) is CI-only: nothing
+#     to mirror here beyond the gates below.
 #   - SCOPE (Craft Register CRAFT-14 v3.0): the hook is a pre-flight on the
 #     changed scope, CI is the full gate. A push with no code change — tag
 #     updates, deletions, or only top-level *.md / docs/**/*.md files —

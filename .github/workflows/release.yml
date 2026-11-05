@@ -1,0 +1,267 @@
+# Release: prebuilt `gila` + `gila-headless` for Linux x86_64, macOS arm64 and
+# Windows x86_64, plus .deb/.rpm (nfpm), a Homebrew formula and a Chocolatey
+# package, attached to the GitHub Release for the tag.
+#
+# Triggers: a `v*` tag push, or `workflow_dispatch` with `tag` set to an
+# EXISTING tag (used to attach assets to a Release whose tag predates this
+# workflow, e.g. v0.4.0). The Release body is the CHANGELOG section for the
+# version, cut at its `## vX.Y.Z` heading; an existing Release keeps its other
+# fields and gets the same body re-applied.
+#
+# Installer builds are BRIDGE-LESS: `--no-default-features --features
+# langchain,native-git`. The default `python-bridge` feature embeds one exact
+# libpython minor through pyo3, which no prebuilt binary can satisfy across
+# machines; with it off, the bridged command groups shell-delegate to a Python
+# `gila` on PATH (src/delegate.rs). `just install` remains the full in-process
+# build. Mirrors newt-agent's release.yml (2026-11-04).
+#
+# HOOK PARITY: packaging is CI-only — there is no local mirror of this file.
+# The gates it relies on (fmt, clippy, tests, coverage) are ci.yml and
+# .githooks/pre-push; keep those in step, not this.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and attach assets to (e.g. v0.4.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  RUST_BACKTRACE: 1
+  CARGO_TERM_COLOR: always
+  # The tag being released, for both trigger shapes.
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  build-binaries:
+    name: Build (${{ matrix.label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            label: linux-x86_64
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+            label: macos-arm64
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            label: windows-x86_64
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Build binaries (bridge-less)
+        run: >
+          cargo build --release --locked --target ${{ matrix.target }}
+          --no-default-features --features langchain,native-git
+          --bin gila --bin gila-headless
+
+      - name: Stage release contents (Unix)
+        if: matrix.platform != 'windows-latest'
+        shell: bash
+        run: |
+          STAGE="gilamonster-agent-${TAG}-${{ matrix.label }}"
+          mkdir -p "$STAGE"
+          cp target/${{ matrix.target }}/release/gila "$STAGE/"
+          cp target/${{ matrix.target }}/release/gila-headless "$STAGE/"
+          cp LICENSE README.md "$STAGE/"
+          tar -czf "$STAGE.tar.gz" "$STAGE"
+          echo "ARCHIVE=$STAGE.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Stage release contents (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          $STAGE = "gilamonster-agent-$env:TAG-${{ matrix.label }}"
+          New-Item -ItemType Directory -Path $STAGE
+          Copy-Item "target/${{ matrix.target }}/release/gila.exe" $STAGE/
+          Copy-Item "target/${{ matrix.target }}/release/gila-headless.exe" $STAGE/
+          Copy-Item LICENSE, README.md $STAGE/
+          Compress-Archive -Path $STAGE -DestinationPath "$STAGE.zip"
+          echo "ARCHIVE=$STAGE.zip" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Smoke the staged binaries
+        if: matrix.platform != 'windows-latest'
+        shell: bash
+        run: |
+          "gilamonster-agent-${TAG}-${{ matrix.label }}/gila" --version
+          "gilamonster-agent-${TAG}-${{ matrix.label }}/gila-headless" --version
+
+      - name: Upload archive artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gilamonster-agent-${{ matrix.label }}
+          path: ${{ env.ARCHIVE }}
+          if-no-files-found: error
+          retention-days: 30
+
+  linux-packages:
+    name: Linux packages (deb + rpm)
+    needs: [build-binaries]
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Download linux archive
+        uses: actions/download-artifact@v4
+        with:
+          name: gilamonster-agent-linux-x86_64
+          path: incoming/
+      - name: Extract binaries into staging/
+        run: |
+          set -euo pipefail
+          mkdir -p staging
+          tar -xzf "incoming/gilamonster-agent-${TAG}-linux-x86_64.tar.gz" -C incoming/
+          cp "incoming/gilamonster-agent-${TAG}-linux-x86_64/gila" staging/
+          cp "incoming/gilamonster-agent-${TAG}-linux-x86_64/gila-headless" staging/
+          chmod +x staging/gila staging/gila-headless
+      - name: Install nfpm
+        run: |
+          set -euo pipefail
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.41.3
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+      - name: Build .deb and .rpm
+        run: |
+          set -euo pipefail
+          export VERSION="${TAG#v}"
+          mkdir -p dist
+          nfpm pkg --config packaging/nfpm.yaml --packager deb --target dist/
+          nfpm pkg --config packaging/nfpm.yaml --packager rpm --target dist/
+          ls -la dist/
+      - name: Upload packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: gilamonster-agent-linux-packages
+          path: dist/*
+          if-no-files-found: error
+
+  homebrew-formula:
+    name: Homebrew formula
+    needs: [build-binaries]
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Download all archives
+        uses: actions/download-artifact@v4
+        with:
+          path: incoming/
+      - name: Render gila.rb
+        run: |
+          set -euo pipefail
+          VER="${TAG#v}"
+          mac="incoming/gilamonster-agent-macos-arm64/gilamonster-agent-${TAG}-macos-arm64.tar.gz"
+          lin="incoming/gilamonster-agent-linux-x86_64/gilamonster-agent-${TAG}-linux-x86_64.tar.gz"
+          sha_mac="$(sha256sum "$mac" | awk '{print $1}')"
+          sha_lin="$(sha256sum "$lin" | awk '{print $1}')"
+          mkdir -p dist
+          sed -e "s/@VERSION@/${VER}/g" \
+              -e "s/@SHA256_MACOS_ARM@/${sha_mac}/g" \
+              -e "s/@SHA256_LINUX_X64@/${sha_lin}/g" \
+              packaging/homebrew/gila.rb.tmpl > dist/gila.rb
+          cat dist/gila.rb
+      - name: Upload formula
+        uses: actions/upload-artifact@v4
+        with:
+          name: gilamonster-agent-homebrew
+          path: dist/gila.rb
+          if-no-files-found: error
+
+  chocolatey-package:
+    name: Chocolatey package
+    needs: [build-binaries]
+    continue-on-error: true
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Download windows archive
+        uses: actions/download-artifact@v4
+        with:
+          name: gilamonster-agent-windows-x86_64
+          path: incoming
+      - name: Render nuspec + install script and pack
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = $env:TAG
+          $ver = $tag -replace '^v', ''
+          $zip = "incoming/gilamonster-agent-$tag-windows-x86_64.zip"
+          $sha = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          New-Item -ItemType Directory -Force -Path pack/tools | Out-Null
+          (Get-Content packaging/chocolatey/gila.nuspec) `
+            -replace '@VERSION@', $ver | Set-Content pack/gila.nuspec
+          (Get-Content packaging/chocolatey/tools/chocolateyinstall.ps1) `
+            -replace '@VERSION@', $ver -replace '@SHA256_WINDOWS_X64@', $sha |
+            Set-Content pack/tools/chocolateyinstall.ps1
+          Copy-Item LICENSE pack/tools/ -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          choco pack pack/gila.nuspec --outputdirectory dist
+          Get-ChildItem dist
+      - name: Upload nupkg
+        uses: actions/upload-artifact@v4
+        with:
+          name: gilamonster-agent-chocolatey
+          path: dist/*.nupkg
+          if-no-files-found: error
+
+  github-release:
+    name: GitHub release (${{ inputs.tag || github.ref_name }})
+    needs: [build-binaries, linux-packages, homebrew-formula, chocolatey-package]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-artifacts/
+      - name: Collect assets
+        run: |
+          mkdir -p dist
+          find all-artifacts -type f \
+            \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.deb' \
+               -o -name '*.rpm' -o -name '*.nupkg' -o -name 'gila.rb' \) \
+            -exec cp {} dist/ \;
+          ls -la dist/
+      - name: Cut the release notes from CHANGELOG.md
+        run: |
+          set -euo pipefail
+          VER="${TAG#v}"
+          awk -v h="## v${VER}" 'index($0, h)==1 {f=1} f && /^## / && index($0, h)!=1 {exit} f' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            echo "::warning::no CHANGELOG section for ${TAG}; the Release body is left as is"
+            rm -f notes.md
+          fi
+      - name: Create or update the release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          draft: false
+          prerelease: false
+          body_path: ${{ hashFiles('notes.md') != '' && 'notes.md' || '' }}
+          files: dist/*

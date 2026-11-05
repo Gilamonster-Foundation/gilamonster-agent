@@ -29,6 +29,16 @@ gila --help
 
 On Windows, set `PYO3_PYTHON` to `python.exe` and run `cargo install --path .`.
 
+### Prebuilt binaries
+
+Each release on the [Releases page](https://github.com/Gilamonster-Foundation/gilamonster-agent/releases)
+carries `gila` and `gila-headless` for Linux x86_64 (tar.gz, .deb, .rpm),
+macOS arm64 (tar.gz, Homebrew formula `gila.rb`) and Windows x86_64 (zip,
+Chocolatey `.nupkg`). These are **bridge-less** builds: the in-process Python
+bridge cannot be prebuilt portably, so the Python-backed command groups
+delegate to a `gila` from the Python gilabot package if one is on PATH. Build
+from source with `just install` for the in-process bridge.
+
 ## Use
 
 ```bash
