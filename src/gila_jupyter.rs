@@ -389,6 +389,8 @@ mod windows_private {
         verify_current_user_owner(file, user.sid, user.owner_sid)?;
         let acl = private_acl(user.sid, is_directory)?;
         // SAFETY: handle is open with WRITE_DAC/WRITE_OWNER; ACL and SID remain alive through the call.
+        // Argument order is (owner, group, dacl, sacl): OWNER_SECURITY_INFORMATION
+        // with a NULL owner is ERROR_INVALID_PARAMETER, and no group is set.
         let status = unsafe {
             SetSecurityInfo(
                 handle(file),
@@ -396,8 +398,8 @@ mod windows_private {
                 DACL_SECURITY_INFORMATION
                     | PROTECTED_DACL_SECURITY_INFORMATION
                     | OWNER_SECURITY_INFORMATION,
-                null_mut(),
                 user.sid,
+                null_mut(),
                 acl.0.cast(),
                 null(),
             )
@@ -5672,14 +5674,15 @@ mod instance_cleanup_tests {
         let target = tmp.path().join("junction-target");
         let junction = tmp.path().join("junction");
         fs::create_dir(&target).expect("junction target");
+        use std::os::windows::process::CommandExt;
         let system_root = std::env::var_os("SYSTEMROOT").expect("SYSTEMROOT");
-        let output = Command::new(PathBuf::from(system_root).join("System32/cmd.exe"))
-            .arg("/D")
-            .arg("/C")
-            .arg("mklink")
-            .arg("/J")
-            .arg(&junction)
-            .arg(&target)
+        // cmd.exe re-parses its whole command line, argv[0] included, so the
+        // program path uses only backslashes, and the two paths reach mklink
+        // through quoted environment expansions instead of argv quoting.
+        let output = Command::new(PathBuf::from(system_root).join("System32").join("cmd.exe"))
+            .env("GILA_TEST_JUNCTION", &junction)
+            .env("GILA_TEST_JUNCTION_TARGET", &target)
+            .raw_arg(r#"/D /C mklink /J "%GILA_TEST_JUNCTION%" "%GILA_TEST_JUNCTION_TARGET%""#)
             .output()
             .expect("launch mklink junction");
         assert!(
