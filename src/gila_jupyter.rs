@@ -4705,8 +4705,16 @@ fn quarantine_verified_unix_path(
     description: &str,
 ) -> Result<PathBuf> {
     let quarantine = random_cleanup_quarantine(path)?;
-    fs::rename(path, &quarantine)
-        .with_context(|| format!("failed to quarantine {description} before cleanup"))?;
+    if let Err(error) = fs::rename(path, &quarantine) {
+        // A concurrent cleaner may have moved `path` first. Never leave the
+        // container just created for this attempt behind.
+        let error = anyhow::Error::new(error)
+            .context(format!("failed to quarantine {description} before cleanup"));
+        return match remove_empty_quarantine_container(&quarantine) {
+            Ok(()) => Err(error),
+            Err(cleanup) => Err(anyhow::anyhow!("{error:#}; {cleanup:#}")),
+        };
+    }
 
     let verification = (|| -> Result<()> {
         let metadata = fs::symlink_metadata(&quarantine)
@@ -5474,6 +5482,45 @@ mod instance_cleanup_tests {
         assert!(error.to_string().contains("changed before quarantine"));
         assert_eq!(fs::read(original.join("sentinel")).unwrap(), b"preserve");
         assert!(retained.is_dir());
+    }
+
+    /// Regression (lane-79): two duplicate stops race to clean one instance.
+    /// The loser can pass validation, then lose the rename to the winner; it
+    /// used to return without removing the `.gila-cleanup-*` container it had
+    /// just created, and the stop still reported success, leaving that empty
+    /// directory under `instances/`. Reproduced deterministically here: the
+    /// winner has already moved the path away before the loser's rename.
+    #[cfg(unix)]
+    #[test]
+    fn unix_quarantine_that_loses_the_rename_leaves_no_container_behind() {
+        let tmp = TempDir::new().expect("temp dir");
+        let original = tmp.path().join("owned-directory");
+        fs::create_dir(&original).expect("owned directory");
+        let expected = fs::File::open(&original).expect("retain owned identity");
+        let expected_identity = owned_file_identity(&expected).expect("capture owned identity");
+        fs::rename(&original, tmp.path().join("moved-by-the-winner"))
+            .expect("concurrent winner moves the directory");
+
+        let error = quarantine_verified_unix_path(
+            &original,
+            &expected_identity,
+            true,
+            "owned directory fixture",
+        )
+        .expect_err("a vanished path cannot be quarantined");
+        assert!(
+            error.to_string().contains("failed to quarantine"),
+            "{error:#}"
+        );
+        let leftovers: Vec<_> = fs::read_dir(tmp.path())
+            .expect("list parent")
+            .map(|entry| entry.expect("entry").file_name())
+            .filter(|name| name.to_string_lossy().starts_with(".gila-cleanup-"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "leaked quarantine containers: {leftovers:?}"
+        );
     }
 
     #[cfg(unix)]
