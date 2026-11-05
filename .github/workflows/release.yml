@@ -17,7 +17,9 @@
 # machines; with it off, the bridged command groups shell-delegate to a Python
 # `gila` on PATH (src/delegate.rs). `just install` remains the full in-process
 # build. On macOS, OpenSSL (pulled in by git2's HTTPS support) is linked
-# statically and the binaries are inspected for stray Homebrew dylibs.
+# statically and the binaries are inspected for stray Homebrew dylibs. On
+# Linux the build runs on the oldest supported Ubuntu image and a guard
+# rejects any glibc symbol version above 2.35; libssl.so.3 stays dynamic.
 #
 # The Release body is the CHANGELOG section whose heading is exactly
 # `## <tag>` (followed by whitespace or end of line), cut to the next `## `.
@@ -93,7 +95,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: ubuntu-latest
+          # Oldest supported Ubuntu image on purpose: the binary's glibc floor is
+          # the build host's (ubuntu-latest is 26.04 / glibc 2.43, which left
+          # the v0.4.0 archive unable to start on 24.04). 22.04 = glibc 2.35.
+          - platform: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             label: linux-x86_64
           - platform: macos-latest
@@ -143,11 +148,19 @@ jobs:
             fi
           done
 
-      - name: Show dynamic libraries (Linux)
-        if: matrix.platform == 'ubuntu-latest'
+      - name: Reject a glibc floor above 2.35 (Linux)
+        if: matrix.platform == 'ubuntu-22.04'
         shell: bash
         run: |
-          for b in gila gila-headless; do ldd "target/${{ matrix.target }}/release/$b" || true; done
+          set -euo pipefail
+          for b in gila gila-headless; do
+            ldd "target/${{ matrix.target }}/release/$b" || true
+            top=$(objdump -T "target/${{ matrix.target }}/release/$b" | grep -oE 'GLIBC_[0-9.]+' | sed 's/GLIBC_//' | sort -V | tail -1)
+            echo "$b: highest glibc symbol version $top"
+            if [ "$(printf '%s\n2.35\n' "$top" | sort -V | tail -1)" != "2.35" ]; then
+              echo "::error::$b needs glibc $top (> 2.35); it would not start on Ubuntu 24.04 / Debian 12"; exit 1
+            fi
+          done
 
       - name: Stage release contents (Unix)
         if: matrix.platform != 'windows-latest'
