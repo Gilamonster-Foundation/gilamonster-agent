@@ -133,9 +133,10 @@ mod tests {
 
     #[test]
     fn validate_rejects_missing_parent_dir() {
+        let tmp = tempfile::TempDir::new().expect("isolated document root");
         let cfg = ScrybeConfig {
             server_uri: "http://localhost:3001".into(),
-            doc_path: PathBuf::from("/nonexistent/scrybe.md"),
+            doc_path: tmp.path().join("missing").join("scrybe.md"),
         };
         assert!(validate_config(&cfg).is_err());
     }

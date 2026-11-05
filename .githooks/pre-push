@@ -3,7 +3,7 @@
 # Pre-push hook for gilamonster-agent
 #
 # Runs the same lint + test + coverage gates that CI runs, locally, before any
-# push reaches origin. If this passes, CI should pass too.
+# push reaches origin. If this passes, the mirrored CI jobs should pass too.
 #
 # Install: `just install-hooks` (or `git config core.hooksPath .githooks`)
 #
@@ -15,8 +15,13 @@
 #     updates, deletions, or only top-level *.md / docs/**/*.md files —
 #     skips the gates below with a notice; CI's configured branch-push and
 #     PR jobs still run.
-#   - `just check` matches the lint + test jobs (fmt + clippy + cargo test)
-#   - `just cov-ci` matches the coverage job (cargo llvm-cov with the 80% floor)
+#   - `just check` matches the lint + test jobs, including the isolated
+#     `jupyter` build, strict fixture/headless lint, native-git fixture suite,
+#     cross-process lifecycle, and the no-default solve gate
+#   - `just cov-ci` matches the coverage job (fixture + native-git llvm-cov
+#     instrumentation with the 80% floor)
+#   - CI-only (no local mirror): the windows, macos-jupyter and real-jupyter
+#     platform/compatibility jobs, headless-portability, and harbor-adapter
 # When editing this hook, update the workflow to match, and vice-versa.
 #
 # Do NOT skip this hook with `--no-verify`. If a check fails, fix the issue.
@@ -128,7 +133,7 @@ else
     SKIP_COV=1
 fi
 
-echo "[pre-push] running just check..."
+echo "[pre-push] running just check (including Jupyter isolation + lifecycle gates)..."
 just check
 
 if [ "$SKIP_COV" -eq 0 ]; then

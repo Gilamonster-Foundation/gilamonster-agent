@@ -51,10 +51,14 @@ pub mod gila_ideas;
 pub mod gila_init;
 #[cfg(feature = "native-git")]
 pub mod gila_insights;
+#[cfg(feature = "jupyter")]
+pub mod gila_jupyter;
 #[cfg(feature = "native-git")]
 pub mod gila_log;
 pub mod gila_logs;
 pub mod gila_meeting;
+#[cfg(feature = "jupyter")]
+pub mod gila_pixi;
 pub mod gila_projects;
 pub mod gila_prompt;
 pub mod gila_status;
@@ -350,6 +354,22 @@ pub enum Command {
     Worktree {
         #[command(subcommand)]
         cmd: WorktreeCmd,
+    },
+    /// Jupyter notebook tooling (compiled with `--features jupyter`): execute
+    /// notebooks and own the notebook-server lifecycle. Compiled out by
+    /// default; `gila jupyter` is only present when the `jupyter` feature is on.
+    ///
+    /// Environment: GILA_HOME holds the server registry (default ~/.gila).
+    /// GILA_JUPYTER_REGISTRY_LOCK_TIMEOUT_SECS bounds how long one command
+    /// waits for the registry lock while other `gila jupyter` commands hold it
+    /// (whole seconds, default 5). GILA_JUPYTER_STARTUP_TIMEOUT_SECS bounds how
+    /// long `start` waits for the server to answer its readiness probe (whole
+    /// seconds, default 20). GILA_JUPYTER_LIST_TIMEOUT_SECS bounds how long
+    /// `list` waits for all servers' probes (whole seconds, default 3).
+    #[cfg(feature = "jupyter")]
+    Jupyter {
+        #[command(subcommand)]
+        action: gila_jupyter::JupyterCmd,
     },
     /// Shell-delegate fallback: any subcommand gilamonster-agent has not yet
     /// ported from gilabot (Python). clap's `external_subcommand` catch-all
