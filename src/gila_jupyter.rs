@@ -1110,18 +1110,27 @@ fn open_lock_file(lock_path: &Path) -> Result<fs::File> {
 
 fn acquire_exclusive_lock(lock_file: &fs::File, timeout: Duration) -> Result<()> {
     let started = std::time::Instant::now();
+    acquire_exclusive_lock_with(lock_file, timeout, || started.elapsed(), thread::sleep)
+}
+
+/// The registry-lock wait policy with its clock (`elapsed`) and its pause
+/// injected: real time in production, virtual time in tests, so the bound it
+/// honours can be proven without spending host time.
+fn acquire_exclusive_lock_with(
+    lock_file: &fs::File,
+    timeout: Duration,
+    elapsed: impl Fn() -> Duration,
+    mut pause: impl FnMut(Duration),
+) -> Result<()> {
     loop {
         match fs4::FileExt::try_lock(lock_file) {
             Ok(()) => return Ok(()),
-            Err(fs4::TryLockError::WouldBlock) if started.elapsed() < timeout => {
-                let remaining = timeout.saturating_sub(started.elapsed());
-                thread::sleep(REGISTRY_LOCK_RETRY.min(remaining));
-            }
             Err(fs4::TryLockError::WouldBlock) => {
-                anyhow::bail!(
-                    "timed out after {} seconds waiting for the registry lock",
-                    timeout.as_secs()
-                )
+                let waited = elapsed();
+                if waited >= timeout {
+                    anyhow::bail!("timed out after {timeout:?} waiting for the registry lock");
+                }
+                pause(REGISTRY_LOCK_RETRY.min(timeout - waited));
             }
             Err(fs4::TryLockError::Error(error)) => {
                 return Err(error).context("failed to acquire registry lock")
@@ -1779,6 +1788,74 @@ mod registry_tests {
                 "error must name the variable for {bad:?}: {error}"
             );
         }
+    }
+
+    /// Regression (lane-79): the lock wait was a hardcoded 5 s, so a holder
+    /// whose commit stalled in fsync failed every queued start. Virtual time:
+    /// the holder releases at 6 s; a 7 s configured wait must still be
+    /// waiting then and acquire, on any schedule and in no host time.
+    #[test]
+    fn lock_wait_outlasts_the_default_when_configured_longer() {
+        let tmp = TempDir::new().expect("temp dir");
+        let store = test_store(&tmp);
+        let mut holder = Some(store.begin_transaction().expect("holder"));
+        let waiter = open_lock_file(&store.lock_path()).expect("waiter handle");
+        let release_at = REGISTRY_LOCK_TIMEOUT + Duration::from_secs(1);
+        let now = std::cell::Cell::new(Duration::ZERO);
+
+        acquire_exclusive_lock_with(
+            &waiter,
+            release_at + Duration::from_secs(1),
+            || now.get(),
+            |pause| {
+                now.set(now.get() + pause);
+                if now.get() >= release_at {
+                    holder.take();
+                }
+            },
+        )
+        .expect("a 7 s wait must outlast a holder released at 6 s");
+        assert!(holder.is_none(), "acquired before the holder released");
+        assert!(now.get() >= release_at);
+    }
+
+    /// The same policy gives up exactly at its configured bound (virtual time)
+    /// and names that bound.
+    #[test]
+    fn lock_wait_gives_up_at_its_configured_bound() {
+        let tmp = TempDir::new().expect("temp dir");
+        let store = test_store(&tmp);
+        let _holder = store.begin_transaction().expect("holder");
+        let waiter = open_lock_file(&store.lock_path()).expect("waiter handle");
+        let bound = Duration::from_secs(2);
+        let now = std::cell::Cell::new(Duration::ZERO);
+
+        let error = acquire_exclusive_lock_with(
+            &waiter,
+            bound,
+            || now.get(),
+            |pause| now.set(now.get() + pause),
+        )
+        .expect_err("a never-released holder must exhaust the bound");
+        assert_eq!(now.get(), bound, "gave up before or after its bound");
+        assert!(error.to_string().contains("timed out after 2s"), "{error}");
+    }
+
+    /// `begin_transaction` must hand the store's configured bound to the wait,
+    /// not the 5 s default: with 1 ms configured it fails naming 1 ms.
+    #[test]
+    fn begin_transaction_uses_the_configured_lock_bound() {
+        let tmp = TempDir::new().expect("temp dir");
+        let store = test_store(&tmp);
+        let _holder = store.begin_transaction().expect("holder");
+        let bounded = RegistryStore {
+            lock_timeout: Duration::from_millis(1),
+            ..test_store(&tmp)
+        };
+        let error = bounded
+            .begin_transaction()
+            .expect_err("held lock must time out");
+        assert!(error.to_string().contains("timed out after 1ms"), "{error}");
     }
 
     #[test]
@@ -5817,7 +5894,12 @@ const LIFECYCLE_HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 /// payload. Eight list workers can therefore retain at most 512 KiB of response
 /// bodies in aggregate before decoding.
 const LIFECYCLE_JSON_BODY_CAP: usize = 64 * 1024;
+/// Default aggregate deadline for one `list`: probes still outstanding when it
+/// passes are reported as having missed it.
 const LIST_AGGREGATE_TIMEOUT: Duration = Duration::from_secs(3);
+/// Operator override for [`LIST_AGGREGATE_TIMEOUT`], in whole seconds, read once
+/// per `list`.
+const LIST_TIMEOUT_ENV: &str = "GILA_JUPYTER_LIST_TIMEOUT_SECS";
 const LIST_PROBE_CONCURRENCY: usize = 8;
 const LISTENER_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 const SHUTDOWN_CONFIRM_TIMEOUT: Duration = Duration::from_secs(5);
@@ -6759,6 +6841,11 @@ pub fn list_servers() -> Result<JupyterListResult> {
     use std::collections::VecDeque;
     use std::sync::Mutex;
 
+    let list_timeout = seconds_override(
+        LIST_TIMEOUT_ENV,
+        std::env::var_os(LIST_TIMEOUT_ENV).as_deref(),
+        LIST_AGGREGATE_TIMEOUT,
+    )?;
     let store = RegistryStore::new()?;
     let records: Vec<_> = store.snapshot()?.servers.into_values().collect();
     if records.is_empty() {
@@ -6767,7 +6854,7 @@ pub fn list_servers() -> Result<JupyterListResult> {
         });
     }
     let record_count = records.len();
-    let deadline = Instant::now() + LIST_AGGREGATE_TIMEOUT;
+    let deadline = Instant::now() + list_timeout;
     // Move the only per-probe credential copy into the queue. Workers convert
     // decoded kernel vectors into small summaries immediately, so at most the
     // active worker count can retain bounded lifecycle bodies.
@@ -6778,7 +6865,7 @@ pub fn list_servers() -> Result<JupyterListResult> {
     thread::scope(|scope| {
         for _ in 0..worker_count {
             scope.spawn(|| {
-                let Ok(client) = lifecycle_http_client(LIST_AGGREGATE_TIMEOUT) else {
+                let Ok(client) = lifecycle_http_client(list_timeout) else {
                     return;
                 };
                 loop {
