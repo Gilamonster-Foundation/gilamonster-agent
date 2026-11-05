@@ -12,7 +12,7 @@ pub const GIT_COMMIT: &str = env!("GILA_BUILD_GIT_COMMIT");
 /// Git commit plus a `-dirty` suffix when tracked or untracked changes existed.
 pub const SOURCE_ID: &str = env!("GILA_BUILD_SOURCE_ID");
 
-/// User-visible build identity, for example `0.4.0 (6eb3e02644ab)`.
+/// User-visible build identity, for example `0.5.0 (6eb3e02644ab)`.
 pub const VERSION_WITH_COMMIT: &str = env!("GILA_BUILD_VERSION");
 
 #[cfg(test)]

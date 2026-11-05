@@ -1,9 +1,9 @@
 [package]
 name = "gilamonster-agent"
-# 0.4.0 opens the post-re-pin line (newt 0.8.0 airframe; ROADMAP.md
-# "Renumbering note, 2026-07-29"). Ends the drift where the manifest sat at
-# 0.1.0 while tags reached v0.3.3 — from here the manifest moves with the tag.
-version = "0.4.0"
+# The manifest moves with the tag (since v0.4.0). 0.5.0 = the jupyter
+# surface (#79), herder cockpit phase 1 (#86) and the installer pipeline
+# (#96–#98) on the v0.8.6 airframe.
+version = "0.5.0"
 edition = "2021"
 # Follows newt-agent's floor: its 0.8.6 workspace declares rust-version 1.91.
 rust-version = "1.91"

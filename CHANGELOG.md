@@ -8,6 +8,37 @@ their historical tags **`v0.1.0`** ≡ v0.3.1 and **`v0.2.0`** ≡ v0.3.2). As o
 airframe (see the v0.4.0 entry and ROADMAP's renumbering note); the unshipped
 cockpit milestones continue inside 0.4.x.
 
+## v0.5.0 — Jupyter, the cockpit runtime, and installers (2026-11-05)
+
+Requires Rust 1.91 to build. Prebuilt installers for every release from
+here on; the in-process Python bridge still needs a source build.
+
+- **`gila jupyter`** (PR #79, fixes #82): an opt-in command family behind
+  the non-default `jupyter` feature — `execute`, `start`, `status`, `list`,
+  `stop`, `bootstrap` — with a Pixi-first launcher, a durable server
+  registry under `GILA_HOME`, process-group lifecycle, and authenticated
+  readiness and shutdown. The bound endpoint is learned from protected
+  runtime metadata, never from the requested port. Three waits are tunable
+  with unchanged defaults (`GILA_JUPYTER_REGISTRY_LOCK_TIMEOUT_SECS`,
+  `GILA_JUPYTER_STARTUP_TIMEOUT_SECS`, `GILA_JUPYTER_LIST_TIMEOUT_SECS`).
+  Verified on native Windows: private-ACL ownership, pipe inheritance,
+  socket blocking mode, directory replacement and junction handling all
+  fixed before merge.
+- **Herder cockpit phase 1** (PR #86): the live resources behind each pane —
+  a `PaneBackend` trait with chat, PTY and failed-pane backends, the
+  runtime that owns the backend map and prefix dispatcher, globally unique
+  pane tokens, and the `~/.gila/agents.toml` palette manifest (parsed, not
+  yet wired in). A chat pane mints its driver only through
+  `authority::driver_config` and construction cannot fail; a PTY spawn
+  error becomes a failed pane instead of taking the cockpit down.
+- **Installers on every tag** (PR #97, #98): Linux x86_64 (tar.gz, `.deb`,
+  `.rpm`, built on Ubuntu 22.04 with a glibc ≤ 2.35 guard), macOS arm64
+  (tar.gz, Homebrew formula `gila.rb`, OpenSSL linked statically) and
+  Windows x86_64 (zip, Chocolatey `.nupkg`). Bridge-less builds: Python-
+  backed command groups delegate to a Python `gila` on PATH.
+- **Push hook scope** (PR #96): tag-only, delete-only and docs-only pushes
+  skip the local gates (CRAFT-14); CI remains the full gate.
+
 ## v0.4.0 — Ambient airframe on newt v0.8.6 (2026-11-04)
 
 The first release where `Cargo.toml`, the tag, and `gila --version` agree —
